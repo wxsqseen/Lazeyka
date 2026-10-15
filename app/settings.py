@@ -37,6 +37,7 @@ def defaults() -> dict:
             "check": True,
             "last_check": None,
             "skipped": {},
+            "app_backup": None,   # путь к прежнему exe после самообновления (для отката)
         },
         "vpn": {
             "compat": True,               # обход не трогает интерфейсы и серверы VPN
@@ -81,6 +82,7 @@ def defaults() -> dict:
 # Ключи, где допустим null вместо значения умолчания другого типа.
 _NULLABLE = {
     ("updates", "last_check"),
+    ("updates", "app_backup"),
     ("zapret", "pack"),
     ("zapret", "ipset_mode"),
     ("zapret", "fakes", "discord"),

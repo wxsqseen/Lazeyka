@@ -6,3 +6,4 @@ __version__ = "1.1.0"
 
 ZAPRET_REPO = "Flowseal/zapret-discord-youtube"
 TGWS_REPO = "Flowseal/tg-ws-proxy"
+APP_REPO = "wxsqseen/Lazeyka"   # релизы самой Лазейки: отсюда берётся самообновление

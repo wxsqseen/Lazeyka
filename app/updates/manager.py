@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import threading
 import time
@@ -15,7 +16,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Callable
 
-from .. import TGWS_REPO, ZAPRET_REPO, paths
+from .. import APP_REPO, TGWS_REPO, ZAPRET_REPO, __version__, paths
 from ..tgproxy import loader
 from ..zapret import pack
 from . import github
@@ -46,7 +47,7 @@ class UpdateManager:
         self.lock = threading.RLock()
         self.checking = False
         self.error: str | None = None
-        self.releases: dict[str, dict | None] = {"zapret": None, "tgws": None}
+        self.releases: dict[str, dict | None] = {"zapret": None, "tgws": None, "app": None}
         self.progress: dict[str, dict] = {k: {"state": "idle", "progress": None, "message": None}
                                           for k in self.releases}
         self._busy: set[str] = set()
@@ -62,15 +63,18 @@ class UpdateManager:
 
     def _check(self, quiet: bool) -> None:
         errors = []
-        for key, repo in (("zapret", ZAPRET_REPO), ("tgws", TGWS_REPO)):
+        sources = [("zapret", ZAPRET_REPO), ("tgws", TGWS_REPO), ("app", APP_REPO)]
+        for key, repo in sources:
             try:
                 self.releases[key] = github.latest_release(repo)
             except github.GitHubError as exc:
-                errors.append(str(exc))
+                # У самой Лазейки релиза может ещё не быть — это не ошибка проверки.
+                if not (key == "app" and "404" in str(exc)):
+                    errors.append(str(exc))
                 log.warning("Проверка обновлений %s: %s", repo, exc)
         with self.lock:
             self.checking = False
-            self.error = errors[0] if errors and len(errors) == 2 else None
+            self.error = errors[0] if errors and len(errors) == len(sources) else None
         self.settings.update(lambda d: d["updates"].__setitem__("last_check", time.time()))
         count = self.available_count()
         log.info("Проверка обновлений завершена: доступно %d", count)
@@ -80,6 +84,8 @@ class UpdateManager:
     def current_version(self, key: str) -> str | None:
         if key == "zapret":
             return self.zapret.pack.version if self.zapret.pack else None
+        if key == "app":
+            return __version__
         return self.tg.core.version if self.tg.core else None
 
     def is_available(self, key: str) -> bool:
@@ -110,10 +116,12 @@ class UpdateManager:
         self.progress[key] = {"state": state, "progress": progress, "message": message}
 
     def install_async(self, key: str) -> None:
-        self._start_job(key, self._install_zapret if key == "zapret" else self._install_tgws)
+        jobs = {"zapret": self._install_zapret, "tgws": self._install_tgws, "app": self._install_app}
+        self._start_job(key, jobs.get(key))
 
     def rollback_async(self, key: str) -> None:
-        self._start_job(key, self._rollback_zapret if key == "zapret" else self._rollback_tgws)
+        jobs = {"zapret": self._rollback_zapret, "tgws": self._rollback_tgws, "app": self._rollback_app}
+        self._start_job(key, jobs.get(key))
 
     def _start_job(self, key: str, job: Callable[[], str]) -> None:
         if key not in self.releases:
@@ -239,6 +247,69 @@ class UpdateManager:
         self.tg.switch_core(core)
         return f"Возвращено встроенное ядро Telegram-прокси {core.version}"
 
+    # ------------------------------------------------------------ сама Лазейка
+    #
+    # Скачиваем новый Lazeyka.exe из релиза, сверяем по SHA-256, опубликованному GitHub, и
+    # заменяем работающий файл. Работающий exe на Windows удалить нельзя, но можно переименовать:
+    # отодвигаем его в <имя>.old, ставим новый на его место, прежний удаляется при следующем
+    # запуске. Всё по кнопке и с проверкой целостности; подпись сертификатом — отдельный шаг.
+
+    EXE_ASSET = "lazeyka.exe"
+
+    def _install_app(self) -> str:
+        if not paths.IS_FROZEN:
+            raise UpdateError("Самообновление работает только в собранном приложении")
+        rel = self.releases.get("app")
+        if not rel:
+            raise UpdateError("Сначала проверьте обновления")
+        asset = next((a for a in rel["assets"] if a["name"].lower() == self.EXE_ASSET), None)
+        if asset is None:
+            raise UpdateError("В релизе нет файла Lazeyka.exe")
+        if not asset["sha256"]:
+            raise UpdateError("У файла нет опубликованной контрольной суммы — обновляться небезопасно")
+        current = Path(paths.exe_path())
+        staging = current.with_name(f".{current.stem}-{uuid.uuid4().hex[:8]}.new")
+        self._set("app", "downloading", 0.0, f"Скачиваю {asset['name']}")
+        try:
+            github.download(asset["url"], staging, asset["sha256"],
+                            progress=lambda done, total: self._set(
+                                "app", "downloading", (done / total) if total else None,
+                                f"Скачано {done // 1024} КБ"))
+            # download() уже сверил SHA-256 с опубликованным GitHub и удалил бы файл при несовпадении.
+            self._set("app", "verifying", None, "Контрольная сумма совпала")
+            self._set("app", "installing", None, "Заменяю программу")
+            backup = current.with_name(current.name + ".old")
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError:
+                backup = current.with_name(f"{current.name}-{uuid.uuid4().hex[:6]}.old")
+            os.replace(current, backup)        # сдвигаем работающий exe (Windows это разрешает)
+            try:
+                os.replace(staging, current)   # ставим новый на его место
+            except OSError:
+                os.replace(backup, current)    # не удалось — вернём прежний и выйдем
+                raise
+        finally:
+            staging.unlink(missing_ok=True)
+        self.settings.update(lambda d: d["updates"].__setitem__("app_backup", str(backup)))
+        return (f"Лазейка обновлена до {rel['version']}. Перезапустите её, чтобы запустить новую версию "
+                "(прежнюю можно вернуть кнопкой «Откатить»).")
+
+    def _rollback_app(self) -> str:
+        backup = self.settings.get("updates", "app_backup")
+        if not backup or not Path(backup).is_file():
+            raise UpdateError("Нет сохранённой прежней версии")
+        current = Path(paths.exe_path())
+        aside = current.with_name(f".{current.stem}-{uuid.uuid4().hex[:8]}.old")
+        os.replace(current, aside)             # сдвигаем нынешний (запущенный) exe
+        try:
+            os.replace(backup, current)        # возвращаем прежний
+        except OSError:
+            os.replace(aside, current)
+            raise
+        self.settings.update(lambda d: d["updates"].__setitem__("app_backup", None))
+        return "Вернулась прежняя версия Лазейки. Перезапустите её."
+
     # ------------------------------------------------------------ состояние для UI
 
     def snapshot(self) -> dict:
@@ -250,6 +321,9 @@ class UpdateManager:
                                     and pack.version_key(p.version) < pack.version_key(self.zapret.pack.version)]) > 0),
             "tgws": ("Ядро Telegram-прокси", TGWS_REPO,
                      lambda: bool(self.tg.core and self.tg.core.origin == "updated")),
+            "app": ("Лазейка", APP_REPO,
+                    lambda: bool(self.settings.get("updates", "app_backup")
+                                 and Path(self.settings.get("updates", "app_backup")).is_file())),
         }
         for key, (title, repo, can_rollback) in meta.items():
             rel = self.releases.get(key)
@@ -291,3 +365,20 @@ def remove_component_dirs(keep: set[str]) -> None:
     for child in root.iterdir():
         if child.is_dir() and child.name not in keep:
             shutil.rmtree(child, ignore_errors=True)
+
+
+def cleanup_stale_exe(keep: str | None = None) -> None:
+    """При запуске убирает временные копии exe от самообновления: недокачанные .new и осиротевшие
+    .old рядом с exe. Резервную копию для отката (keep — путь из настроек) НЕ трогаем."""
+    if not paths.IS_FROZEN:
+        return
+    exe = Path(paths.exe_path())
+    keep_norm = os.path.normcase(os.path.abspath(keep)) if keep else None
+    try:
+        for sibling in exe.parent.glob(f".{exe.stem}-*.new"):
+            sibling.unlink(missing_ok=True)
+        for sibling in exe.parent.glob(f"{exe.name}*.old"):
+            if os.path.normcase(str(sibling.resolve())) != keep_norm:
+                sibling.unlink(missing_ok=True)
+    except OSError as err:
+        log.debug("Старые копии exe не убраны: %r", err)

@@ -43,6 +43,11 @@
       doing: 'Сверяем git-хеши файлов ядра с тегом…',
       done: 'Git-хеши файлов ядра совпали с тегом.',
     },
+    app: {
+      idle: 'Новый Lazeyka.exe сверяется по SHA-256 из релиза на GitHub; после установки нужен перезапуск.',
+      doing: 'Сверяем SHA-256 файла с релизом на GitHub…',
+      done: 'Контрольная сумма совпала. Перезапустите Лазейку, чтобы запустить новую версию.',
+    },
   };
   const VERIFY_FALLBACK = {
     idle: 'Перед установкой файлы сверяются по контрольным суммам из релиза.',
@@ -327,7 +332,7 @@
     const allok = ui.slot((data) => (data ? ui.callout({
       tone: 'ok',
       title: 'Всё актуально',
-      text: 'Установлены последние версии стратегий zapret и ядра прокси.',
+      text: 'Установлены последние версии Лазейки, стратегий zapret и ядра прокси.',
     }) : null));
 
     const list = h('div', { class: 'updates-list' });
@@ -337,7 +342,7 @@
       text: 'Нажмите «Проверить сейчас» — мы только посмотрим, есть ли новые версии.',
     });
 
-    const header = ui.pageHeader({ title: 'Обновления', subtitle: 'Стратегии zapret и ядро прокси для Telegram' });
+    const header = ui.pageHeader({ title: 'Обновления', subtitle: 'Сама Лазейка, стратегии zapret и ядро прокси для Telegram' });
     const el = h('div', { class: 'page__inner' }, header.el, banner.el, policy, globalError.el, allok.el, list, empty);
 
     function syncItems(items, admin) {
