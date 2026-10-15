@@ -11,6 +11,8 @@
  *   admin=0|1      — права администратора (по умолчанию 1)
  *   theme=system|dark|light
  *   demo=test|install|diag|check — сразу запустить долгую операцию (ещё значения — в дополнениях)
+ *   demo=update|downloading|verifying|installing|done|error|uptodate — застывшее состояние
+ *     страницы «Обновления» для скриншотов и ручной проверки UI (таймеры не меняют его)
  */
 (function () {
   const params = new URLSearchParams(window.location.search);
@@ -540,7 +542,7 @@
       }
       item.state = 'verifying';
       item.progress = null;
-      item.message = 'Проверяем контрольную сумму SHA-256…';
+      item.message = 'Проверяем целостность файла…';
       later(900, () => {
         item.state = 'installing';
         item.message = 'Устанавливаем и перезапускаем обход…';
@@ -559,6 +561,26 @@
       });
     };
     later(DOWNLOAD_STEP_MS, tick);
+  }
+
+  /*
+   * Застывшее состояние обновления zapret для скриншотов и ручной проверки UI.
+   * Отменяет автопроверку, чтобы она не перетёрла заданные поля, и ничего не планирует:
+   * страница остаётся в этом состоянии, сколько нужно.
+   */
+  function freezeZapretUpdate(overrides) {
+    if (autoCheckTimer) clearTimeout(autoCheckTimer);
+    dropNotice('update-available');
+    const item = updateItem('zapret');
+    Object.assign(item, {
+      latest: '1.10.4', available: true, skipped: false,
+      published_at: '2026-10-09T14:20:00Z', notes: RELEASE_NOTES,
+      url: 'https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.4',
+      state: 'idle', progress: null, message: null, can_rollback: false,
+    }, overrides || {});
+    state.updates.checking = false;
+    state.updates.last_check = nowSec();
+    recount();
   }
 
   /* ---------- Диагностика ---------- */
@@ -939,13 +961,32 @@
 
   /* ---------- Запуск имитации ---------- */
 
-  if (state.settings.check_updates) later(AUTO_UPDATE_CHECK_DELAY_MS, checkForUpdates);
+  const autoCheckTimer = state.settings.check_updates
+    ? later(AUTO_UPDATE_CHECK_DELAY_MS, checkForUpdates) : null;
 
   const DEMOS = {
     test: () => api.zapret_test_start('standard', null),
     diag: () => api.diag_run(),
     check: () => api.zapret_check(),
     install: () => later(AUTO_UPDATE_CHECK_DELAY_MS + UPDATE_CHECK_MS, () => api.updates_install('zapret')),
+    /* Застывшие состояния страницы «Обновления» — для скриншотов и ручной проверки UI. */
+    update: () => freezeZapretUpdate(),
+    downloading: () => freezeZapretUpdate({ state: 'downloading', progress: 0.42, message: 'Скачиваем: 1,5 из 3,6 МБ' }),
+    verifying: () => freezeZapretUpdate({ state: 'verifying', message: 'Проверяем целостность файла…' }),
+    installing: () => freezeZapretUpdate({ state: 'installing', message: 'Устанавливаем и перезапускаем обход…' }),
+    done: () => freezeZapretUpdate({
+      state: 'done', available: false, current: '1.10.4', can_rollback: true,
+      message: 'Готово: установлена версия 1.10.4. Предыдущую мы сохранили — её можно вернуть кнопкой «Откатить».',
+    }),
+    error: () => freezeZapretUpdate({
+      state: 'error',
+      message: 'Не удалось проверить архив: SHA-256 не совпал с релизом на GitHub. Файл мог скачаться с ошибкой — попробуйте ещё раз.',
+    }),
+    uptodate: () => {
+      if (autoCheckTimer) clearTimeout(autoCheckTimer);
+      state.updates.last_check = nowSec();
+      recount();
+    },
   };
   const DEMO_DELAY_MS = 300;
 

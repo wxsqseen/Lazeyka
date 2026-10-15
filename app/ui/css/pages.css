@@ -216,6 +216,174 @@
   overflow-wrap: anywhere;
 }
 
+/* Как проверяется подлинность файла: замок в покое, щит с галочкой — когда сверка прошла. */
+.update__trust {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.update__trust[hidden] {
+  display: none;
+}
+
+.update__trust-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-3);
+}
+
+.update__trust[data-state="doing"] .update__trust-icon {
+  color: var(--accent);
+}
+
+.update__trust[data-state="done"] .update__trust-icon {
+  color: var(--ok);
+}
+
+.update__trust[data-state="done"] .update__trust-text {
+  color: var(--text);
+}
+
+/* Пустая заглушка сообщения не должна добавлять лишний отступ в колонке карточки. */
+.update__message:empty {
+  display: none;
+}
+
+/* Этапы установки: скачивание → проверка → установка → готово. */
+.update__stage {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.update__stage[hidden] {
+  display: none;
+}
+
+.stepper {
+  display: flex;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stepper__step {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  text-align: center;
+}
+
+/* Соединитель идёт от центра к центру и прячется под кружками. */
+.stepper__step::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  left: -50%;
+  right: 50%;
+  height: 2px;
+  background: var(--border-strong);
+}
+
+.stepper__step:first-child::before {
+  display: none;
+}
+
+.stepper__marker {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--on-accent);
+}
+
+.stepper__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.stepper__check {
+  display: none;
+}
+
+.stepper__label {
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+.stepper__step[data-status="done"]::before,
+.stepper__step[data-status="active"]::before {
+  background: var(--accent);
+}
+
+.stepper__step[data-status="done"] .stepper__marker {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.stepper__step[data-status="done"] .stepper__dot {
+  display: none;
+}
+
+.stepper__step[data-status="done"] .stepper__check {
+  display: block;
+}
+
+.stepper__step[data-status="done"] .stepper__label {
+  color: var(--text-2);
+}
+
+.stepper__step[data-status="active"] .stepper__marker {
+  border-color: var(--accent);
+}
+
+.stepper__step[data-status="active"] .stepper__dot {
+  background: var(--accent);
+}
+
+.stepper__step[data-status="active"] .stepper__label {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* Мягкая пульсация только у активного этапа; в покое ничего не анимируется. */
+.stepper__step[data-status="active"] .stepper__marker::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  opacity: .5;
+  animation: stepper-pulse 1.7s var(--ease) infinite;
+}
+
+@keyframes stepper-pulse {
+  0% { transform: scale(.72); opacity: .5; }
+  70% { transform: scale(1.3); opacity: 0; }
+  100% { opacity: 0; }
+}
+
+/* Крупная кнопка установки — главное действие карточки. */
+.btn--hero {
+  height: 40px;
+  padding: 0 20px;
+  font-size: 14px;
+}
+
 /* ===================== Журнал ===================== */
 
 .log-toolbar {
