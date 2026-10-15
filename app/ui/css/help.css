@@ -1,0 +1,158 @@
+/* Страница «Помощь»: «Что не работает?», DNS, отчёт для помощи. «Проверка компьютера» — в pages.css. */
+
+/* ===================== Что не работает? ===================== */
+
+/* Тот же radiogroup, что и .seg (ui.segmented), только плитками во всю ширину. */
+.seg.symptoms {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: 8px;
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+.symptoms .seg__opt {
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13.5px;
+}
+
+.symptoms .seg__opt .icon {
+  color: var(--text-3);
+  transition: color var(--t-fast) var(--ease);
+}
+
+.symptoms .seg__opt:hover {
+  background: var(--hover);
+}
+
+.symptoms .seg__opt[aria-checked="true"] {
+  border-color: var(--accent);
+  background: transparent;
+  box-shadow: none;
+}
+
+.symptoms .seg__opt[aria-checked="true"] .icon {
+  color: var(--accent-text);
+}
+
+.symptom-area {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.symptom-hint {
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.symptom {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.symptom__lead {
+  max-width: 72ch;
+  font-size: 13.5px;
+}
+
+.symptom__text {
+  max-width: 72ch;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.symptom__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.symptom .test-results:empty,
+.site-verdict:empty {
+  display: none;
+}
+
+.site-form {
+  gap: 8px;
+  max-width: 480px;
+}
+
+/* ===================== DNS ===================== */
+
+.dns__intro {
+  margin-top: 0;
+}
+
+.dns-result {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dns-result:empty {
+  display: none;
+}
+
+.dns-row {
+  display: flex;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.dns-row__label {
+  flex: none;
+  width: 124px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+/* ===================== Отчёт ===================== */
+
+.report__text {
+  margin: 0;
+  font: 12px/1.6 var(--font-mono);
+}
+
+@media (max-width: 999px) {
+  .symptoms .seg__opt {
+    gap: 6px;
+    padding: 0 6px;
+  }
+
+  .dns-row {
+    flex-wrap: wrap;
+  }
+
+  .dns-row__label {
+    width: 100%;
+  }
+}

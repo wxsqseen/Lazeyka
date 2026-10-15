@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <!-- Второй рубеж поверх замка навигации: ни встроенных скриптов и обработчиков, ни чужих
+       источников. 'unsafe-eval' нужен pywebview: заглушки API он создаёт через new Function. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Лазейка</title>
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="css/home.css">
+  <link rel="stylesheet" href="css/power.css">
+  <link rel="stylesheet" href="css/zapret.css">
+  <link rel="stylesheet" href="css/telegram.css">
+  <link rel="stylesheet" href="css/pages.css">
+  <link rel="stylesheet" href="css/fix.css">
+  <link rel="stylesheet" href="css/help.css">
+  <link rel="stylesheet" href="css/vpn.css">
+  <!-- Тема применяется до первой отрисовки, поэтому core.js — синхронно в <head>. -->
+  <script src="js/core.js"></script>
+</head>
+<body>
+  <div id="app" class="app" aria-busy="true"></div>
+
+  <script src="js/icons.js"></script>
+  <script src="js/dom.js"></script>
+  <script src="js/format.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/widgets.js"></script>
+  <script src="js/overlays.js"></script>
+  <script src="js/brand.js"></script>
+  <script src="js/texts.js"></script>
+  <script src="js/vpn-clients.js"></script>
+  <script src="js/vpn.js"></script>
+  <script src="js/vpn-gate.js"></script>
+  <script src="js/actions.js"></script>
+  <script src="js/fix.js"></script>
+  <script src="js/power.js"></script>
+  <script src="js/pages/home-cards.js"></script>
+  <script src="js/pages/home.js"></script>
+  <script src="js/pages/zapret-vpn.js"></script>
+  <script src="js/pages/zapret-strategies.js"></script>
+  <script src="js/pages/zapret-options.js"></script>
+  <script src="js/pages/zapret.js"></script>
+  <script src="js/pages/telegram-form.js"></script>
+  <script src="js/pages/telegram.js"></script>
+  <script src="js/pages/help-panels.js"></script>
+  <script src="js/pages/help-vpn.js"></script>
+  <script src="js/pages/help-symptoms.js"></script>
+  <script src="js/pages/help-dns.js"></script>
+  <script src="js/pages/help-diag.js"></script>
+  <script src="js/pages/help.js"></script>
+  <script src="js/pages/updates.js"></script>
+  <script src="js/pages/logs.js"></script>
+  <script src="js/pages/settings.js"></script>
+  <script src="js/onboarding.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

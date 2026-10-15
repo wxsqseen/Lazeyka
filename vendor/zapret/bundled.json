@@ -1,0 +1,8 @@
+{
+  "version": "1.10.3",
+  "file": "zapret-discord-youtube-1.10.3.zip",
+  "sha256": "244314ae1c24538a0d751601da8e0c925c843371eec4456eb15f14c4fd6b7058",
+  "published_at": "2026-09-20T08:46:37Z",
+  "source": "https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.10.3",
+  "note": "Описание для людей. Проверка идёт по хешу, зашитому в app/zapret/pack.py (BUNDLED_SHA256)."
+}

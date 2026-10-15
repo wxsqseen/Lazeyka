@@ -1,0 +1,228 @@
+/* VPN рядом с обходом: «что куда идёт», окно «Работает VPN», карточка на «Обходе», строка на главной, «Помощь». */
+
+/* ===================== Что куда идёт ===================== */
+
+.vpn-routes {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.vpn-routes:empty {
+  display: none;
+}
+
+.vpn-routes__table {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 24px;
+  align-self: stretch;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--sunken);
+  font-size: 13px;
+}
+
+.vpn-routes__label {
+  color: var(--text);
+}
+
+.vpn-routes__via {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-2);
+}
+
+.vpn-routes__via.is-unknown {
+  color: var(--text-3);
+}
+
+.vpn-routes__icon {
+  color: var(--warn);
+}
+
+.vpn-routes__note {
+  max-width: 72ch;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.vpn-routes__footnote {
+  max-width: 72ch;
+  margin-top: -2px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.vpn-routes__wait {
+  display: flex;
+  align-items: center;
+}
+
+/* ===================== Окно «Работает VPN» ===================== */
+
+.modal--vpn {
+  width: min(480px, 100%);
+}
+
+.vpn-dialog__routes {
+  margin-top: 6px;
+}
+
+.vpn-dialog__checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.check {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check__input {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ===================== Карточка на «Обходе» ===================== */
+
+.vpn-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px 16px;
+}
+
+.vpn-state > .conn {
+  flex: 1;
+  min-width: 0;
+}
+
+.vpn-state > .btn {
+  flex: none;
+}
+
+.vpn-service-hint:empty {
+  display: none;
+}
+
+.vpn-proxy {
+  min-height: 0;
+  border-bottom: 0;
+}
+
+.vpn-adapters {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vpn-adapter {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.vpn-adapter:first-child {
+  padding-top: 0;
+}
+
+.vpn-adapter:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.vpn-adapter__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.vpn-adapter__name {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.vpn-adapter__app {
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.vpn-adapter__meta {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.vpn-adapter__select {
+  flex: none;
+  width: 210px;
+}
+
+/* ===================== Главная ===================== */
+
+/* Тихая строка: серый текст, точка без «дыхания». */
+.home-vpn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 0 4px;
+}
+
+.home-vpn .conn {
+  color: var(--text-2);
+}
+
+.home-vpn .conn__dot {
+  animation: none;
+}
+
+/* ===================== Помощь ===================== */
+
+.vpn-clients,
+.vpn-client {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vpn-clients {
+  gap: 12px;
+}
+
+.vpn-clients:empty,
+.vpn-client:empty {
+  display: none;
+}
+
+.vpn-client__name {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.vpn-picker {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.vpn-picker .select {
+  min-width: 220px;
+}

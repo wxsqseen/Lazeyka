@@ -1,0 +1,39 @@
+/* «Найти и включить»: ход подбора и итог — на главной, в «Помощи» и в приветствии. */
+
+.fix-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.fix-status__icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+/* Спиннер на 2 px меньше иконки: те же центр строки и отступ текста. */
+.spinner.fix-status__icon {
+  margin: 3px 1px 0;
+}
+
+.fix-status--ok .fix-status__icon { color: var(--ok); }
+.fix-status--warn .fix-status__icon { color: var(--warn); }
+
+.fix-status__body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.fix-status__text {
+  color: var(--text);
+}
+
+.fix-status__detail {
+  color: var(--text-3);
+  font-size: 12.5px;
+}

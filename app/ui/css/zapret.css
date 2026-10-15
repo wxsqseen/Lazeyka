@@ -1,0 +1,458 @@
+/* Страница «Обход»: стратегии, подбор, фильтры, списки, режим работы. */
+
+/* ===================== Обход: стратегии ===================== */
+
+.strategies {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px 12px;
+  margin: -6px -8px;
+}
+
+.strategies > .empty {
+  grid-column: 1 / -1;
+}
+
+.strategy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  height: 38px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.strategy:hover {
+  background: var(--hover);
+}
+
+.strategy[aria-disabled="true"] {
+  opacity: .5;
+  cursor: default;
+}
+
+.strategy__mark {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--text-2);
+  transition: border-color var(--t-fast) var(--ease);
+}
+
+.strategy.is-active .strategy__mark {
+  border: 5px solid var(--accent);
+}
+
+.strategy.is-pending .strategy__mark {
+  border-color: transparent;
+}
+
+.strategy__mark .spinner {
+  width: 16px;
+  height: 16px;
+}
+
+.strategy__label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.strategy.is-active .strategy__label {
+  font-weight: 600;
+}
+
+/* Справа: «★ лучшая» и доля успешных проверок в последнем подборе. */
+.strategy__rating {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.strategy__best {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+.strategy__score {
+  min-width: 34px;
+  color: var(--text-3);
+  font-size: 12px;
+  text-align: right;
+}
+
+.strategy__rating.is-best .strategy__score {
+  color: var(--text-2);
+}
+
+/* ===================== Обход: подбор ===================== */
+
+.test__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.test__controls[hidden],
+.test__hint[hidden],
+.test__progress[hidden] {
+  display: none;
+}
+
+.test__hint {
+  max-width: 72ch;
+  margin-top: -6px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.test__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.test__progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.test__progress-text {
+  font-size: 13.5px;
+}
+
+.test__summary:empty,
+.test__results:empty {
+  display: none;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.results {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.results th,
+.results td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.results thead th {
+  padding-top: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.results tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.results__rank {
+  width: 32px;
+  color: var(--text-3);
+  text-align: center !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.results__rank.is-best {
+  color: var(--text);
+}
+
+.results__rank .icon {
+  margin: 0 auto;
+}
+
+.results__name {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.results__label {
+  display: block;
+}
+
+.results__id {
+  display: block;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.results__ping {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.results__score {
+  white-space: nowrap;
+}
+
+.results__counts {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.results__action {
+  width: 1%;
+  text-align: right !important;
+  white-space: nowrap;
+}
+
+.results tr.is-failed .results__name {
+  color: var(--text-3);
+}
+
+.tstrip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 300px;
+}
+
+.tcell {
+  display: inline-flex;
+  gap: 1px;
+}
+
+.tcell__seg {
+  display: block;
+  width: 5px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--border-strong);
+}
+
+.tcell__seg.is-ok { background: var(--ok); }
+.tcell__seg.is-fail { background: var(--err); }
+.tcell__seg.is-ssl { background: var(--warn); }
+.tcell__seg.is-unsup { background: var(--off); }
+.tcell__seg.is-none { background: var(--border-strong); }
+
+.score {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.score__bar {
+  width: 56px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.score__fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--text-3);
+}
+
+.results tr.is-best .score__fill {
+  background: var(--accent);
+}
+
+.score__value {
+  min-width: 38px;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin-top: 12px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend__swatch {
+  display: block;
+  width: 5px;
+  height: 12px;
+  border-radius: 1px;
+}
+
+.legend__swatch.is-ok { background: var(--ok); }
+.legend__swatch.is-fail { background: var(--err); }
+.legend__swatch.is-ssl { background: var(--warn); }
+.legend__swatch.is-unsup { background: var(--off); }
+.legend__swatch.is-none { background: var(--border-strong); }
+
+.legend__note {
+  margin-left: auto;
+}
+
+/* ===================== Обход: фильтры, списки, режим ===================== */
+
+.ports {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.ports__apply {
+  padding-top: 24px;
+}
+
+.list-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.list-panel[hidden],
+.tabs[hidden] {
+  display: none;
+}
+
+.list-panel__hint {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.list-panel__footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.list-panel__footer > [hidden] {
+  display: none;
+}
+
+.list-panel__meta {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mode__option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 14px 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease), background-color var(--t-fast) var(--ease);
+}
+
+.mode__option:hover {
+  background: var(--hover);
+}
+
+.mode__option[aria-checked="true"] {
+  border-color: var(--accent);
+}
+
+.mode__option[aria-disabled="true"] {
+  cursor: default;
+}
+
+.mode.is-pending .mode__option {
+  opacity: .6;
+}
+
+.mode__icon {
+  margin-top: 1px;
+  color: var(--text-3);
+}
+
+.mode__text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.mode__title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.mode__desc {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.mode__radio {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+}
+
+.mode__option[aria-checked="true"] .mode__radio {
+  border: 5px solid var(--accent);
+}
+
+.mode__info {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+@media (max-width: 999px) {
+  .strategies {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .search {
+    width: 180px;
+  }
+}

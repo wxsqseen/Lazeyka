@@ -1,0 +1,415 @@
+/* «Проверка компьютера» на странице «Помощь», обновления, журнал и настройки. */
+
+/* ===================== Проверка компьютера ===================== */
+
+.diag-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.diag-summary + .issue-list .issue:first-child {
+  padding-top: 12px;
+}
+
+.diag-summary--ok .icon { color: var(--ok); }
+.diag-summary--warn .icon { color: var(--warn); }
+.diag-summary--err .icon { color: var(--err); }
+
+.diag-summary__time {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+/* ===================== Обновления ===================== */
+
+.policy {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 24px 20px;
+}
+
+.policy__main {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.policy__icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--text-2);
+}
+
+.policy__title {
+  margin: 0;
+  font: 600 16px/1.35 var(--font-display);
+}
+
+.policy__desc {
+  max-width: 70ch;
+  margin-top: 6px;
+  color: var(--text-2);
+  font-size: 13.5px;
+}
+
+.policy__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.policy__controls > .setting {
+  flex: 1;
+  min-width: 300px;
+  padding: 0;
+  border: 0;
+}
+
+.policy__check {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.policy__last {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.updates-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.updates-list:empty {
+  display: none;
+}
+
+.update {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+}
+
+.update__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.update__titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.update__title {
+  margin: 0;
+  font: 600 15px/1.35 var(--font-display);
+}
+
+.update__sub {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.update__sub[hidden] {
+  display: none;
+}
+
+.version {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.version__current,
+.version__latest {
+  font: 600 20px/1.2 var(--font-display);
+  letter-spacing: -.01em;
+}
+
+.version__current {
+  color: var(--text);
+}
+
+.version.has-newer .version__current {
+  color: var(--text-3);
+}
+
+.version__arrow {
+  align-self: center;
+  color: var(--text-3);
+}
+
+.version__arrow[hidden],
+.version__latest[hidden],
+.version__date[hidden] {
+  display: none;
+}
+
+.version__date {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.update__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.update__progress[hidden] {
+  display: none;
+}
+
+.update__progress-text {
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.update__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.update__actions:empty {
+  display: none;
+}
+
+.update__notes {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.update__notes[hidden] {
+  display: none;
+}
+
+.notes {
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--sunken);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ===================== Журнал ===================== */
+
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-card {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--sunken);
+}
+
+.log {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 0;
+  font: 12.5px/1.65 var(--font-mono);
+}
+
+.log:focus-visible {
+  outline-offset: -2px;
+}
+
+.log__line {
+  display: grid;
+  grid-template-columns: 64px 64px minmax(0, 1fr);
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.log__line:hover {
+  background: var(--hover);
+}
+
+.log__time,
+.log__src {
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.log__msg {
+  color: var(--log-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.log__line.is-debug .log__msg {
+  color: var(--text-3);
+}
+
+.log__line.is-warn .log__msg {
+  color: var(--warn-text);
+}
+
+.log__line.is-error .log__msg {
+  color: var(--err-text);
+}
+
+.log__line.is-warn {
+  box-shadow: inset 2px 0 0 var(--warn);
+}
+
+.log__line.is-error {
+  box-shadow: inset 2px 0 0 var(--err);
+}
+
+.log__empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.log__empty[hidden] {
+  display: none;
+}
+
+.log-jump {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 15px;
+  background: var(--raised);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.log-jump[hidden] {
+  display: none;
+}
+
+/* ===================== Настройки ===================== */
+
+.about {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.about__name {
+  font: 600 18px/1.3 var(--font-display);
+}
+
+.about__meta {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.about__label {
+  margin-bottom: -8px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.kv-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.kv {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  border-bottom: 1px solid var(--border);
+}
+
+.kv:last-child {
+  border-bottom: 0;
+}
+
+.kv__key {
+  flex: none;
+  width: 190px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.kv--credit .kv__key {
+  width: 250px;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.kv__value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kv__value--muted {
+  color: var(--text-2);
+}
+
+.kv__value.mono {
+  font-size: 12.5px;
+}
+
+.licence {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+@media (max-width: 999px) {
+  .kv__key {
+    width: 150px;
+  }
+
+  .kv--credit .kv__key {
+    width: 220px;
+  }
+}

@@ -1,0 +1,63 @@
+# -*- mode: python ; coding: utf-8 -*-
+# Сборка: powershell -ExecutionPolicy Bypass -File build\build.ps1
+import os
+
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+
+ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
+
+
+def p(*parts):
+    return os.path.join(ROOT, *parts)
+
+
+# Раскладка в сборке повторяет дерево проекта: <_MEIPASS>/app/ui, <_MEIPASS>/vendor/zapret, ...
+datas = [
+    (p("app", "ui"), "app/ui"),
+    (p("assets"), "assets"),
+    (p("vendor", "zapret"), "vendor/zapret"),
+    (p("app", "vendor", "tgws_proxy", "LICENSE"), "app/vendor/tgws_proxy"),
+    (p("app", "vendor", "tgws_proxy", "UPSTREAM.md"), "app/vendor/tgws_proxy"),
+    (p("LICENSE"), "."),
+    (p("THIRD_PARTY.md"), "."),
+]
+# Хуки pywebview и pythonnet справляются сами; это — страховка.
+datas += collect_data_files("webview", subdir="js")
+datas += collect_data_files("webview", subdir="lib")
+datas += collect_data_files("pythonnet")
+datas += collect_data_files("certifi")
+binaries = collect_dynamic_libs("clr_loader")
+
+hiddenimports = [
+    "pystray._win32",
+    "anyio._backends._asyncio",
+    # Ядро tg-ws-proxy загружается через importlib по вычисляемому имени — его модули
+    # статический анализ не видит.
+    *collect_submodules("app.vendor.tgws_proxy"),
+    # Стандартные модули, которые может импортировать обновлённое ядро прокси.
+    "secrets", "hmac", "ipaddress", "zlib", "gzip", "uuid", "statistics", "selectors",
+    "concurrent.futures", "http.client", "email.utils", "dataclasses", "enum", "heapq", "bisect",
+]
+
+a = Analysis(
+    [p("app", "__main__.py")],
+    pathex=[ROOT],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    excludes=["setuptools", "distutils", "_distutils_hack", "tkinter", "pytest", "unittest.mock",
+              "PIL._avif", "PIL._webp", "PIL._imagingtk", "PIL.ImageTk"],
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz, a.scripts, a.binaries, a.datas, [],
+    name="Lazeyka",
+    console=False,
+    upx=False,
+    icon=[p("assets", "icon.ico")],
+    version=p("build", "version_info.txt"),
+    uac_admin=False,      # права запрашивает само приложение: без них работает ограниченный режим
+    uac_uiaccess=False,
+    disable_windowed_traceback=False,
+    runtime_tmpdir=None,
+)
