@@ -50,6 +50,7 @@ class ZapretManager:
         self.unavailable_reason: str | None = None
         self.paused_for_test = False
         self._restarts: list[float] = []
+        self.av_removal_seen = False   # антивирус удалял файлы пакета (повод предложить исключение)
         # Домены, которые нужно добавить в списки ради других частей Лазейки (Telegram-прокси).
         self.extra_lists: Callable[[], dict[str, list[str]]] | None = None
         # «Совместимость с VPN»: что исключить из перехвата ({interfaces, servers}) или None.
@@ -68,6 +69,7 @@ class ZapretManager:
             current = pack.find(wanted)
             broken = pack.problem_of(wanted) if current is None else None
             if broken:
+                self.av_removal_seen = True
                 restore = ("Ставлю его заново из встроенной копии." if wanted == pack.BUNDLED_VERSION and self.is_admin
                            else "Переустановите его на странице «Обновления».")
                 self.notify("warn", f"Пакет стратегий {wanted} повреждён ({broken}) — похоже, файл удалил "

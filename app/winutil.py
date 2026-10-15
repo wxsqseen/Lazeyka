@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import logging
 import os
 import re
@@ -324,6 +325,88 @@ def known_folder(folder_id: str) -> str:
 
 def system32(name: str) -> str:
     return os.path.join(system_dir(), name)
+
+
+# ------------------------------------------------------------ Microsoft Defender
+#
+# Драйвер WinDivert, без которого не работает winws, многие антивирусы (и встроенный
+# Defender) помечают как RiskTool/HackTool — это ложное срабатывание, то же самое бывает
+# у оригинального zapret. Из-за него Defender может удалять файлы Лазейки при каждом входе.
+# Здесь — честная мера против ложного срабатывания: по явной просьбе человека добавить в
+# доверенные КОНКРЕТНЫЕ файлы Лазейки (папку в Program Files, папку данных, два exe и драйвер).
+# Это не отключение антивируса и не маскировка: Defender продолжает проверять всё остальное.
+
+
+def _powershell() -> str:
+    return os.path.join(system_dir(), "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def _run_ps(script: str, timeout: float = 25.0) -> RunResult:
+    return run([_powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-Command", script], timeout=timeout)
+
+
+def _ps_literal(value: str) -> str:
+    """Строка-литерал PowerShell: одинарные кавычки, внутренние удваиваются."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def defender_present() -> bool:
+    """Установлен ли вообще Microsoft Defender (модуль management есть не везде)."""
+    return os.path.isfile(_powershell()) and _run_ps(
+        "if (Get-Command Get-MpPreference -ErrorAction SilentlyContinue) { 'yes' }").out.strip() == "yes"
+
+
+def defender_active() -> bool:
+    """Включена ли антивирусная защита Defender в реальном времени (иначе исключения ни к чему)."""
+    out = _run_ps("try { $s = Get-MpComputerStatus; "
+                  "if ($s.AntivirusEnabled -or $s.RealTimeProtectionEnabled) { 'on' } else { 'off' } } "
+                  "catch { 'err' }").out.strip()
+    return out == "on"
+
+
+def defender_exclusions() -> tuple[set[str], set[str]]:
+    """Текущие исключения Defender: (пути, процессы). Пустые множества, если спросить не вышло."""
+    res = _run_ps("try { $p = Get-MpPreference; "
+                  "[pscustomobject]@{ paths = @($p.ExclusionPath); procs = @($p.ExclusionProcess) } "
+                  "| ConvertTo-Json -Compress } catch { '' }")
+    try:
+        data = json.loads(res.out) if res.out.strip() else {}
+    except ValueError:
+        return set(), set()
+
+    def norm(value) -> set[str]:
+        if value is None:
+            return set()
+        items = value if isinstance(value, list) else [value]
+        return {str(x).rstrip("\\").lower() for x in items if x}
+
+    return norm(data.get("paths")), norm(data.get("procs"))
+
+
+def _under(path: str, roots: tuple[str, ...]) -> bool:
+    try:
+        resolved = os.path.normcase(os.path.realpath(path))
+    except OSError:
+        return False
+    return any(resolved == os.path.normcase(os.path.realpath(r))
+               or resolved.startswith(os.path.normcase(os.path.realpath(r)) + os.sep) for r in roots)
+
+
+def defender_add_exclusions(paths: list[str], processes: list[str], allowed_roots: tuple[str, ...]) -> RunResult:
+    """Добавляет исключения Defender. Пути обязаны лежать внутри allowed_roots (папки Лазейки) —
+    чтобы случайно не исключить что-то широкое. Требует прав администратора."""
+    safe_paths = [p for p in paths if _under(p, allowed_roots)]
+    safe_procs = [p for p in processes if _under(p, allowed_roots)]
+    rejected = [p for p in (*paths, *processes) if p not in safe_paths and p not in safe_procs]
+    if rejected:
+        log.warning("Пропущены исключения Defender вне папок Лазейки: %s", rejected)
+    if not safe_paths and not safe_procs:
+        return RunResult(1, "", "нет путей внутри папок Лазейки")
+    cmds = [f"Add-MpPreference -ExclusionPath {_ps_literal(p)}" for p in safe_paths]
+    cmds += [f"Add-MpPreference -ExclusionProcess {_ps_literal(p)}" for p in safe_procs]
+    script = "try { " + "; ".join(cmds) + "; 'ok' } catch { Write-Error $_.Exception.Message; exit 1 }"
+    return _run_ps(script)
 
 
 # ------------------------------------------------------------ запуск без наших прав

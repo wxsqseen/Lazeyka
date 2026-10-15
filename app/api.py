@@ -235,6 +235,14 @@ class Api:
     def lists_add_site(self, domain=""):
         return self._core.lists_add_site(str(domain))
 
+    @_guard
+    def defender_check(self):
+        return self._core.defender_check()
+
+    @_guard
+    def defender_exclude(self):
+        return self._core.defender_exclude()
+
     # ---- VPN
     @_guard
     def vpn_preflight(self, component="zapret"):

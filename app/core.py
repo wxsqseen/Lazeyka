@@ -73,6 +73,9 @@ class Core:
         self._check_fp: tuple | None = None   # состояние обхода, при котором шла последняя проверка
         self.dns_state: dict = {"running": False, "at": None, "doh_enabled": None, "spoofed": [],
                                 "providers": [], "message": None}
+        # Defender сносит файлы: проверяем по запросу, кнопку даём только после реального удаления
+        self.defender_state: dict = {"checked": False, "present": None, "active": None,
+                                     "excluded": None, "at": None}
         # VPN рядом с обходом
         self.vpn_snapshot: vpn.Snapshot | None = None
         self.vpn_routes: dict | None = None
@@ -134,6 +137,14 @@ class Core:
                                 "чтобы не было конфликта портов.",
                         "action": {"label": "Закрыть TG WS Proxy", "call": "tg_close_original", "args": []},
                         "dismissible": True})
+        d = self.defender_state
+        if (self.is_admin and self.zapret.av_removal_seen and d.get("active") and d.get("excluded") is False):
+            out.append({"id": "defender", "level": "warn",
+                        "text": "Microsoft Defender удаляет файлы Лазейки — это ложное срабатывание на драйвер "
+                                "WinDivert, не вирус. Добавить Лазейку в доверенные Defender, чтобы он её не трогал?",
+                        "action": {"label": "Добавить в исключения Defender", "call": "defender_exclude",
+                                   "args": []},
+                        "dismissible": True})
         return [n for n in out if n["id"] not in self._dismissed]
 
     def notices(self) -> list[dict]:
@@ -165,6 +176,9 @@ class Core:
         threading.Thread(target=self._ticker, name="ticker", daemon=True).start()
         if self.settings.get("updates", "check"):
             threading.Timer(8.0, lambda: self.updates.check_async(quiet=True)).start()
+        if self.is_admin and self.zapret.av_removal_seen:
+            # Файлы уже удаляли — выясним про Defender, чтобы предложить исключение.
+            threading.Timer(3.0, self.defender_check).start()
         if self.is_admin and self.settings.get("startup", "autostart"):
             try:
                 autostart.sync()
@@ -395,6 +409,7 @@ class Core:
             "diag": dict(self.diag_state),
             "dns": dict(self.dns_state),
             "vpn": self._vpn_state(s),
+            "defender": dict(self.defender_state),
         }
 
     def logs(self, after_id: int, source: str) -> dict:
@@ -531,9 +546,31 @@ class Core:
         """quiet — включили после окна «Работает VPN»: человек уже всё прочитал."""
         self._require_admin()
         self.background("zapret-start", self.zapret.start, "Обход не запустился")
+        self._arm_connectivity_guard()
         if not quiet:
             self._vpn_note_on_start()
         return ok()
+
+    def _arm_connectivity_guard(self) -> None:
+        """После включения обхода проверяет, не пропал ли интернет вовсе (бывает при жёстком
+        конфликте с VPN или антивирусом). Если пропал — предлагает выключить обход, сам ничего
+        не переключает: вдруг человек как раз этого и хотел."""
+        def guard() -> None:
+            from .zapret.tester import control_ok
+            time.sleep(2)
+            bind = self._direct_source()
+            for _ in range(4):
+                if self.zapret.mode != "app" or self.zapret.status != "running" or self.zapret.paused_for_test:
+                    return
+                if control_ok(bind=bind):
+                    return  # контрольный сайт открывается — всё в порядке
+                time.sleep(2)
+            via = (" Возможно, конфликт с VPN." if self.vpn_snapshot and self.vpn_snapshot.active else "")
+            self.notify("error", "После включения обхода не открывается даже проверочный сайт — похоже, "
+                                 f"пропал интернет.{via} Можно выключить обход и вернуть всё как было.",
+                        action={"label": "Выключить обход", "call": "zapret_stop", "args": []})
+
+        threading.Timer(1.0, lambda: self.background("zapret-guard", guard, "Проверка связи не удалась")).start()
 
     def zapret_stop(self) -> Result:
         self._require_admin()
@@ -982,6 +1019,75 @@ class Core:
     def discord_clear_cache(self) -> Result:
         report = diagnostics.clear_discord_cache()
         return ok(message="; ".join(report))
+
+    # ------------------------------------------------------------ Microsoft Defender
+
+    def _defender_targets(self) -> tuple[list[str], list[str], tuple[str, ...]]:
+        """Что именно сделать доверенным: только папки и файлы самой Лазейки.
+
+        Папки (ProgramData\\Lazeyka и Program Files\\Lazeyka) создаются с доступом на запись
+        лишь администратору, поэтому исключить их из проверки безопасно: подложить туда файл
+        обычная программа не сможет. Случайный exe из «Загрузок» в исключения не попадёт —
+        winutil проверяет, что путь внутри этих папок."""
+        from . import autostart
+        roots: list[str] = [str(paths.DATA)]
+        install_dir = None
+        try:
+            install_dir = str(autostart.installed_exe().parent)
+            roots.append(install_dir)
+        except Exception:  # noqa: BLE001
+            log.debug("Папка установки не определена", exc_info=True)
+        paths_ex = list(roots)
+        procs: list[str] = []
+        try:
+            procs.append(str(autostart.installed_exe()))
+        except Exception:  # noqa: BLE001
+            pass
+        if paths.IS_FROZEN:
+            procs.append(str(paths.exe_path()))
+        if self.zapret.pack:
+            procs.append(str(self.zapret.winws_exe))
+        return paths_ex, procs, tuple(roots)
+
+    def defender_check(self) -> Result:
+        """В фоне узнаёт, включён ли Defender и добавлены ли уже файлы Лазейки в его исключения."""
+        if self.defender_state.get("running"):
+            return ok()
+        self.defender_state = dict(self.defender_state, running=True)
+
+        def work() -> None:
+            result = {"checked": True, "present": False, "active": False, "excluded": None, "at": time.time()}
+            try:
+                if winutil.defender_present():
+                    result["present"] = True
+                    result["active"] = winutil.defender_active()
+                    paths_ex, procs, _roots = self._defender_targets()
+                    have_paths, have_procs = winutil.defender_exclusions()
+                    want_paths = {p.rstrip("\\").lower() for p in paths_ex}
+                    result["excluded"] = bool(want_paths) and want_paths <= have_paths
+            except Exception:  # noqa: BLE001
+                log.exception("Проверка Defender не удалась")
+            finally:
+                self.defender_state = dict(result, running=False)
+
+        self.background("defender-check", work, "Проверка Defender не выполнена")
+        return ok()
+
+    def defender_exclude(self) -> Result:
+        """Добавляет файлы Лазейки в доверенные Microsoft Defender (по явной просьбе человека)."""
+        self._require_admin()
+        paths_ex, procs, roots = self._defender_targets()
+        res = winutil.defender_add_exclusions(paths_ex, procs, roots)
+        if res.code != 0:
+            detail = (res.err or res.out).strip() or "Defender отклонил запрос"
+            return fail(f"Не удалось добавить в исключения Defender: {detail}")
+        self.defender_check()
+        # Если драйвер уже был удалён — восстановим пакет, чтобы обход заработал без перезапуска.
+        if not self.zapret.available or self.zapret.pack is None:
+            self.background("zapret-reinit", self.zapret.init, "Пакет не восстановлен")
+        self.notify("success", "Лазейка добавлена в исключения Microsoft Defender — он больше не будет "
+                               "удалять её файлы. Остальное Defender по-прежнему проверяет.")
+        return ok(message="Готово: Лазейка в исключениях Defender.")
 
     # ------------------------------------------------------------ обновления
 
