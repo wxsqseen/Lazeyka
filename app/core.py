@@ -74,7 +74,7 @@ class Core:
         self.dns_state: dict = {"running": False, "at": None, "doh_enabled": None, "spoofed": [],
                                 "providers": [], "message": None}
         # Defender сносит файлы: проверяем по запросу, кнопку даём только после реального удаления
-        self.defender_state: dict = {"checked": False, "present": None, "active": None,
+        self.defender_state: dict = {"checked": False, "running": False, "present": None, "active": None,
                                      "excluded": None, "at": None}
         # VPN рядом с обходом
         self.vpn_snapshot: vpn.Snapshot | None = None
@@ -138,7 +138,8 @@ class Core:
                         "action": {"label": "Закрыть TG WS Proxy", "call": "tg_close_original", "args": []},
                         "dismissible": True})
         d = self.defender_state
-        if (self.is_admin and self.zapret.av_removal_seen and d.get("active") and d.get("excluded") is False):
+        if (self.is_admin and not paths.is_portable() and self.zapret.av_removal_seen
+                and d.get("active") and d.get("excluded") is False):
             out.append({"id": "defender", "level": "warn",
                         "text": "Microsoft Defender удаляет файлы Лазейки — это ложное срабатывание на драйвер "
                                 "WinDivert, не вирус. Добавить Лазейку в доверенные Defender, чтобы он её не трогал?",
@@ -209,6 +210,7 @@ class Core:
             try:
                 if self.zapret.mode == "app":
                     self.zapret.start()
+                    self._arm_connectivity_guard()  # и при автозапуске: вдруг оборвёт интернет при входе
             except ZapretError as exc:
                 self.notify("error", f"Обход не запустился: {exc}")
         self._status_changed()
@@ -565,6 +567,10 @@ class Core:
                 if control_ok(bind=bind):
                     return  # контрольный сайт открывается — всё в порядке
                 time.sleep(2)
+            # Прямой путь мёртв. Если без привязки к прямому интерфейсу сайт открывается — это не
+            # «пропал интернет», а особенность VPN (kill switch глушит обход мимо туннеля): не пугаем.
+            if bind and control_ok():
+                return
             via = (" Возможно, конфликт с VPN." if self.vpn_snapshot and self.vpn_snapshot.active else "")
             self.notify("error", "После включения обхода не открывается даже проверочный сайт — похоже, "
                                  f"пропал интернет.{via} Можно выключить обход и вернуть всё как было.",
@@ -1076,6 +1082,11 @@ class Core:
     def defender_exclude(self) -> Result:
         """Добавляет файлы Лазейки в доверенные Microsoft Defender (по явной просьбе человека)."""
         self._require_admin()
+        if paths.is_portable():
+            return fail("В переносном режиме (папка LazeykaData рядом с программой) Лазейка не добавляет "
+                        "себя в исключения Defender: эта папка лежит в месте, куда может писать обычный "
+                        "пользователь, и исключать её из проверки небезопасно. Установите Лазейку обычным "
+                        "способом (в Program Files) или добавьте её папки в исключения Defender вручную.")
         paths_ex, procs, roots = self._defender_targets()
         res = winutil.defender_add_exclusions(paths_ex, procs, roots)
         if res.code != 0:

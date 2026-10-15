@@ -67,6 +67,9 @@ class ZapretManager:
         try:
             wanted = self.settings.get("zapret", "pack")
             current = pack.find(wanted)
+            # Ожидали конкретную версию, а её нет — файл или вся папка пакета пропали (антивирус).
+            if wanted and current is None:
+                self.av_removal_seen = True
             broken = pack.problem_of(wanted) if current is None else None
             if broken:
                 self.av_removal_seen = True

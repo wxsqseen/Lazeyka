@@ -78,6 +78,12 @@ def test_data_override() -> bool:
     return bool(os.environ.get("LAZEYKA_DATA")) and not IS_FROZEN
 
 
+def is_portable() -> bool:
+    """Переносной режим: данные в папке ``LazeykaData`` рядом с exe. Её родителем может
+    владеть обычный пользователь, поэтому исключать такую папку из антивируса небезопасно."""
+    return _portable_root() is not None
+
+
 DATA = data_root()
 SETTINGS_FILE = DATA / "settings.json"
 ZAPRET_DIR = DATA / "zapret"
