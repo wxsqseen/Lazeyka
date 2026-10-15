@@ -229,6 +229,8 @@ class UpdateManager:
             self.settings.update(lambda d: d["tg"].__setitem__("core", "bundled"))
             self.tg.switch_core(loader.load_bundled())
             raise UpdateError(f"Новое ядро не запустилось ({exc}); возвращено встроенное") from exc
+        # Прежние скачанные ядра больше не нужны (откат — к встроенному), чтобы они не копились.
+        remove_component_dirs({pack.safe_version(version)})
         return f"Ядро Telegram-прокси обновлено до {core.version}"
 
     def _rollback_tgws(self) -> str:
