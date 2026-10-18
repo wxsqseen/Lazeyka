@@ -59,6 +59,26 @@ SAMPLE_XRAY = {"outbounds": [{
 }, {"tag": "direct", "protocol": "freedom"}]}
 
 
+# Все модули своего VPN: менеджер подгружает их по имени, и PyInstaller сам их не видит. Список
+# сверяется с файлами пакета в тестах — новый модуль не забудется.
+VPNCLIENT_MODULES = ("backup", "clash", "config", "deeplink", "diagnose", "engines", "guard", "killswitch",
+                     "links", "manager", "model", "process", "qr", "routeprofile", "routing", "rules", "store",
+                     "subscription", "sysproxy", "xrayjson")
+
+
+def check_vpnclient_modules() -> str:
+    """Каждый модуль своего VPN импортируется (в собранном exe — значит, он туда попал)."""
+    broken = []
+    for name in VPNCLIENT_MODULES:
+        try:
+            importlib.import_module(f"app.vpnclient.{name}")
+        except Exception as exc:  # noqa: BLE001 — в отчёт: какой модуль и почему
+            broken.append(f"{name} ({type(exc).__name__}: {exc})")
+    if broken:
+        raise ImportError("не импортируются модули своего VPN: " + "; ".join(broken))
+    return f"модулей: {len(VPNCLIENT_MODULES)}, все импортируются"
+
+
 def _has_module(name: str) -> bool:
     try:
         return importlib.util.find_spec(name) is not None
@@ -104,9 +124,29 @@ def check_vpnclient_parsing() -> str:
         if errors:
             raise ValueError("конфиг sing-box не прошёл проверку: " + "; ".join(errors[:3]))
         done.append("конфиг sing-box")
+    if not frozen or not missing:
+        done.append(_check_subscription_and_store())
     if missing:
         done.append("нет модулей: " + ", ".join(missing))
     return ", ".join(done) or "нечего проверять"
+
+
+def _check_subscription_and_store() -> str:
+    """Путь «Добавить подписку»: подписка base64 → серверы → профиль сохранён и читается заново
+    (во временной папке, без сети) — то, что сломалось в exe 1.2.0."""
+    import base64
+    from .vpnclient import model, store, subscription
+    decoded = subscription.decode(base64.b64encode(SAMPLE_LINK.encode("utf-8")), {})
+    if not decoded.servers:
+        raise ValueError("подписка: серверы не разобраны")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "vpnclient" / "profiles.json"
+        profiles = store.ProfileStore(path)
+        sub = profiles.add_subscription(model.Subscription(id="s-selftest", name="Проверка", url="https://example.com/sub"))
+        profiles.apply_decoded(sub.id, decoded)
+        if len(store.ProfileStore(path).servers()) != len(decoded.servers):
+            raise ValueError("профили своего VPN не сохранились")
+    return "подписка и профили"
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -250,6 +290,9 @@ def run(report_path: str) -> int:
     def vpnclient_parsing():
         return check_vpnclient_parsing()
 
+    def vpnclient_modules():
+        return check_vpnclient_modules()
+
     def vpnclient_cores():
         return check_core_pins(frozen=bool(getattr(sys, "frozen", False)))
 
@@ -261,6 +304,7 @@ def run(report_path: str) -> int:
     _check(results, "Помощь и проверки", helpers)
     _check(results, "Сеть и VPN", network)
     _check(results, "Значок", icon)
+    _check(results, "Свой VPN: модули", vpnclient_modules)
     _check(results, "Свой VPN: разбор и конфиг", vpnclient_parsing)
     _check(results, "Свой VPN: закреплённые ядра", vpnclient_cores)
 

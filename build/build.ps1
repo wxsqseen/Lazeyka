@@ -1,5 +1,7 @@
 ﻿# Сборка Lazeyka.exe: тесты, значок, PyInstaller, самопроверка готового exe.
 # Ядер своего VPN в exe нет: Лазейка скачивает их с GitHub при запуске (docs/vpnclient-plan.md, 9).
+# -Dist — другая папка exe: собрать, пока запущена Лазейка из dist (её exe занят).
+param([string]$Dist = 'dist')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $py = Join-Path $root '.venv\Scripts\python.exe'
@@ -17,13 +19,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Значок не создан' }
 
     Write-Host '== PyInstaller' -ForegroundColor Cyan
-    & $py -m PyInstaller --noconfirm --clean --distpath dist --workpath build\work build\lazeyka.spec
+    & $py -m PyInstaller --noconfirm --clean --distpath $Dist --workpath build\work build\lazeyka.spec
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller завершился с ошибкой' }
 
     Write-Host '== Самопроверка exe' -ForegroundColor Cyan
     $report = Join-Path $env:TEMP 'lazeyka-selftest.json'
     Remove-Item $report -ErrorAction SilentlyContinue
-    $proc = Start-Process -FilePath (Join-Path $root 'dist\Lazeyka.exe') -ArgumentList @('--selftest', $report) -PassThru -Wait
+    $exe = Join-Path (Join-Path $root $Dist) 'Lazeyka.exe'
+    $proc = Start-Process -FilePath $exe -ArgumentList @('--selftest', $report) -PassThru -Wait
     $result = Get-Content $report -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($check in $result.checks) {
         $mark = if ($check.ok) { 'OK ' } else { 'ERR' }
@@ -31,9 +34,9 @@ try {
     }
     if ($proc.ExitCode -ne 0 -or -not $result.ok) { throw 'Самопроверка exe не прошла' }
 
-    $size = (Get-Item (Join-Path $root 'dist\Lazeyka.exe')).Length / 1MB
-    $hash = (Get-FileHash (Join-Path $root 'dist\Lazeyka.exe') -Algorithm SHA256).Hash
-    Write-Host ("== Готово: dist\Lazeyka.exe, {0:N1} МБ, SHA-256 {1}" -f $size, $hash) -ForegroundColor Green
+    $size = (Get-Item $exe).Length / 1MB
+    $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+    Write-Host ("== Готово: {0}, {1:N1} МБ, SHA-256 {2}" -f $exe, $size, $hash) -ForegroundColor Green
 }
 finally {
     Pop-Location

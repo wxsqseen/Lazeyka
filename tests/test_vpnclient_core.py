@@ -446,13 +446,28 @@ def test_selftest_vpnclient_checks_without_core():
     from app import selftest
     from app.vpnclient import engines
     detail = selftest.check_vpnclient_parsing()           # разбор и конфиг — без запуска ядра
-    assert "ссылка VLESS+REALITY" in detail
+    assert "ссылка VLESS+REALITY" in detail and "подписка и профили" in detail
     cores = selftest.pinned_cores()
     assert cores["sing-box"]["sha256"] == engines.CORES["sing-box"].zip_sha256
     assert cores["xray"]["url"].startswith("https://github.com/XTLS/Xray-core/releases/download/v26.3.27/")
     assert selftest.PINNED_CORES["sing-box"]["sha256"] == engines.CORES["sing-box"].zip_sha256   # план = код
     detail = selftest.check_core_pins(frozen=True)        # без сети и без zip: их в сборке больше нет
     assert "sing-box 1.14.3" in detail and "xray 26.3.27" in detail and "GPL-3.0" in detail
+
+
+def test_selftest_lists_every_vpnclient_module():
+    """Менеджер подгружает модули по имени — exe 1.2.0 вышел без store и subscription. Самопроверка
+    сборки импортирует каждый модуль из списка, а список обязан совпадать с файлами пакета."""
+    from app import selftest
+    package = Path(selftest.__file__).parent / "vpnclient"
+    on_disk = {f.stem for f in package.glob("*.py") if f.stem != "__init__"}
+    assert set(selftest.VPNCLIENT_MODULES) == on_disk
+    assert "все импортируются" in selftest.check_vpnclient_modules()
+
+
+def test_spec_bundles_every_vpnclient_module():
+    spec = (Path(__file__).resolve().parents[1] / "build" / "lazeyka.spec").read_text(encoding="utf-8")
+    assert 'collect_submodules("app.vpnclient")' in spec
 
 
 def test_selftest_core_pins_catch_a_changed_hash_or_address(monkeypatch):

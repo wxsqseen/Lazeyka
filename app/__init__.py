@@ -2,7 +2,7 @@
 
 APP_NAME = "Лазейка"
 APP_ID = "Lazeyka"
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 ZAPRET_REPO = "Flowseal/zapret-discord-youtube"
 TGWS_REPO = "Flowseal/tg-ws-proxy"

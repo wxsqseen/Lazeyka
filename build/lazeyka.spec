@@ -39,6 +39,9 @@ hiddenimports = [
     # Ядро tg-ws-proxy загружается через importlib по вычисляемому имени — его модули
     # статический анализ не видит.
     *collect_submodules("app.vendor.tgws_proxy"),
+    # Менеджер своего VPN подгружает модули пакета по имени (importlib) — статический анализ
+    # видит не все: в 1.2.0 из exe выпали store и subscription.
+    *collect_submodules("app.vpnclient"),
     # Стандартные модули, которые может импортировать обновлённое ядро прокси.
     "secrets", "hmac", "ipaddress", "zlib", "gzip", "uuid", "statistics", "selectors",
     "concurrent.futures", "http.client", "email.utils", "dataclasses", "enum", "heapq", "bisect",
