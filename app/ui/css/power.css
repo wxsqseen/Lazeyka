@@ -126,7 +126,7 @@
   cursor: default;
 }
 
-@media (max-height: 700px) {
+@container app (max-height: 700px) {
   .power {
     width: 104px;
     height: 104px;

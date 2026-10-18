@@ -1,4 +1,5 @@
 ﻿# Сборка Lazeyka.exe: тесты, значок, PyInstaller, самопроверка готового exe.
+# Ядер своего VPN в exe нет: Лазейка скачивает их с GitHub при запуске (docs/vpnclient-plan.md, 9).
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $py = Join-Path $root '.venv\Scripts\python.exe'

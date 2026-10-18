@@ -71,7 +71,9 @@ def _title_bar(hwnd: int, dark: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else argv
+    args = _parse_args(argv)
+    pending_link = next((a for a in argv if a.startswith("lazeyka://")), None)
     if args.selftest:
         from .selftest import run as run_selftest
         return run_selftest(args.selftest)
@@ -101,11 +103,15 @@ def main(argv: list[str] | None = None) -> int:
                 log.error("Прежний экземпляр не завершился")
                 return 1
         else:
+            if pending_link:
+                from .vpnclient import deeplink
+                if not deeplink.send_to_running(pending_link):
+                    log.warning("Не удалось передать ссылку работающему экземпляру")
             instance.signal_existing()
             return 0
 
     if not admin and not args.no_elevate:
-        passthrough = [a for a in sys.argv[1:] if a not in ("--replace",)]
+        passthrough = [a for a in argv if a not in ("--replace",)]
         result = winutil.relaunch_as_admin(paths.launch_command() + passthrough + ["--replace"])
         if result == "launched":
             return 0
@@ -122,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     core = Core(autostarted=args.autostart, log_dir=log_file.parent)
     log.info("Журнал: %s", log_file)
     core.startup()
+    from .vpnclient import deeplink
+    link_server = deeplink.LinkServer()
 
     theme = core.settings.get("ui", "theme")
     first_run = core.settings.get("first_run")
@@ -172,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Выход по запросу пользователя")
 
         def finish() -> None:
+            link_server.stop()
             core.shutdown()
             stop_tray()
             instance.close()
@@ -203,6 +212,10 @@ def main(argv: list[str] | None = None) -> int:
             _title_bar(hwnd_box["hwnd"], current == "dark")
 
     def on_loaded() -> None:
+        nonlocal pending_link
+        if pending_link:
+            text, pending_link = pending_link, None
+            on_link(text)
         renderer = getattr(webview, "renderer", None)
         if renderer and renderer != "edgechromium":
             log.error("WebView2 не найден, движок окна: %s", renderer)
@@ -263,17 +276,38 @@ def main(argv: list[str] | None = None) -> int:
     core.on_theme = on_theme
     core.on_status_change = tray.refresh
     core.on_toast = tray.notify
+
+    def on_link(text: str) -> None:
+        try:
+            handler = getattr(core, "vpnclient_deeplink", None)
+            if handler is None:
+                log.info("Импорт ссылок своего VPN ещё недоступен")
+            else:
+                handler(text)
+        except Exception:  # noqa: BLE001
+            log.warning("Не удалось открыть импорт ссылки своего VPN")
+        finally:
+            show()
+
+    try:
+        link_server.start(on_link)
+    except Exception:  # noqa: BLE001
+        log.warning("Канал ссылок своего VPN недоступен")
     instance.listen(show)
     tray.start()
     tray.refresh()
 
     icon_path = paths.resource_dir() / "assets" / "icon.ico"
-    webview.start(gui="edgechromium", private_mode=True, debug=False,
-                  icon=str(icon_path) if icon_path.is_file() else None)
-    if not quitting.is_set():
-        quitting.set()
-        core.shutdown()
-        stop_tray()
+    try:
+        webview.start(gui="edgechromium", private_mode=True, debug=False,
+                      icon=str(icon_path) if icon_path.is_file() else None)
+    finally:
+        # И при исключении из окна: свой VPN возвращает системный прокси, ядра останавливаются.
+        link_server.stop()
+        if not quitting.is_set():
+            quitting.set()
+            core.shutdown()
+            stop_tray()
     log.info("%s завершён", APP_NAME)
     return 0
 

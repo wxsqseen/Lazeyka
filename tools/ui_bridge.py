@@ -44,6 +44,8 @@ def main() -> None:
 
     import os
     os.environ.setdefault("LAZEYKA_DATA", tempfile.mkdtemp(prefix="lazeyka-bridge-"))
+    # Стенд не запускает ядро своего VPN и не трогает системный прокси (app/vpnclient/guard.py).
+    os.environ["LAZEYKA_NO_CORE"] = "1"
     from app import paths, winutil
     from app import log as applog
     applog.setup(paths.logs_dir(allow_create_data=True))

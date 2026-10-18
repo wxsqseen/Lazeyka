@@ -36,6 +36,17 @@
       kind: 'direct', role: '', reason: 'виртуальный адаптер', up: true, app: null,
     },
   ];
+  /* Свой VPN Лазейки: Discord и YouTube — через обход («через обход Лазейки» включено), остальное — через сервер. */
+  const PROBE_OWN = [
+    { id: 'discord', label: 'Discord', via: 'direct' },
+    { id: 'youtube', label: 'YouTube', via: 'direct' },
+    { id: 'telegram', label: 'Telegram-прокси', via: 'vpn' },
+    { id: 'other', label: 'Остальные сайты', via: 'vpn' },
+  ];
+  const OWN_ADAPTER = {
+    id: '{6c0f9d1e-2b3a-4c5d-8e7f-0a1b2c3d4e05}', index: 41, name: 'Lazeyka', description: 'sing-box TUN (Wintun)',
+    kind: 'tunnel', role: 'internet', reason: 'свой VPN Лазейки', up: true, app: 'Лазейка', own: true,
+  };
   /* Туннель: Discord — через VPN, YouTube — мимо VPN, Telegram-прокси — через VPN. */
   const PROBE_TUNNEL = [
     { id: 'discord', label: 'Discord', via: 'vpn' },
@@ -59,20 +70,27 @@
 
   /* ---------- Снимок ---------- */
 
+  function ownVpn() {
+    return mock.ownVpn ? mock.ownVpn() : { active: false, mode: null };
+  }
+
   function adapters() {
-    return ADAPTERS.filter((adapter) => tunnelUp || !adapter.vpnOnly).map((adapter) => {
+    const list = ADAPTERS.filter((adapter) => tunnelUp || !adapter.vpnOnly).map((adapter) => {
       const { vpnOnly, ...plain } = adapter;
       const override = settings.overrides[adapter.id];
       if (override === 'direct') return { ...plain, kind: 'direct', role: '', reason: 'задано вручную' };
       if (override === 'tunnel') return { ...plain, kind: 'tunnel', role: plain.role || 'lan', reason: 'задано вручную' };
       return plain;
     });
+    const own = ownVpn();
+    return own.active && own.mode === 'tun' ? [...list, { ...OWN_ADAPTER }] : list;
   }
 
   /** То же, что ядро отдаёт как vpn.snapshot_dict: без настроек, фильтра и маршрутов. */
   function snapshot() {
     const list = adapters();
-    const internet = list.some((adapter) => adapter.kind === 'tunnel' && adapter.role === 'internet');
+    /* Свой адаптер «Lazeyka» чужим VPN не считается. */
+    const internet = list.some((adapter) => !adapter.own && adapter.kind === 'tunnel' && adapter.role === 'internet');
     const proxy = proxyMode ? VPN_PROXY : null;
     const active = internet || Boolean(proxy);
     let candidates = [];
@@ -94,7 +112,7 @@
   }
 
   function signature(snap) {
-    const tunnels = snap.adapters.filter((a) => a.kind === 'tunnel' && a.role === 'internet').map((a) => `Wintun:${a.id}`);
+    const tunnels = snap.adapters.filter((a) => !a.own && a.kind === 'tunnel' && a.role === 'internet').map((a) => `Wintun:${a.id}`);
     return snap.proxy ? [...tunnels, `proxy:${snap.proxy}`] : tunnels;
   }
 
@@ -107,8 +125,12 @@
   function appliedFilter(snap) {
     const zapret = state.zapret;
     const tunnels = snap.adapters.filter((a) => a.kind === 'tunnel');
-    if (zapret.status !== 'running' || !settings.compat || !tunnels.length) return { mode: 'plain' };
     const interfaces = snap.adapters.filter((a) => a.kind === 'direct').map((a) => a.index).sort((a, b) => a - b);
+    /* Совместимость выключена, а свой VPN работает: исключаются только свой туннель и свои серверы. */
+    if (zapret.status === 'running' && !settings.compat && ownVpn().active) {
+      return { mode: 'own', interfaces, servers: ['203.0.113.5'], error: null, at: zapret.started_at };
+    }
+    if (zapret.status !== 'running' || !settings.compat || !tunnels.length) return { mode: 'plain' };
     if (scenario === 'error') {
       return { mode: 'error', error: 'WinDivert не принял фильтр: превышена длина выражения', interfaces, servers_seen: snap.servers };
     }
@@ -121,7 +143,7 @@
 
   function refreshVpn() {
     const snap = snapshot();
-    if (!snap.active) routes = null;
+    if (!snap.active && !ownVpn().active) routes = null;
     state.vpn = {
       ...snap,
       compat: settings.compat,
@@ -130,6 +152,8 @@
       overrides: { ...settings.overrides },
       filter: appliedFilter(snap),
       routes: routes ? { ...routes } : null,
+      /* Свой VPN Лазейки (mock-vpnclient.js задаёт mock.ownVpn) — чужим он не считается. */
+      own: ownVpn(),
     };
   }
 
@@ -146,14 +170,17 @@
   api.vpn_probe = function vpnProbe() {
     if (routes && routes.running) return ok();
     const snap = snapshot();
-    if (!snap.active) {
+    const ownOnly = !snap.active && ownVpn().active;
+    if (!snap.active && !ownOnly) {
       routes = null;
       return ok();
     }
     routes = { running: true, at: null, items: routes ? routes.items : null };
     later(PROBE_MS, () => {
       const viaProxy = snap.mode === 'proxy';
-      const items = (viaProxy ? PROBE_PROXY : PROBE_TUNNEL).map((item) => ({ ...item }));
+      let source = viaProxy ? PROBE_PROXY : PROBE_TUNNEL;
+      if (ownOnly) source = PROBE_OWN;
+      const items = source.map((item) => ({ ...item }));
       routes = {
         running: false, at: nowSec(), full_tunnel: snap.full_tunnel, mode: viaProxy ? 'proxy' : 'tunnel',
         checked_vpn: true, checked_direct: !viaProxy, error: false, items,
@@ -183,6 +210,7 @@
     const denied = requireAdmin();
     if (denied) return denied;
     settings.compat = Boolean(on);
+    if (settings.compat) mock.dropNotice('compat-off');   /* как Core._reconcile_alerts */
     restartIfRunning('совместимость с VPN');
     return ok({
       message: settings.compat ? 'Обход не будет трогать трафик VPN.'
@@ -222,8 +250,9 @@
       mock.setNotice(settings.compat
         ? { id: 'vpn-start', level: 'info', text: `Обход включён рядом с VPN (${snap.label}): трафик VPN он не трогает.`,
           action: { label: 'Что куда идёт', page: 'zapret' }, dismissible: true }
-        : { id: 'vpn-start', level: 'warn', text: `Подключён VPN (${snap.label}), а совместимость с VPN выключена — обход может мешать VPN.`,
-          action: { label: 'Включить совместимость', call: 'vpn_set_compat', args: [true] }, dismissible: true });
+        : { id: 'compat-off', level: 'warn', text: `Подключён VPN (${snap.label}), а совместимость с VPN выключена — обход может мешать VPN.`,
+          action: { label: 'Включить совместимость', call: 'vpn_set_compat', args: [true] }, dismissible: true,
+          persistent: true, page: 'zapret' });
     }
     return result;
   };

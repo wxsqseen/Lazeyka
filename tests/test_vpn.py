@@ -417,7 +417,7 @@ def _core(tmp_path, monkeypatch, snap):
     core.settings = Settings(tmp_path / "c.json")
     core.vpn_snapshot, core.vpn_routes, core._vpn_scan_at = None, None, 0.0
     core.background = lambda name, fn, on_error: fn()
-    monkeypatch.setattr(vpn, "scan", lambda overrides=None: snap)
+    monkeypatch.setattr(vpn, "scan", lambda overrides=None, own=None: snap)
     monkeypatch.setattr(vpn, "probe_routes", lambda s: {"items": [], "full_tunnel": True, "at": 1.0})
 
     class Z:

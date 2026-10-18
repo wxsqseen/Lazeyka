@@ -1,5 +1,8 @@
 'use strict';
-/* Главная: карточки «Discord и YouTube» и «Telegram» с большой кнопкой питания. */
+/*
+ * Главная: карточки «Discord и YouTube» и «Telegram» с большой кнопкой питания и третья,
+ * во всю ширину, — «Свой VPN» (без своих серверов вместо неё тихая строка).
+ */
 (function (Lz) {
   const { h, icon, uid, setText, setHidden } = Lz.dom;
   const ui = Lz.ui;
@@ -281,5 +284,136 @@
     return { el, update };
   }
 
-  Lz.homeCards = { createZapretHero, createTelegramHero };
+  /* ---------- Карточка своего VPN ---------- */
+
+  /** Подписка, чьи трафик и срок показать: выбранного сервера, иначе первая с лимитами. */
+  function subscriptionFor(snap) {
+    const selected = snap.vc.selected;
+    const byId = (id) => snap.subscriptions.find((sub) => String(sub.id) === String(id)) || null;
+    let sub = null;
+    if (selected && selected.id) {
+      const id = String(selected.id);
+      const serverId = selected.actual && selected.actual.id ? String(selected.actual.id) : id;
+      const server = snap.servers.find((item) => String(item.id) === serverId);
+      if (server && server.sub) sub = byId(server.sub);
+      if (!sub && id.startsWith('auto:')) {
+        const target = id.slice('auto:'.length);
+        const group = snap.groups.find((item) => String(item.id) === target);
+        sub = byId(group ? group.sub : target);
+      }
+    }
+    return sub || snap.subscriptions.find((item) => Lz.vcView.usage(item).hasLimits) || null;
+  }
+
+  function createVpnClientHero() {
+    const pill = ui.statusPill();
+    const power = Lz.power.create({
+      label: 'Свой VPN',
+      onToggle: (status) => Lz.vpnclientGate.toggle(status),
+    });
+    const caption = h('p', { class: 'hero__caption', 'aria-live': 'polite' });
+    const statusText = h('span', { class: 'conn__text' });
+    const statusLine = h('p', { class: 'conn', role: 'status' }, h('span', { class: 'conn__dot', 'aria-hidden': 'true' }), statusText);
+    const server = ui.slot((data) => [
+      Lz.vcView.selectedLine(data.view, 'vc-home__server'),
+      data.mode ? ui.chip({
+        icon: 'vpn',
+        text: data.mode,
+        title: 'Режим и сервер — на странице «VPN»',
+        onClick: () => Lz.nav.go('vpnclient'),
+      }) : null,
+      data.bypass ? ui.chip({ icon: 'route', text: 'Discord и YouTube — через обход', tone: 'accent', title: data.bypass }) : null,
+    ], { cls: 'vc-home__row' });
+
+    const downValue = h('span', { class: 'stat__value num' });
+    const upValue = h('span', { class: 'stat__value num' });
+    const todayValue = h('span', { class: 'stat__value num' });
+    const spark = ui.sparkline({ label: 'Скорость своего VPN за две минуты' });
+    const stats = h('div', { class: 'vc-home__stats' },
+      statTile('arrowDown', 'Загрузка', downValue, 'down'),
+      statTile('arrowUp', 'Отдача', upValue, 'up'),
+      statTile(null, 'Сегодня', todayValue),
+      h('div', { class: 'spark-wrap' }, spark.el));
+
+    const subName = h('span');
+    const subExpire = h('span');
+    const subBar = Lz.ui.progressBar({ label: 'Трафик подписки' });
+    const subBox = h('div', { class: 'vc-home__sub', hidden: true },
+      h('p', { class: 'vc-home__sub-text' }, subName, subExpire), subBar.el);
+
+    const subtitleEl = h('p', { class: 'hero__sub' });
+    const el = h('article', { class: 'panel hero hero--vpnc', dataset: { state: 'stopped' } },
+      h('header', { class: 'hero__head' },
+        h('div', { class: 'hero__titles' }, h('h2', { class: 'hero__title', text: 'Свой VPN' }), subtitleEl),
+        pill.el),
+      h('div', { class: 'vc-home' },
+        h('div', { class: 'vc-home__power' }, power.el, caption),
+        h('div', { class: 'vc-home__info' }, statusLine, server.el, stats, subBox)));
+
+    function update(state) {
+      const snap = Lz.vcView.snapshot(state);
+      const vc = snap.vc;
+      const pillStatus = texts.vpncPillStatus(vc);
+      const status = vc.status || 'stopped';
+      if (el.dataset.state !== pillStatus) el.dataset.state = pillStatus;
+      pill.set(pillStatus);
+      power.update(pillStatus === 'verifying' ? 'running' : (vc.available === false ? 'stopped' : status), { disabled: vc.available === false });
+      setText(caption, texts.vpncCaption(vc, pillStatus));
+      caption.classList.toggle('is-error', status === 'error');
+      setText(subtitleEl, `Ваш сервер · ${texts.vpncMode(vc.mode).short.toLowerCase()}`);
+
+      const line = texts.vpncLine(vc);
+      statusLine.dataset.tone = line.tone;
+      setText(statusText, line.text);
+
+      const routing = snap.routing;
+      server.update({
+        view: Lz.vcView.selectedView(vc),
+        mode: texts.vpncMode(vc.mode).short,
+        bypass: status === 'running' && routing.via_zapret !== false && routing.bypass === 'direct' ? String(routing.bypass_note || '') || 'Их обрабатывает обход Лазейки' : null,
+      });
+
+      const statsData = vc.stats || {};
+      const traffic = vc.traffic || {};
+      setText(downValue, fmt.rate(statsData.down_rate || 0));
+      setText(upValue, fmt.rate(statsData.up_rate || 0));
+      setText(todayValue, fmt.bytes((Number(traffic.today_up) || 0) + (Number(traffic.today_down) || 0)));
+      stats.classList.toggle('is-idle', status !== 'running');
+      spark.update(vc.history);
+
+      const sub = subscriptionFor(snap);
+      const usage = sub ? Lz.vcView.usage(sub) : null;
+      const showSub = Boolean(usage && usage.hasLimits);
+      setHidden(subBox, !showSub);
+      if (showSub) {
+        setText(subName, `${sub.name || 'Подписка'}: ${usage.trafficText}`);
+        setText(subExpire, usage.warnings.length ? usage.warnings[0].text : usage.expireText);
+        subExpire.className = usage.tone ? `is-${usage.tone}` : '';
+        setHidden(subBar.el, usage.share == null);
+        if (usage.share != null) subBar.set(usage.share);
+        subBar.el.classList.toggle('is-warn', usage.tone === 'warn');
+        subBar.el.classList.toggle('is-err', usage.tone === 'err');
+      }
+    }
+
+    return { el, update };
+  }
+
+  /** Пока своих серверов нет — тихая строка вместо карточки. */
+  function createVpnClientLine() {
+    const line = h('p', { class: 'conn', dataset: { tone: 'off' } },
+      h('span', { class: 'conn__dot', 'aria-hidden': 'true' }),
+      h('span', { class: 'conn__text', text: 'Подключите свой VPN' }));
+    const link = ui.button({
+      label: 'Добавить подписку',
+      iconRight: 'arrowRight',
+      kind: 'link',
+      size: 'sm',
+      title: 'Подойдёт подписка вашего VPN на VLESS, VMess, Shadowsocks, Trojan, Hysteria2, TUIC, WireGuard или SOCKS',
+      onClick: () => Lz.nav.go('vpnclient', { focus: 'add' }),
+    });
+    return { el: h('div', { class: 'home-vpnc', hidden: true }, line, link.el) };
+  }
+
+  Lz.homeCards = { createZapretHero, createTelegramHero, createVpnClientHero, createVpnClientLine };
 })(window.Lz);

@@ -1,5 +1,5 @@
 'use strict';
-/* Настройки: тема, поведение окна и запуска, сторож обхода, сеть; «О программе» с благодарностями авторам. */
+/* Настройки: тема и масштаб, поведение окна и запуска, сторож обхода, сеть; «О программе» с благодарностями авторам. */
 (function (Lz) {
   const { h, uid, setText } = Lz.dom;
   const ui = Lz.ui;
@@ -10,6 +10,8 @@
     { value: 'dark', label: 'Тёмная', icon: 'moon' },
     { value: 'light', label: 'Светлая', icon: 'sun' },
   ];
+
+  const SCALE_OPTIONS = [0.8, 0.9, 1, 1.1, 1.25, 1.5].map((value) => ({ value, label: `${Math.round(value * 100)} %` }));
 
   const LAUNCH_TOGGLES = [
     {
@@ -36,6 +38,11 @@
       key: 'tg_on_start',
       title: 'Включать прокси Telegram при запуске',
       description: 'Telegram подключится к прокси, как только Лазейка запустится.',
+    },
+    {
+      key: 'vpnclient_on_start',
+      title: 'Включать свой VPN при запуске',
+      description: 'Лазейка подключится к выбранному серверу сразу после старта — если вы добавили подписку или сервер.',
     },
   ];
 
@@ -76,6 +83,16 @@
       name: 'Flowseal/tg-ws-proxy',
       text: 'Прокси для Telegram через WebSocket',
       url: 'https://github.com/Flowseal/tg-ws-proxy',
+    },
+    {
+      name: 'SagerNet/sing-box',
+      text: 'Ядро своего VPN — сторонний проект',
+      url: 'https://github.com/SagerNet/sing-box/tree/v1.14.3',
+    },
+    {
+      name: 'XTLS/Xray-core',
+      text: 'Помощник своего VPN для XHTTP и mKCP',
+      url: 'https://github.com/XTLS/Xray-core/tree/v26.3.27',
     },
   ];
 
@@ -126,12 +143,34 @@
         return ok;
       },
     });
+    const scaleTitleId = uid('scale-title');
+    const scaleSeg = ui.segmented({
+      labelledBy: scaleTitleId,
+      value: Lz.scale.current,
+      options: SCALE_OPTIONS,
+      onChange: async (value, previous) => {
+        Lz.scale.hold(value);
+        const ok = await saveSetting('ui_scale', value);
+        if (!ok) {
+          Lz.scale.release();
+          Lz.scale.apply(previous);
+        }
+        return ok;
+      },
+    });
     const appearance = ui.card({ title: 'Оформление' });
-    appearance.body.append(choiceRow({
-      title: 'Тема',
-      description: '«Как в Windows» следует за системной темой.',
-      control: themeSeg,
-    }));
+    appearance.body.append(h('div', { class: 'settings-list' },
+      choiceRow({
+        title: 'Тема',
+        description: '«Как в Windows» следует за системной темой.',
+        control: themeSeg,
+      }),
+      choiceRow({
+        title: 'Масштаб окна',
+        description: 'Крупнее или мельче всё: текст, кнопки и окна.',
+        control: scaleSeg,
+        titleId: scaleTitleId,
+      })));
 
     const launch = ui.card({ title: 'Запуск и окно' });
     const hideBtn = ui.actionButton({ method: 'hide_window', label: 'Свернуть в трей', icon: 'tray', size: 'sm' });
@@ -175,6 +214,7 @@
     const appVersion = h('p', { class: 'about__meta num' });
     const zapretVersion = h('span', { class: 'kv__value num' });
     const tgVersion = h('span', { class: 'kv__value num' });
+    const vpnCoreVersion = h('span', { class: 'kv__value num' });
     const dataDir = h('span', { class: 'kv__value mono' });
     const openData = ui.button({
       label: 'Открыть',
@@ -194,6 +234,7 @@
       h('div', { class: 'kv-list' },
         kvRow('Стратегии zapret', zapretVersion),
         kvRow('tg-ws-proxy', tgVersion),
+        kvRow('Ядра своего VPN', vpnCoreVersion),
         kvRow('Папка данных', dataDir, openData.el)),
       h('p', { class: 'about__label', text: 'Спасибо авторам' }),
       h('div', { class: 'kv-list' }, CREDITS.map((credit) => h('div', { class: 'kv kv--credit' },
@@ -207,7 +248,7 @@
           title: 'Открыть на GitHub',
           onClick: () => Lz.actions.openUrl(credit.url),
         }).el))),
-      h('p', { class: 'licence', text: 'Лазейка — свободная программа под лицензией MIT. zapret, zapret-discord-youtube и tg-ws-proxy — проекты их авторов и распространяются на условиях своих лицензий.' }));
+      h('p', { class: 'licence', text: 'Лазейка — свободная программа под лицензией MIT. zapret, zapret-discord-youtube и tg-ws-proxy — проекты их авторов и распространяются на условиях своих лицензий. sing-box (GPL-3.0-or-later) и Xray-core (MPL-2.0) Лазейка запускает отдельными программами без изменений; она не связана с этими проектами и не одобрена ими.' }));
 
     const header = ui.pageHeader({ title: 'Настройки' });
     const el = h('div', { class: 'page__inner' }, header.el, appearance.el, launch.el, bypass.el, updates.el, network.el, about.el);
@@ -217,6 +258,7 @@
       update(state) {
         const settings = state.settings || {};
         themeSeg.set(settings.theme || 'system');
+        if (settings.ui_scale != null) scaleSeg.set(Number(settings.ui_scale));
         watchdogSeg.set(settings.watchdog || 'ask');
         for (const key of Object.keys(rows)) rows[key].set(Boolean(settings[key]));
         const app = state.app || {};
@@ -226,6 +268,11 @@
         setText(zapretVersion, zapret.pack && zapret.pack.version ? zapret.pack.version : 'не установлены');
         const core = tg.core && texts.CORE_KIND[tg.core] ? `, ${texts.CORE_KIND[tg.core]}` : '';
         setText(tgVersion, tg.version ? `${tg.version}${core}` : '—');
+        const cores = state.vpnclient && state.vpnclient.cores ? state.vpnclient.cores : {};
+        const coreParts = [['sing-box', 'sing-box'], ['xray', 'Xray']]
+          .filter(([name]) => cores[name] && cores[name].installed && cores[name].version)
+          .map(([name, label]) => `${label} ${cores[name].version}`);
+        setText(vpnCoreVersion, coreParts.length ? coreParts.join(' · ') : 'не установлены');
         setText(dataDir, app.data_dir || '—');
       },
     };

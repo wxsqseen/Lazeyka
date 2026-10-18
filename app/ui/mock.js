@@ -3,8 +3,9 @@
  * Имитация ядра Лазейки — только для разработки интерфейса и скриншотов.
  * Загружается из app.js, когда в адресе есть ?mock, а настоящего pywebview нет.
  * Вместе с дополнениями версии 1.1 — mock-zapret.js (проверка доступности, «Найти и включить»,
- * оценки стратегий, сторож), mock-help.js (клиент Telegram, DNS, проверка сайта, отчёт)
- * и mock-vpn.js (VPN рядом с обходом) — реализует весь контракт docs/ui-contract.md на таймерах.
+ * оценки стратегий, сторож), mock-help.js (клиент Telegram, DNS, проверка сайта, отчёт),
+ * mock-vpn.js (VPN рядом с обходом) и mock-vpnclient.js (свой VPN, версия 1.2) — реализует
+ * весь контракт docs/ui-contract.md на таймерах.
  *
  * Параметры адреса:
  *   firstrun=0|1   — показывать приветствие (по умолчанию 1); onb=1..3 — с какого шага
@@ -987,6 +988,22 @@
       state.updates.last_check = nowSec();
       recount();
     },
+    /* Постоянные плашки (persistent: true): на главной — все, на странице из page — ещё и под заголовком. */
+    alerts: () => {
+      const alert = (id, level, text, page, action) => setNotice({
+        id, level, text, page, action: action || null, persistent: true, dismissible: true,
+      });
+      alert('tg-down', 'error', 'Telegram-прокси не включился при запуске Лазейки: порт 1443 занят другой программой.',
+        null, { label: 'Включить снова', call: 'tg_start', args: [] });
+      alert('watchdog', 'warn', 'Discord перестал открываться. Найти рабочую стратегию?', 'zapret',
+        { label: 'Найти и включить', call: 'zapret_fix', args: [] });
+      alert('vpn-exit', 'warn', 'Ядро включено, но через сервер ничего не открывается: сервер не ответил за 8 секунд.',
+        'vpnclient', { label: 'Переподключить', call: 'vpnclient_restart', args: [] });
+      alert('vpn-sub:s-3f9a1c', 'warn', 'Подписка «Мой VPN» не обновилась: сервер подписки не отвечает.', 'vpnclient',
+        { label: 'Обновить', call: 'vpnclient_sub_update', args: ['s-3f9a1c'] });
+      alert('vpn-rules', 'info', 'Списки для маршрутов ещё не скачаны — пока эти сайты идут по умолчанию. Лазейка скачивает их.',
+        'vpnclient');
+    },
   };
   const DEMO_DELAY_MS = 300;
 
@@ -1001,7 +1018,7 @@
    * Дополнения версии 1.1 живут в отдельных файлах и регистрируются в window.LzMockExtensions.
    * Подключаем их по порядку и только потом объявляем ядро готовым.
    */
-  const EXTENSION_FILES = ['mock-zapret.js', 'mock-help.js', 'mock-vpn.js'];
+  const EXTENSION_FILES = ['mock-zapret.js', 'mock-help.js', 'mock-vpn.js', 'mock-vpnclient.js'];
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {

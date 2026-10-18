@@ -115,5 +115,14 @@
     if (el.getAttribute(name) !== text) el.setAttribute(name, text);
   }
 
-  Lz.dom = { h, s, icon, uid, setText, setHidden, setAttr, append: appendChildren };
+  /** Элемент по ключу фокуса data-fk: по нему находят кнопку, которую слот перестроил. */
+  function byFk(key) {
+    if (!key) return null;
+    for (const node of document.querySelectorAll('[data-fk]')) {
+      if (node.dataset.fk === key) return node;
+    }
+    return null;
+  }
+
+  Lz.dom = { h, s, icon, uid, setText, setHidden, setAttr, byFk, append: appendChildren };
 })(window.Lz);

@@ -696,7 +696,14 @@ class StrategyTester:
                     else:
                         z.start()
                 except Exception as exc:  # noqa: BLE001
-                    self.notify("error", f"Обход не вернулся после пробы: {exc}")
+                    # «Найти и включить» запускает и сторож (режим auto) — обход лежит, пока не включат: плашка.
+                    alert = getattr(z, "_alert", None)
+                    text = f"Обход не вернулся после пробы стратегий: {exc}"
+                    if callable(alert):
+                        alert("zapret-down", "error", text,
+                              action={"label": "Включить снова", "call": "zapret_start", "args": []}, page=None)
+                    else:
+                        self.notify("error", text)
         return found
 
     def revert_fix(self) -> str:

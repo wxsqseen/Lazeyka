@@ -1,0 +1,118 @@
+[
+  {
+    "remarks": "🇳🇱 Амстердам",
+    "meta": {"serverDescription": "Основной канал"},
+    "dns": {"servers": ["1.1.1.1", "1.0.0.1"], "queryStrategy": "UseIP"},
+    "inbounds": [
+      {"tag": "socks", "port": 10808, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": true, "auth": "noauth"}},
+      {"tag": "http", "port": 10809, "listen": "127.0.0.1", "protocol": "http", "settings": {"allowTransparent": false}}
+    ],
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": "nl.example.com", "port": 443,
+                                "users": [{"id": "11111111-2222-4333-8444-555555555555", "encryption": "none",
+                                           "flow": "xtls-rprx-vision"}]}]},
+        "streamSettings": {
+          "network": "tcp", "tcpSettings": {},
+          "security": "reality",
+          "realitySettings": {"serverName": "www.example.org", "publicKey": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+                              "shortId": "6ba85179e30d4fc2", "spiderX": "/", "fingerprint": "chrome"}
+        }
+      },
+      {"tag": "direct", "protocol": "freedom"},
+      {"tag": "block", "protocol": "blackhole"}
+    ],
+    "routing": {"rules": [{"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"}],
+                "domainMatcher": "hybrid", "domainStrategy": "IPIfNonMatch"}
+  },
+  {
+    "remarks": "🇩🇪 Франкфурт",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": "203.0.113.10", "port": 443,
+                                "users": [{"id": "22222222-3333-4444-8555-666666666666", "encryption": "none"}]}]},
+        "streamSettings": {
+          "network": "xhttp",
+          "xhttpSettings": {"mode": "packet-up", "host": "cdn.example.com", "path": "/xh",
+                            "extra": {"xPaddingBytes": "100-1000", "noGRPCHeader": false}},
+          "security": "reality",
+          "realitySettings": {"serverName": "www.example.org", "publicKey": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+                              "shortId": "", "fingerprint": "chrome"}
+        }
+      },
+      {"tag": "direct", "protocol": "freedom"},
+      {"tag": "block", "protocol": "blackhole"}
+    ],
+    "routing": {"rules": [{"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"}]}
+  },
+  {
+    "remarks": "🇫🇮 Хельсинки",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "hysteria",
+        "settings": {"address": "hy.example.net", "port": 443, "version": 2},
+        "streamSettings": {
+          "network": "hysteria",
+          "hysteriaSettings": {"version": 2, "auth": "hy-secret-auth"},
+          "security": "tls",
+          "tlsSettings": {"serverName": "hy.example.net", "alpn": ["h3"]},
+          "finalmask": {"udp": [{"type": "salamander", "settings": {"password": "obfs-secret"}}],
+                        "quicParams": {"udpHop": {"ports": "20000-30000", "interval": {"from": 30, "to": 60}}}}
+        }
+      },
+      {"tag": "direct", "protocol": "freedom"}
+    ]
+  },
+  {
+    "remarks": "Умная локация",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": "nl.example.com", "port": 443,
+                                "users": [{"id": "11111111-2222-4333-8444-555555555555", "encryption": "none",
+                                           "flow": "xtls-rprx-vision"}]}]},
+        "streamSettings": {
+          "network": "tcp", "security": "reality",
+          "realitySettings": {"serverName": "www.example.org", "publicKey": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+                              "shortId": "6ba85179e30d4fc2", "spiderX": "/", "fingerprint": "chrome"}
+        }
+      },
+      {
+        "tag": "proxy-2",
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": "se.example.com", "port": 8443,
+                                "users": [{"id": "33333333-4444-4555-8666-777777777777", "encryption": "none",
+                                           "flow": "xtls-rprx-vision"}]}]},
+        "streamSettings": {
+          "network": "raw", "security": "reality",
+          "realitySettings": {"serverName": "www.example.org", "password": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+                              "shortId": "01", "fingerprint": "firefox"}
+        }
+      },
+      {
+        "tag": "proxy-3",
+        "protocol": "trojan",
+        "settings": {"servers": [{"address": "tr.example.org", "port": 443, "password": "trojan-secret"}]},
+        "streamSettings": {"network": "ws", "wsSettings": {"path": "/tr", "headers": {"Host": "cdn.example.org"}},
+                           "security": "tls", "tlsSettings": {"serverName": "cdn.example.org"}}
+      },
+      {"tag": "direct", "protocol": "freedom"},
+      {"tag": "block", "protocol": "blackhole"}
+    ],
+    "routing": {
+      "rules": [
+        {"type": "field", "protocol": ["bittorrent"], "outboundTag": "direct"},
+        {"type": "field", "network": "tcp,udp", "balancerTag": "auto"}
+      ],
+      "balancers": [{"tag": "auto", "selector": ["proxy"], "strategy": {"type": "leastPing"}, "fallbackTag": "proxy"}]
+    },
+    "observatory": {"subjectSelector": ["proxy"], "probeUrl": "https://www.gstatic.com/generate_204",
+                    "probeInterval": "1m", "enableConcurrency": true}
+  }
+]

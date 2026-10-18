@@ -1,12 +1,14 @@
 'use strict';
 /*
  * Обновления. Главное обещание Лазейки: мы только сообщаем о новой версии,
- * а скачиваем и ставим — исключительно по нажатию пользователя. Браузер сам
- * ничего не открывает: страница релиза — лишь по клику.
+ * а скачиваем и ставим — исключительно по нажатию пользователя. Исключение — ядра своего
+ * VPN (решение владельца 2026-10-18): при включённом автообновлении они ставятся сами после
+ * проверки на конфиге человека, а карточка показывает итог. Браузер сам ничего не открывает:
+ * страница релиза — лишь по клику.
  *
- * На каждый компонент (стратегии zapret и ядро прокси для Telegram) — отдельная
- * карточка: текущая версия → новая, что нового, как файл проверяется, и ход установки
- * по этапам (скачивание → проверка → установка → готово).
+ * На каждый компонент (сама Лазейка, стратегии zapret, ядро прокси для Telegram, ядро своего
+ * VPN и помощник Xray) — отдельная карточка: текущая версия → новая, что нового, как файл
+ * проверяется, и ход установки по этапам (скачивание → проверка → установка → готово).
  */
 (function (Lz) {
   const { h, icon, setText, setHidden } = Lz.dom;
@@ -48,7 +50,23 @@
       doing: 'Сверяем SHA-256 файла с релизом на GitHub…',
       done: 'Контрольная сумма совпала. Перезапустите Лазейку, чтобы запустить новую версию.',
     },
+    vpncore: {
+      idle: 'Официальный архив sing-box сверяется по SHA-256 из релиза; новая версия встаёт рядом и проверяется на вашем конфиге, прежняя остаётся для отката. При автообновлении Лазейка поставит её сама.',
+      doing: 'Сверяем SHA-256 архива ядра с релизом на GitHub…',
+      done: 'Контрольная сумма совпала, ядро приняло ваш конфиг. Свой VPN переподключится на новой версии.',
+    },
+    vpnxray: {
+      idle: 'Официальный архив Xray-core сверяется по SHA-256 из релиза; прежняя версия остаётся для отката.',
+      doing: 'Сверяем SHA-256 архива помощника с релизом на GitHub…',
+      done: 'Контрольная сумма совпала. Помощник Xray обновлён.',
+    },
   };
+  /* Подписи пунктов своего VPN, если ядро их не прислало. */
+  const TITLE_FALLBACK = {
+    vpncore: { title: 'Ядро VPN (sing-box)', subtitle: 'SagerNet/sing-box · сторонний проект, GPL-3.0' },
+    vpnxray: { title: 'Помощник Xray', subtitle: 'XTLS/Xray-core · сторонний проект, MPL-2.0' },
+  };
+  const NOT_INSTALLED = { vpncore: 'не установлено', vpnxray: 'не установлен' };
   const VERIFY_FALLBACK = {
     idle: 'Перед установкой файлы сверяются по контрольным суммам из релиза.',
     doing: 'Сверяем контрольные суммы с релизом…',
@@ -225,9 +243,11 @@
       notesBox);
 
     function update(item) {
-      setText(title, item.title || item.id);
-      setText(subtitle, item.subtitle || '');
-      setHidden(subtitle, !item.subtitle);
+      const fallback = TITLE_FALLBACK[item.id] || {};
+      const subtitleText = item.subtitle || fallback.subtitle || '';
+      setText(title, item.title || fallback.title || item.id);
+      setText(subtitle, subtitleText);
+      setHidden(subtitle, !subtitleText);
 
       const view = badgeFor(item);
       badge.dataset.tone = view.tone;
@@ -235,7 +255,7 @@
 
       const hasNewer = Boolean(item.available && item.latest && item.latest !== item.current);
       versionLine.classList.toggle('has-newer', hasNewer);
-      setText(current, item.current || '—');
+      setText(current, item.current || NOT_INSTALLED[item.id] || '—');
       setHidden(arrow, !hasNewer);
       setHidden(latest, !hasNewer);
       setText(latest, item.latest || '');
@@ -259,6 +279,8 @@
 
       if (item.state === 'error') message.update({ tone: 'err', text: item.message || STATE_TEXT.error });
       else if (item.state === 'done') message.update({ tone: 'ok', text: item.message || STATE_TEXT.done });
+      /* Без установки в ходе пояснение шлют только ядра своего VPN: «поставлено автоматически», «не подошло». */
+      else if (item.message) message.update({ tone: 'info', text: item.message });
       else message.update(null);
 
       actions.update({ item: {
@@ -303,7 +325,7 @@
 
     const autoCheck = ui.switchRow({
       title: 'Проверять при запуске',
-      description: 'Только уведомление о новой версии — ничего не скачивается без вас.',
+      description: 'Только уведомление о новой версии — ничего не скачивается без вас. Ядра своего VPN обновляются сами, это выключается на странице «VPN».',
       onChange: async (value) => {
         const result = await Lz.api.run({ method: 'save_settings', args: [{ check_updates: value }] });
         return Boolean(result && result.ok);
@@ -332,7 +354,7 @@
     const allok = ui.slot((data) => (data ? ui.callout({
       tone: 'ok',
       title: 'Всё актуально',
-      text: 'Установлены последние версии Лазейки, стратегий zapret и ядра прокси.',
+      text: 'Установлены последние версии Лазейки, стратегий zapret, ядра прокси и ядер своего VPN.',
     }) : null));
 
     const list = h('div', { class: 'updates-list' });
@@ -342,7 +364,7 @@
       text: 'Нажмите «Проверить сейчас» — мы только посмотрим, есть ли новые версии.',
     });
 
-    const header = ui.pageHeader({ title: 'Обновления', subtitle: 'Сама Лазейка, стратегии zapret и ядро прокси для Telegram' });
+    const header = ui.pageHeader({ title: 'Обновления', subtitle: 'Сама Лазейка, стратегии zapret, ядро прокси для Telegram и ядра своего VPN' });
     const el = h('div', { class: 'page__inner' }, header.el, banner.el, policy, globalError.el, allok.el, list, empty);
 
     function syncItems(items, admin) {

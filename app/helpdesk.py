@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import APP_NAME, __version__, winutil
+from . import log as applog
 
 log = logging.getLogger("lazeyka.help")
 
@@ -187,6 +188,10 @@ def build_report(state: dict, log_tail: list[dict]) -> str:
         routes = (v.get("routes") or {}).get("items") or []
         if routes:
             lines.append("Что куда идёт: " + ", ".join(f"{r['label']} — {r['via']}" for r in routes))
+    lines += _vpnclient_lines(state.get("vpnclient"))
+    found = _vpnclient_help_lines(state.get("vpnclient_help"))
+    if found:
+        lines += ["Следы VPN и аварий:"] + found
     lines += ["", f"Telegram-прокси: {tg.get('status')} · ядро {tg.get('version')} ({tg.get('core')})"]
     stats = tg.get("stats") or {}
     if stats:
@@ -199,8 +204,83 @@ def build_report(state: dict, log_tail: list[dict]) -> str:
     errors = [ln for ln in log_tail if ln.get("lvl") in ("warn", "error")][-15:]
     if errors:
         lines += ["", "Последние предупреждения:"]
-        lines += [f"- {time.strftime('%H:%M:%S', time.localtime(ln['t']))} {ln['msg']}" for ln in errors]
+        lines += [f"- {time.strftime('%H:%M:%S', time.localtime(ln['t']))} "
+                  f"{_hide_addresses(ln['msg']) if ln.get('src') == 'vpn' else ln['msg']}" for ln in errors]
     return _scrub("\n".join(lines), state)
+
+
+def _vpnclient_lines(vc: dict | None) -> list[str]:
+    """Свой VPN в отчёте: только сводка — без имён и адресов серверов, ссылок и подписок."""
+    if not isinstance(vc, dict):
+        return []
+    if not vc.get("available", True):
+        return ["", f"Свой VPN: недоступен ({vc.get('unavailable_reason') or 'причина не указана'})"]
+    servers = vc.get("servers") or []
+    subs = vc.get("subscriptions") or []
+    supported = sum(1 for s in servers if isinstance(s, dict) and s.get("supported"))
+    head = (f"Свой VPN: {vc.get('status')} · режим {vc.get('mode')} · подписок {len(subs)}, "
+            f"серверов {len(servers)} (поддерживается {supported})")
+    if vc.get("status") == "running":
+        head += " · выход проверен" if vc.get("verified") else " · выход не проверен"
+    lines = ["", head]
+    sel = vc.get("selected") or {}
+    if sel:
+        lines.append(f"Выбран: {'«Самый быстрый»' if sel.get('kind') == 'auto' else 'сервер'} · "
+                     f"{sel.get('proto')}/{sel.get('transport')}/{sel.get('security')} · ядро {sel.get('engine')}")
+    if vc.get("error_kind") or vc.get("error"):
+        lines.append(f"Ошибка своего VPN: {vc.get('error_kind') or 'other'}")
+    cores = vc.get("cores") or {}
+    if cores:
+        lines.append("Ядра: " + ", ".join(
+            f"{name} {c.get('version') or '—'}{'' if c.get('installed') else ' (не установлено)'}"
+            for name, c in cores.items() if isinstance(c, dict)))
+    routing = vc.get("routing") or {}
+    if routing:
+        lines.append(f"Маршруты: {routing.get('preset')} · через обход "
+                     f"{'вкл' if routing.get('via_zapret') else 'выкл'} ({routing.get('bypass')})")
+    conflict = vc.get("conflict") or {}
+    if conflict:
+        lines.append(f"Конфликт: {conflict.get('kind')} ({conflict.get('label')})")
+    return lines
+
+
+def _vpnclient_help_lines(items: list | None) -> list[str]:
+    """Находки панели «Свой VPN не подключается»: мёртвый прокси, DNS после чужого VPN, адаптер."""
+    found = [i for i in items or [] if isinstance(i, dict) and i.get("level") in ("warn", "error")]
+    return [f"- {i.get('title')}" for i in found]
+
+
+_IPV4 = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
+_IPV6 = re.compile(r"(?<![0-9A-Fa-f:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![0-9A-Fa-f:])")
+_HOST = re.compile(r"(?<![\w.-])(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+([a-zA-Z]{2,63})(?![\w-])")
+_FILE_EXT = {"exe", "dll", "json", "dat", "txt", "srs", "log", "zip", "conf", "yaml", "yml", "py", "go"}
+
+
+def _ip_or_keep(match: re.Match) -> str:
+    try:
+        ipaddress.ip_address(match.group(0))
+    except ValueError:
+        return match.group(0)   # «07:00:00» в выводе ядра — время, а не адрес
+    return "<адрес>"
+
+
+def _hide_addresses(text: str) -> str:
+    """Строки журнала своего VPN: адреса и домены серверов в отчёт не идут (имена файлов — идут)."""
+    text = _IPV4.sub(_ip_or_keep, text)
+    text = _IPV6.sub(_ip_or_keep, text)
+    return _HOST.sub(lambda m: m.group(0) if m.group(1).lower() in _FILE_EXT else "<домен>", text)
+
+
+def _server_addresses(state: dict) -> set[str]:
+    """IP серверов VPN и выхода, которые знает состояние: их тоже прячем из всего отчёта."""
+    v = state.get("vpn") or {}
+    filt = v.get("filter") or {}
+    found = {*map(str, v.get("servers") or []), *map(str, filt.get("servers") or []),
+             *map(str, filt.get("servers_seen") or [])}
+    exit_ip = ((state.get("vpnclient") or {}).get("exit") or {}).get("ip")
+    if exit_ip:
+        found.add(str(exit_ip))
+    return {ip for ip in found if len(ip) >= 3}
 
 
 def _scrub(text: str, state: dict) -> str:
@@ -209,4 +289,7 @@ def _scrub(text: str, state: dict) -> str:
         text = text.replace(secret, "<ключ>")
     text = re.sub(r"dd[0-9a-f]{32}", "dd<ключ>", text)
     text = re.sub(r"(?i)C:\\Users\\[^\\\s]+", r"C:\\Users\\<пользователь>", text)
+    text = applog.scrub(text)   # секреты своего VPN: ключи, ссылки, адреса подписок
+    for ip in sorted(_server_addresses(state), key=len, reverse=True):
+        text = re.sub(rf"(?<![\w.:]){re.escape(ip)}(?![\w.:])", "<адрес>", text)
     return text

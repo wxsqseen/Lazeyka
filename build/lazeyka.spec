@@ -21,6 +21,11 @@ datas = [
     (p("LICENSE"), "."),
     (p("THIRD_PARTY.md"), "."),
 ]
+# Свой VPN: ядер в exe нет — Лазейка скачивает их с GitHub при запуске (решение владельца 2026-10-18;
+# vendor/cores — только кэш для статических проверок в тестах). В сборку — тексты лицензий: GPL-3.0
+# кладётся рядом с установленным sing-box.
+if os.path.isdir(p("app", "vpnclient", "licenses")):
+    datas.append((p("app", "vpnclient", "licenses"), "app/vpnclient/licenses"))
 # Хуки pywebview и pythonnet справляются сами; это — страховка.
 datas += collect_data_files("webview", subdir="js")
 datas += collect_data_files("webview", subdir="lib")
@@ -37,6 +42,8 @@ hiddenimports = [
     # Стандартные модули, которые может импортировать обновлённое ядро прокси.
     "secrets", "hmac", "ipaddress", "zlib", "gzip", "uuid", "statistics", "selectors",
     "concurrent.futures", "http.client", "email.utils", "dataclasses", "enum", "heapq", "bisect",
+    # QR: zxingcpp — пакет-обёртка над расширением; qrcode выбирает фабрику картинок по имени.
+    "zxingcpp", "zxingcpp.zxingcpp", *collect_submodules("qrcode"),
 ]
 
 a = Analysis(

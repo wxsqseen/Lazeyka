@@ -8,8 +8,10 @@
 /* ===================== Токены ===================== */
 
 :root {
-  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  --font-display: "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  /* Первым — шрифт флагов (css/vpnclient.css): у него только региональные индикаторы, остальное — Segoe UI. */
+  --font: "Twemoji Country Flags", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Twemoji Country Flags", "Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI",
+    system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace;
 
   --radius-sm: 6px;
@@ -117,7 +119,13 @@ body {
   height: 100%;
 }
 
+/*
+ * Масштаб окна (settings.ui_scale) — CSS zoom на <html> (js/core.js), поэтому узкое и низкое окно
+ * определяется не @media (они меряют настоящее окно), а контейнером body в «зумленных» пикселях,
+ * а высота окна делится на --ui-zoom: vh внутри зума уже умножены на него.
+ */
 body {
+  container: app / size;
   margin: 0;
   overflow: hidden;
   background: var(--bg);
@@ -191,7 +199,7 @@ p {
 .app {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-  height: 100vh;
+  height: calc(100vh / var(--ui-zoom, 1));
 }
 
 .main {
@@ -1597,7 +1605,7 @@ p {
 .modal {
   position: relative;
   width: min(440px, 100%);
-  max-height: calc(100vh - 48px);
+  max-height: calc(100vh / var(--ui-zoom, 1) - 48px);
   overflow: auto;
   border: 1px solid var(--border-strong);
   border-radius: 14px;
@@ -1654,7 +1662,7 @@ p {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(380px, calc(100vw - 40px));
+  width: min(380px, calc(100vw / var(--ui-zoom, 1) - 40px));
   pointer-events: none;
 }
 
@@ -1912,14 +1920,12 @@ p {
   }
 }
 
-/* ===================== Узкое и низкое окно ===================== */
+/* ===================== Узкое и низкое окно (контейнер body, см. «Основа») ===================== */
 
-@media (max-width: 999px) {
-  :root {
-    --page-pad-x: 28px;
-  }
-
+@container app (max-width: 999px) {
+  /* Переменные — на .app, а не на :root: запрос контейнера действует только на потомков body. */
   .app {
+    --page-pad-x: 28px;
     grid-template-columns: var(--sidebar-w-collapsed) minmax(0, 1fr);
   }
 
@@ -1976,8 +1982,8 @@ p {
   }
 }
 
-@media (max-height: 700px) {
-  :root {
+@container app (max-height: 700px) {
+  .app {
     --page-pad-top: 26px;
   }
 }

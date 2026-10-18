@@ -1,81 +1,13 @@
 'use strict';
 /*
- * Главная: уведомления, сводка, две карточки (home-cards.js) — обход для Discord/YouTube и прокси
- * для Telegram — и строка про VPN, если он работает.
+ * Главная: плашки и уведомления (notices.js — все, в том числе постоянные плашки других страниц),
+ * сводка, карточки (home-cards.js) — обход для Discord/YouTube, прокси для Telegram и во всю ширину
+ * «Свой VPN» (без серверов — тихая строка) — и строка про чужой VPN.
  */
 (function (Lz) {
-  const { h, icon, setText, setHidden } = Lz.dom;
+  const { h, setText, setHidden } = Lz.dom;
   const ui = Lz.ui;
   const texts = Lz.texts;
-
-  const NOTICE_TONE = { info: 'info', success: 'ok', warn: 'warn', error: 'err' };
-  const NOTICE_ICON = { info: 'info', ok: 'checkCircle', warn: 'alert', err: 'alertCircle' };
-
-  /* ---------- Уведомления ---------- */
-
-  function createNotices() {
-    const hiddenIds = new Set();
-    let latest = [];
-    const view = ui.slot(render, { cls: 'notices' });
-
-    function runNoticeAction(action) {
-      const page = action.page ? Lz.nav.resolve(String(action.page)) : null;
-      if (page) {
-        Lz.nav.go(page);
-      } else if (action.call) {
-        Lz.api.run({ method: String(action.call), args: Array.isArray(action.args) ? action.args : [] });
-      }
-    }
-
-    async function dismiss(id) {
-      hiddenIds.add(id);
-      update(latest);
-      const result = await Lz.api.run({ method: 'dismiss_notice', args: [id], key: `dismiss_notice:${id}` });
-      if (!result || !result.ok) {
-        hiddenIds.delete(id);
-        update(latest);
-      }
-    }
-
-    function noticeEl(notice) {
-      const tone = NOTICE_TONE[notice.level] || 'info';
-      const action = notice.action && notice.action.label ? ui.button({
-        label: notice.action.label,
-        kind: 'secondary',
-        size: 'sm',
-        onClick: () => runNoticeAction(notice.action),
-      }) : null;
-      const close = notice.dismissible ? ui.button({
-        icon: 'x',
-        kind: 'ghost',
-        size: 'sm',
-        ariaLabel: 'Скрыть уведомление',
-        title: 'Скрыть',
-        onClick: () => dismiss(notice.id),
-      }) : null;
-      if (action) action.el.dataset.fk = `notice-action:${notice.id}`;
-      if (close) close.el.dataset.fk = `notice-close:${notice.id}`;
-      return h('div', { class: `notice notice--${tone}`, role: tone === 'err' ? 'alert' : 'status' },
-        h('span', { class: 'notice__icon', 'aria-hidden': 'true' }, icon(NOTICE_ICON[tone], { size: 18 })),
-        h('p', { class: 'notice__text', text: notice.text }),
-        action && action.el,
-        close && close.el);
-    }
-
-    function render(list) {
-      return list.map(noticeEl);
-    }
-
-    function update(notices) {
-      latest = Array.isArray(notices) ? notices : [];
-      for (const id of hiddenIds) {
-        if (!latest.some((notice) => notice.id === id)) hiddenIds.delete(id);
-      }
-      view.update(latest.filter((notice) => !hiddenIds.has(notice.id)));
-    }
-
-    return { el: view.el, update };
-  }
 
   /* ---------- Сводка ---------- */
 
@@ -93,6 +25,21 @@
     error: 'прокси для Telegram не запустился',
     stopped: 'прокси для Telegram выключен',
   };
+
+  const VPNC_PHRASE = {
+    running: 'свой VPN подключён',
+    verifying: 'свой VPN проверяет соединение',
+    starting: 'свой VPN подключается',
+    stopping: 'свой VPN выключается',
+    error: 'свой VPN не подключился',
+  };
+
+  /** Фраза про свой VPN; null — его не настроили или он выключен (тогда о нём молчим). */
+  function vpnclientPhrase(state) {
+    const vc = state.vpnclient;
+    if (!vc || vc.available === false || !texts.vpncHasServers(vc)) return null;
+    return VPNC_PHRASE[texts.vpncPillStatus(vc)] || null;
+  }
 
   function capitalize(text) {
     return text.charAt(0).toUpperCase() + text.slice(1);
@@ -120,15 +67,18 @@
     const tg = state.tg || {};
     const zapretStatus = zapret.available === false ? 'locked' : (zapret.status || 'stopped');
     const tgStatus = tg.status || 'stopped';
-    if (zapretStatus === 'stopped' && tgStatus === 'stopped' && !(zapret.fix && zapret.fix.running)) {
+    const vp = vpnclientPhrase(state);
+    if (zapretStatus === 'stopped' && tgStatus === 'stopped' && !(zapret.fix && zapret.fix.running) && !vp) {
       return 'Всё выключено. Нажмите на большую кнопку, чтобы включить.';
     }
     const zp = zapretPhrase(zapret, zapretStatus);
     const tp = telegramPhrase(tg, tgStatus);
-    if (zp === ZAPRET_PHRASE.running && tp === TELEGRAM_PHRASE.running) {
-      return 'Всё работает: Discord и YouTube открываются, Telegram ускорен.';
+    if (zp === ZAPRET_PHRASE.running && tp === TELEGRAM_PHRASE.running && (!vp || vp === VPNC_PHRASE.running)) {
+      return vp
+        ? 'Всё работает: Discord и YouTube открываются, Telegram ускорен, свой VPN подключён.'
+        : 'Всё работает: Discord и YouTube открываются, Telegram ускорен.';
     }
-    return `${capitalize(zp)}. ${capitalize(tp)}.`;
+    return `${[zp, tp, vp].filter(Boolean).map(capitalize).join('. ')}.`;
   }
 
   /* ---------- VPN ---------- */
@@ -161,21 +111,33 @@
 
   function create() {
     const header = ui.pageHeader({ title: 'Главная', subtitle: '' });
-    const notices = createNotices();
+    const notices = Lz.notices.create();
     const zapretHero = Lz.homeCards.createZapretHero();
     const telegramHero = Lz.homeCards.createTelegramHero();
+    const vpnclientHero = Lz.homeCards.createVpnClientHero();
+    const vpnclientLine = Lz.homeCards.createVpnClientLine();
     const vpnLine = createVpnLine();
     const el = h('div', { class: 'page__inner page__inner--home' },
       header.el,
       notices.el,
-      h('div', { class: 'hero-grid' }, zapretHero.el, telegramHero.el),
+      h('div', { class: 'hero-grid' }, zapretHero.el, telegramHero.el, vpnclientHero.el),
+      vpnclientLine.el,
       vpnLine.el);
+
+    function updateVpnClient(state) {
+      const vc = state.vpnclient;
+      const configured = Boolean(vc) && texts.vpncHasServers(vc);
+      setHidden(vpnclientHero.el, !configured);
+      setHidden(vpnclientLine.el, !vc || configured);
+      if (configured) vpnclientHero.update(state);
+    }
 
     function update(state) {
       setText(header.subtitleEl, summary(state));
       notices.update(state.notices);
       zapretHero.update(state);
       telegramHero.update(state);
+      updateVpnClient(state);
       vpnLine.update(state);
     }
 

@@ -2,7 +2,7 @@
 /*
  * «Помощь» → «Что не работает?»: выбор беды и панели Discord и YouTube — проверка доступности
  * и «Найти и включить». В каждой панели не больше двух действий. Остальные панели — в help-panels.js
- * и help-vpn.js.
+ * и help-vpn.js (VPN рядом с обходом и «Свой VPN не подключается»).
  */
 (function (Lz) {
   const { h, setHidden } = Lz.dom;
@@ -20,6 +20,7 @@
     { value: 'telegram', label: 'Telegram', icon: 'send' },
     { value: 'site', label: 'Сайт', icon: 'globe' },
     { value: 'vpn', label: 'VPN', icon: 'shieldCheck', title: 'У меня включён VPN' },
+    { value: 'vpnclient', label: 'Свой VPN', icon: 'vpn', title: 'Свой VPN не подключается' },
   ];
   const SERVICE_TEXT = {
     discord: {
@@ -168,6 +169,7 @@
       telegram: panels.createTelegramPanel(),
       site: panels.createSitePanel(),
       vpn: panels.createVpnPanel(),
+      vpnclient: panels.createVpnClientPanel(),
     };
     let selected = null;
     let latest = null;

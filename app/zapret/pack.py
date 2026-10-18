@@ -14,11 +14,10 @@ import re
 import shutil
 import time
 import uuid
-import zipfile
 from dataclasses import asdict, dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-from .. import paths
+from .. import archive, paths
 from . import strategies
 from ..errors import UserError
 
@@ -142,42 +141,12 @@ def validate(pack_dir: Path, quick: bool = False) -> str | None:
     return None
 
 
-def _safe_members(zf: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo, PurePosixPath]]:
-    members = []
-    total = 0
-    for info in zf.infolist():
-        name = info.filename.replace("\\", "/")
-        rel = PurePosixPath(name)
-        if rel.is_absolute() or any(part in ("..", "") or ":" in part for part in rel.parts if part != "."):
-            raise PackError(f"Небезопасный путь в архиве: {info.filename}")
-        total += info.file_size
-        if total > MAX_UNPACKED:
-            raise PackError("Архив распаковывается в подозрительно большой объём")
-        members.append((info, rel))
-    return members
-
-
 def _extract(zip_path: Path, target: Path) -> Path:
     """Распаковывает архив и возвращает корень пакета (папку с bin и lists)."""
-    root = target.resolve()
-    with zipfile.ZipFile(zip_path) as zf:
-        members = _safe_members(zf)
-        tops = {rel.parts[0] for _, rel in members if rel.parts}
-        strip = len(tops) == 1 and all(len(rel.parts) > 1 or info.is_dir() for info, rel in members)
-        for info, rel in members:
-            parts = rel.parts[1:] if strip else rel.parts
-            if not parts:
-                continue
-            dest = target.joinpath(*parts)
-            if not dest.resolve().is_relative_to(root):
-                raise PackError(f"Небезопасный путь в архиве: {info.filename}")
-            if info.is_dir():
-                dest.mkdir(parents=True, exist_ok=True)
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, open(dest, "wb") as out:
-                shutil.copyfileobj(src, out, 1 << 20)
-    return target
+    try:
+        return archive.extract(zip_path, target, max_unpacked=MAX_UNPACKED)
+    except archive.ArchiveError as exc:
+        raise PackError(str(exc)) from exc
 
 
 def install_zip(zip_path: Path, version: str, *, source: str, expected_sha256: str | None,

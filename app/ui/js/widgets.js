@@ -433,6 +433,8 @@
     stopped: { text: 'Выключено', tone: 'off' },
     error: { text: 'Ошибка', tone: 'err' },
     locked: { text: 'Недоступно', tone: 'off' },
+    /* Свой VPN: ядро работает, но выход через сервер ещё не подтверждён. */
+    verifying: { text: 'Проверяем…', tone: 'warn' },
   };
 
   function statusPill() {

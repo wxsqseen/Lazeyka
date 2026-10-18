@@ -142,7 +142,7 @@
   font: 12px/1.6 var(--font-mono);
 }
 
-@media (max-width: 999px) {
+@container app (max-width: 999px) {
   .symptoms .seg__opt {
     gap: 6px;
     padding: 0 6px;

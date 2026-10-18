@@ -2,6 +2,8 @@
 /*
  * VPN рядом с обходом: «что куда идёт» (подписи, таблица, пояснение) и строки состояния.
  * Общее для окна перед включением (vpn-gate.js), страницы «Обход», главной и «Помощи».
+ * vpn.active/label/mode/candidates — только чужой VPN; свой VPN Лазейки — vpn.own {active, mode}:
+ * для него «через VPN» подписано «через ваш сервер».
  */
 (function (Lz) {
   const { h, icon } = Lz.dom;
@@ -11,17 +13,24 @@
   const BYPASS_TARGETS = new Set(['discord', 'youtube']);
   const VIA_TEXT = {
     vpn: 'через VPN',
+    own: 'через ваш сервер',
     direct: 'напрямую',
     blocked: 'мимо VPN — без обхода не откроется',
     unknown: 'не удалось определить',
   };
   /* Telegram ходит к прокси Лазейки, а прокси — дальше к серверам Telegram. */
-  const TELEGRAM_NEXT = { vpn: 'через VPN', direct: 'напрямую', blocked: 'напрямую' };
+  const TELEGRAM_NEXT = { vpn: 'через VPN', own: 'через ваш сервер', direct: 'напрямую', blocked: 'напрямую' };
   const RUNNING_LIKE = new Set(['running', 'starting']);
   const ROUTES_FOOTNOTE = 'Определено проверочными запросами Лазейки. Если в VPN есть правила для отдельных программ, у них маршрут может отличаться.';
 
-  function viaOf(item) {
-    return Object.prototype.hasOwnProperty.call(VIA_TEXT, item.via) ? item.via : 'unknown';
+  /** «через VPN» при своём VPN (и без чужого) — это «через ваш сервер». */
+  function viaOf(item, opts) {
+    const via = Object.prototype.hasOwnProperty.call(VIA_TEXT, item.via) ? item.via : 'unknown';
+    return via === 'vpn' && opts && opts.own && !opts.foreign ? 'own' : via;
+  }
+
+  function ownActive(vpn) {
+    return Boolean(vpn && vpn.own && vpn.own.active);
   }
 
   /**
@@ -29,7 +38,7 @@
    * или вот-вот включится: только тогда Discord и YouTube мимо VPN идут «через обход Лазейки».
    */
   function routeRow(item, opts) {
-    const via = viaOf(item);
+    const via = viaOf(item, opts);
     if (item.id === 'telegram' && opts.component === 'tg') {
       const next = TELEGRAM_NEXT[via];
       return { label: 'Telegram', via, text: next ? `прокси Лазейки → дальше ${next}` : `прокси Лазейки → ${VIA_TEXT.unknown}` };
@@ -53,6 +62,8 @@
     return {
       component,
       bypassOn,
+      own: ownActive(vpn),
+      foreign: Boolean(vpn.active),
       explain: component !== 'tg' || bypassOn,
       running: Boolean(routes && routes.running),
       error: Boolean(routes && routes.error),
@@ -65,13 +76,21 @@
     return items.map((item) => item.label || item.id).join(' и ');
   }
 
-  /** Пояснение под таблицей: что из Discord и YouTube идёт через VPN, а что достанется обходу. */
-  function explanationTexts(items) {
+  /**
+   * Пояснение под таблицей: что из Discord и YouTube идёт через VPN, а что достанется обходу.
+   * own — работает только свой VPN Лазейки: тогда не «исключения VPN», а переключатель в «Маршрутах».
+   */
+  function explanationTexts(items, own) {
     const targets = items.filter((item) => BYPASS_TARGETS.has(item.id));
-    const viaVpn = targets.filter((item) => item.via === 'vpn');
+    const viaVpn = targets.filter((item) => item.via === 'vpn' || item.via === 'own');
     const toBypass = targets.filter((item) => item.via === 'direct' || item.via === 'blocked');
     const texts = { vpn: '', bypass: '' };
-    if (viaVpn.length) {
+    if (viaVpn.length && own) {
+      const many = viaVpn.length > 1;
+      texts.vpn = `${namesOf(viaVpn)} сейчас ${many ? 'идут' : 'идёт'} через ваш сервер. Чтобы ${many ? 'они шли' : 'он шёл'} `
+        + 'через обход (быстрее, без нагрузки на VPN), включите на странице «VPN» в «Маршрутах» '
+        + '«Discord и YouTube — через обход Лазейки».';
+    } else if (viaVpn.length) {
       const many = viaVpn.length > 1;
       texts.vpn = `${namesOf(viaVpn)} сейчас ${many ? 'идут' : 'идёт'} через VPN — обход ${many ? 'им' : 'ему'} не нужен, `
         + `но и не мешает. Чтобы ${many ? 'они шли' : 'он шёл'} через обход (быстрее, без нагрузки на VPN), `
@@ -79,7 +98,9 @@
     }
     if (toBypass.length) {
       const many = toBypass.length > 1;
-      texts.bypass = `${namesOf(toBypass)} ${many ? 'идут' : 'идёт'} мимо VPN — ${many ? 'их' : 'его'} будет обрабатывать обход.`;
+      texts.bypass = own
+        ? `${namesOf(toBypass)} ${many ? 'идут' : 'идёт'} мимо вашего сервера — ${many ? 'их' : 'его'} обрабатывает обход Лазейки.`
+        : `${namesOf(toBypass)} ${many ? 'идут' : 'идёт'} мимо VPN — ${many ? 'их' : 'его'} будет обрабатывать обход.`;
     }
     return texts;
   }
@@ -107,14 +128,26 @@
       h('p', { class: 'vpn-routes__footnote', text: ROUTES_FOOTNOTE }),
     ];
     if (!data.explain) return table;
-    const texts = explanationTexts(data.items);
-    const howToLink = texts.vpn && howTo ? ui.button({
-      label: 'Как это сделать',
-      iconRight: 'arrowRight',
-      kind: 'link',
-      size: 'sm',
-      onClick: () => howTo(),
-    }).el : null;
+    const own = data.own && !data.foreign;
+    const texts = explanationTexts(data.items, own);
+    let howToLink = null;
+    if (texts.vpn && own) {
+      howToLink = ui.button({
+        label: 'Открыть маршруты',
+        iconRight: 'arrowRight',
+        kind: 'link',
+        size: 'sm',
+        onClick: () => Lz.nav.go('vpnclient', { focus: 'routing' }),
+      }).el;
+    } else if (texts.vpn && howTo) {
+      howToLink = ui.button({
+        label: 'Как это сделать',
+        iconRight: 'arrowRight',
+        kind: 'link',
+        size: 'sm',
+        onClick: () => howTo(),
+      }).el;
+    }
     return [
       table,
       texts.vpn ? h('p', { class: 'vpn-routes__note', text: texts.vpn }) : null,
@@ -152,6 +185,10 @@
     const source = vpn || {};
     const filter = source.filter || {};
     const unseparable = Array.isArray(source.unseparable) ? source.unseparable : [];
+    /* Свой VPN Лазейки без чужого: обход исключает свой туннель и свои серверы всегда (filter.mode = own). */
+    if (!source.active && ownActive(source)) {
+      return { tone: 'ok', text: 'Обход не трогает свой VPN Лазейки: его туннель и серверы исключены из перехвата.' };
+    }
     if (!source.active && unseparable.length) {
       return {
         tone: 'warn',
@@ -194,5 +231,10 @@
     return { tone: 'ok', text: `VPN: ${label} — обход его не трогает` };
   }
 
-  Lz.vpn = { routeRow, routesData, renderRoutes, explanationTexts, compatStatus, homeLine, proxyName };
+  /** Показывать ли «что куда идёт»: работает чужой VPN или свой. */
+  function routesRelevant(vpn) {
+    return Boolean(vpn && (vpn.active || ownActive(vpn)));
+  }
+
+  Lz.vpn = { routeRow, routesData, renderRoutes, explanationTexts, compatStatus, homeLine, proxyName, routesRelevant, ownActive };
 })(window.Lz);

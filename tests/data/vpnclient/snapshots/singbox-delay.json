@@ -1,0 +1,144 @@
+{
+ "log": {
+  "level": "error",
+  "timestamp": true
+ },
+ "dns": {
+  "servers": [
+   {
+    "type": "https",
+    "tag": "dns-direct",
+    "server": "1.1.1.1",
+    "server_port": 443,
+    "path": "/dns-query"
+   }
+  ],
+  "strategy": "ipv4_only"
+ },
+ "outbounds": [
+  {
+   "type": "selector",
+   "tag": "proxy",
+   "outbounds": [
+    "srv-be728789714ae239",
+    "srv-243ae83b718753f1",
+    "srv-db4ef4622cd60bb5",
+    "srv-d5934c9cd2ec65cd",
+    "srv-edfb9ce9d303ee2a",
+    "srv-836a58596e719a24"
+   ],
+   "default": "srv-be728789714ae239",
+   "interrupt_exist_connections": true
+  },
+  {
+   "type": "vless",
+   "tag": "srv-be728789714ae239",
+   "server": "198.51.100.1",
+   "server_port": 443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "www.example.org",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+     "short_id": "6ba85179e30d4fc2"
+    }
+   }
+  },
+  {
+   "type": "vless",
+   "tag": "srv-243ae83b718753f1",
+   "server": "198.51.100.2",
+   "server_port": 443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "tls": {
+    "enabled": true,
+    "server_name": "cdn.example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "firefox"
+    }
+   },
+   "transport": {
+    "type": "ws",
+    "path": "/ws",
+    "headers": {
+     "Host": "cdn.example.com"
+    },
+    "max_early_data": 2048,
+    "early_data_header_name": "Sec-WebSocket-Protocol"
+   }
+  },
+  {
+   "type": "socks",
+   "tag": "srv-db4ef4622cd60bb5",
+   "server": "127.0.0.1",
+   "server_port": 21002,
+   "version": "5",
+   "username": "help-user",
+   "password": "help-pass"
+  },
+  {
+   "type": "socks",
+   "tag": "srv-d5934c9cd2ec65cd",
+   "server": "127.0.0.1",
+   "server_port": 21003,
+   "version": "5",
+   "username": "help-user",
+   "password": "help-pass"
+  },
+  {
+   "type": "vless",
+   "tag": "srv-edfb9ce9d303ee2a",
+   "server": "198.51.100.5",
+   "server_port": 80,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "transport": {
+    "type": "httpupgrade",
+    "path": "/up",
+    "host": "example.com"
+   }
+  },
+  {
+   "type": "vless",
+   "tag": "srv-836a58596e719a24",
+   "server": "198.51.100.6",
+   "server_port": 8443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "tls": {
+    "enabled": true,
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    }
+   }
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "final": "proxy",
+  "auto_detect_interface": true,
+  "default_domain_resolver": {
+   "server": "dns-direct",
+   "strategy": "ipv4_only"
+  }
+ },
+ "experimental": {
+  "clash_api": {
+   "external_controller": "127.0.0.1:20901",
+   "secret": "clash-secret-1",
+   "access_control_allow_origin": [
+    "http://127.0.0.1"
+   ]
+  }
+ }
+}

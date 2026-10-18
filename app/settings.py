@@ -13,6 +13,13 @@ log = logging.getLogger("lazeyka.settings")
 
 SCHEMA = 1
 
+# Свой VPN: не заворачивать в туннель локальные сети, link-local и multicast (LAN, Radmin, Hyper-V
+# работают как прежде) и не пускать через системный прокси локальные адреса (WinINet ProxyOverride).
+DEFAULT_EXCLUDE_NETS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4",
+                        "fc00::/7", "fe80::/10", "ff00::/8")
+DEFAULT_PROXY_OVERRIDE = ("<local>", "localhost", "127.*", "10.*", "172.16.*", "172.17.*", "172.18.*",
+                          "172.19.*", "172.2*", "172.30.*", "172.31.*", "192.168.*")
+
 
 def _new_secret() -> str:
     return os.urandom(16).hex()
@@ -27,11 +34,13 @@ def defaults() -> dict:
             "close_to_tray": True,
             "start_minimized": False,
             "tray_hint_shown": False,
+            "scale": 1.0,                 # масштаб окна 0.8–1.5
         },
         "startup": {
             "autostart": False,
             "zapret": True,
             "tg": True,
+            "vpnclient": False,           # включать свой VPN при запуске
         },
         "updates": {
             "check": True,
@@ -76,6 +85,50 @@ def defaults() -> dict:
             "zapret_sync": True,          # согласовывать списки zapret с Cloudflare-маршрутами
             "was_running": True,
         },
+        # Свой VPN (docs/vpnclient-plan.md). Только не секретное: ссылки, ключи и адреса
+        # подписок лежат в vpnclient/profiles.json.
+        "vpnclient": {
+            "mode": "tun",                # tun | proxy | local
+            "preset": "all",              # all | except_ru | blocked
+            "via_zapret": True,           # Discord и YouTube — через обход Лазейки
+            "games_direct": False,
+            "torrents_direct": False,
+            "ip_check_direct": False,
+            "direct_apps": [],            # программы мимо VPN
+            "proxy_apps": [],             # программы только через VPN
+            "direct_sites": [],
+            "proxy_sites": [],
+            "exclude_nets": list(DEFAULT_EXCLUDE_NETS),
+            "proxy_override": list(DEFAULT_PROXY_OVERRIDE),
+            "port": 20808,                # системный и локальный прокси
+            "local_auth": False,          # логин и пароль на локальный прокси
+            "socks_udp": True,
+            "allow_lan": False,
+            "dns_remote": "auto",         # auto | cloudflare | google | quad9 | adguard | yandex | https://…
+            "dns_direct": "auto",
+            "fakeip": False,
+            "ip_strategy": "ipv4_only",   # ipv4_only | prefer_ipv4 | prefer_ipv6
+            "ipv6": False,
+            "tun_mtu": 1500,
+            "kill_switch": False,
+            "on_sleep": "reconnect",      # reconnect | disconnect
+            "tls_fragment": False,
+            "mux": False,
+            "noises": False,
+            "fingerprint": "chrome",
+            "latency_on_update": True,
+            "sort": "latency",            # none | latency | name
+            "deeplink": False,            # обработчик ссылок lazeyka://
+            "sub_update_hours": 12,
+            "verbose": False,
+            "singbox_version": None,      # установленные версии ядер
+            "xray_version": None,
+            "core_auto_update": True,     # ставить новые версии ядер самой, без кнопки
+            "core_bad_versions": [],      # "sing-box:1.15.0" — не прошли check или не запустились: не ставим
+            "core_trial": [],             # поставлены обновлением и ещё ни разу не запустились: откат при сбое
+            "core_good": [],              # "sing-box:1.14.3" — последняя версия, которой можно доверять: на неё откат
+            "was_running": False,
+        },
     }
 
 
@@ -87,6 +140,8 @@ _NULLABLE = {
     ("zapret", "ipset_mode"),
     ("zapret", "fakes", "discord"),
     ("zapret", "fakes", "game"),
+    ("vpnclient", "singbox_version"),
+    ("vpnclient", "xray_version"),
 }
 
 

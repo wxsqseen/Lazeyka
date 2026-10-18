@@ -1,0 +1,49 @@
+{
+  "remarks": "Балансировщик",
+  "dns": {"tag": "dns_out", "queryStrategy": "UseIP", "servers": [{"address": "8.8.8.8", "skipFallback": false}]},
+  "inbounds": [
+    {"listen": "127.0.0.1", "port": 10808, "protocol": "socks", "settings": {"auth": "noauth", "udp": true}, "tag": "mixed"}
+  ],
+  "log": {"loglevel": "warning"},
+  "outbounds": [
+    {
+      "protocol": "vless",
+      "tag": "bal-1-vless",
+      "settings": {"address": "a.example.com", "port": 443, "id": "44444444-5555-4666-8777-888888888888",
+                   "encryption": "none", "flow": "xtls-rprx-vision", "level": 8},
+      "streamSettings": {"network": "tcp", "security": "reality",
+                         "realitySettings": {"serverName": "www.example.org", "password": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+                                             "shortId": "aa", "fingerprint": "chrome", "spiderX": "/"}}
+    },
+    {
+      "protocol": "vmess",
+      "tag": "bal-1-vmess",
+      "settings": {"address": "b.example.com", "port": 8443, "id": "55555555-6666-4777-8888-999999999999",
+                   "security": "auto", "level": 8},
+      "streamSettings": {"network": "grpc", "grpcSettings": {"serviceName": "vm-grpc", "multiMode": true},
+                         "security": "tls", "tlsSettings": {"serverName": "b.example.com", "fingerprint": "chrome"}}
+    },
+    {
+      "protocol": "shadowsocks",
+      "tag": "bal-1-shadowsocks",
+      "settings": {"servers": [{"address": "198.51.100.20", "port": 8388, "password": "c3NzZWNyZXQ=:dXNlcnNlY3JldA==",
+                                "method": "2022-blake3-aes-128-gcm", "level": 8}]},
+      "streamSettings": {"network": "tcp", "security": "none"}
+    },
+    {"tag": "direct", "protocol": "freedom", "settings": {"redirect": "", "noises": []}},
+    {"tag": "block", "protocol": "blackhole", "settings": {"response": {"type": "http"}}}
+  ],
+  "policy": {"system": {"statsOutboundUplink": true}},
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [{"type": "field", "network": "tcp,udp", "balancerTag": "balancer"}],
+    "balancers": [{"tag": "balancer", "selector": ["bal-1-"], "strategy": {"type": "leastLoad"},
+                   "fallbackTag": "bal-1-vmess"}]
+  },
+  "burstObservatory": {
+    "subjectSelector": ["bal-1-"],
+    "pingConfig": {"destination": "https://www.google.com/generate_204", "connectivity": "", "interval": "1m",
+                   "sampling": 2, "timeout": "5s", "httpMethod": "HEAD"}
+  },
+  "stats": {}
+}

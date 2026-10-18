@@ -1,0 +1,75 @@
+[
+  {
+    "remarks": "🇳🇱 Marzban VLESS",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vless",
+        "settings": {"vnext": [{"address": "mz.example.com", "port": 443,
+                                "users": [{"id": "66666666-7777-4888-8999-aaaaaaaaaaaa", "security": "auto",
+                                           "encryption": "none", "email": "https://example.com/", "alterId": 0,
+                                           "flow": ""}]}]},
+        "streamSettings": {
+          "network": "ws",
+          "wsSettings": {"path": "/ws?ed=2048", "headers": {"Host": "cdn.example.com", "User-Agent": "Mozilla/5.0"}},
+          "security": "tls",
+          "tlsSettings": {"serverName": "cdn.example.com", "alpn": ["h2", "http/1.1"], "fingerprint": "chrome",
+                          "allowInsecure": false},
+          "sockopt": {"dialerProxy": "dialer"}
+        },
+        "mux": {"enabled": false, "concurrency": -1}
+      },
+      {"tag": "dialer", "protocol": "freedom",
+       "settings": {"fragment": {"packets": "tlshello", "length": "10-20", "interval": "10-20"},
+                    "noises": [{"type": "rand", "packet": "10-20", "delay": "10-16"}]}},
+      {"tag": "direct", "protocol": "freedom"},
+      {"tag": "block", "protocol": "blackhole"}
+    ]
+  },
+  {
+    "remarks": "VMess TCP-HTTP",
+    "outbounds": [
+      {
+        "tag": "proxy",
+        "protocol": "vmess",
+        "settings": {"vnext": [{"address": "vm.example.net", "port": 80,
+                                "users": [{"id": "77777777-8888-4999-8aaa-bbbbbbbbbbbb", "alterId": 0,
+                                           "email": "https://example.com/", "security": "auto"}]}]},
+        "streamSettings": {
+          "network": "tcp",
+          "tcpSettings": {"header": {"type": "http", "request": {"path": ["/x"],
+                                                                  "headers": {"Host": ["a.example.net", "b.example.net"]}}}},
+          "security": "none"
+        }
+      },
+      {"tag": "direct", "protocol": "freedom"}
+    ]
+  },
+  {
+    "remarks": "Shadowsocks",
+    "outbounds": [
+      {"tag": "proxy", "protocol": "shadowsocks",
+       "settings": {"servers": [{"address": "198.51.100.30", "port": 1080, "password": "ss-secret",
+                                 "email": "https://example.com/", "method": "chacha20-ietf-poly1305", "uot": false}]}},
+      {"tag": "direct", "protocol": "freedom"}
+    ]
+  },
+  {
+    "remarks": "Цепочка",
+    "outbounds": [
+      {"tag": "proxy", "protocol": "trojan",
+       "settings": {"servers": [{"address": "chain.example.org", "port": 443, "password": "chain-secret"}]},
+       "streamSettings": {"network": "tcp", "security": "tls", "sockopt": {"dialerProxy": "entry"}}},
+      {"tag": "entry", "protocol": "vless",
+       "settings": {"vnext": [{"address": "entry.example.org", "port": 443,
+                               "users": [{"id": "88888888-9999-4aaa-8bbb-cccccccccccc", "encryption": "none"}]}]},
+       "streamSettings": {"network": "tcp", "security": "tls"}}
+    ]
+  },
+  {
+    "remarks": "Hysteria v1",
+    "outbounds": [
+      {"tag": "proxy", "protocol": "hysteria", "settings": {"address": "old.example.org", "port": 443, "version": 1}}
+    ]
+  }
+]

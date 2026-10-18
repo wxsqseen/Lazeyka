@@ -10,6 +10,10 @@ psutil==7.2.2
 cryptography==50.0.2
 certifi==2026.7.22
 httpx[http2]==0.28.1
+# Свой VPN: QR — генерация (qrcode, BSD; colorama — её зависимость на Windows) и распознавание (zxing-cpp, Apache-2.0)
+qrcode==8.2
+colorama==0.4.6
+zxing-cpp==3.1.1
 # Сборка и тесты
 pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.8

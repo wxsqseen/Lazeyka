@@ -82,4 +82,70 @@
   };
 
   applyTheme(Lz.params.get('theme') || recallTheme() || 'system');
+
+  /*
+   * Масштаб окна (settings.ui_scale, 0.8–1.5) — CSS zoom на <html>: вместе со страницей
+   * масштабируются окна и тосты. Запоминается, чтобы окно не прыгало при запуске.
+   */
+  const SCALE_STORAGE_KEY = 'lazeyka.scale';
+  const SCALE_MIN = 0.8;
+  const SCALE_MAX = 1.5;
+  let scaleValue = 1;
+  let heldScale = null;
+
+  function clampScale(value) {
+    const n = Number(value);
+    if (value == null || value === '' || !Number.isFinite(n)) return 1;
+    return Math.min(SCALE_MAX, Math.max(SCALE_MIN, n));
+  }
+
+  function applyScale(value) {
+    const next = clampScale(value);
+    if (next === scaleValue && document.documentElement.style.zoom === (next === 1 ? '' : String(next))) return;
+    scaleValue = next;
+    document.documentElement.style.zoom = next === 1 ? '' : String(next);
+    /* Высоты в vh делятся на масштаб (app.css): внутри zoom они уже умножены на него. */
+    document.documentElement.style.setProperty('--ui-zoom', String(next));
+    try {
+      window.localStorage.setItem(SCALE_STORAGE_KEY, String(next));
+    } catch (err) {
+      console.debug('Масштаб не сохранён в localStorage, при следующем запуске возьмём из настроек:', err);
+    }
+  }
+
+  function recallScale() {
+    try {
+      return window.localStorage.getItem(SCALE_STORAGE_KEY);
+    } catch (err) {
+      console.debug('Сохранённый масштаб не прочитан из localStorage:', err);
+      return null;
+    }
+  }
+
+  Lz.scale = {
+    MIN: SCALE_MIN,
+    MAX: SCALE_MAX,
+    apply: applyScale,
+    /* Ядро без ui_scale (до версии 1.2) не трогает масштаб. */
+    sync(value) {
+      if (value == null) return;
+      if (heldScale !== null) {
+        if (clampScale(value) !== heldScale) return;
+        heldScale = null;
+      }
+      applyScale(value);
+    },
+    hold(value) {
+      heldScale = clampScale(value);
+      applyScale(value);
+    },
+    release() {
+      heldScale = null;
+    },
+    get current() {
+      return scaleValue;
+    },
+  };
+
+  applyScale(Lz.params.get('scale') || recallScale() || 1);
 })();

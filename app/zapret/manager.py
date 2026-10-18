@@ -35,6 +35,9 @@ class ZapretError(UserError):
     pass
 
 
+_RETRY = {"label": "Включить снова", "call": "zapret_start", "args": []}
+
+
 class ZapretManager:
     def __init__(self, settings: Settings, notify: Notify, is_admin: bool):
         self.settings = settings
@@ -57,7 +60,17 @@ class ZapretManager:
         self.vpn_plan: Callable[[], dict | None] | None = None
         self.vpn_applied: dict = {"mode": "plain"}
         self._vpn_error_shown: str | None = None
+        # Постоянная плашка Core (core.alert): поломки, найденные без нажатия человека. Без неё — уведомление.
+        self.alert: Callable[..., None] | None = None
         self._target_cache: tuple[float, set[str]] = (0.0, set())
+
+    def _alert(self, alert_id: str, level: str | None, text: str = "", action: dict | None = None,
+               page: str | None = "zapret") -> None:
+        """Плашка вместо уведомления (level=None — снять); без Core — прежнее уведомление."""
+        if self.alert is not None:
+            self.alert(alert_id, level, text, action=action, page=page)
+        elif level is not None:
+            self.notify(level, text)
 
     # ------------------------------------------------------------ подготовка
 
@@ -271,6 +284,7 @@ class ZapretManager:
         if not plan:
             if record:
                 self.vpn_applied = {"mode": "plain"}
+                self._alert("zapret-vpnfilter", None)   # фильтр под VPN больше не нужен — и плашка о нём
             return args
         servers = vpnfilter.guard_servers(plan["servers"], self._target_ips())[:vpnfilter.MAX_SERVERS]
         folder = paths.ZAPRET_DIR / "vpnfilter"
@@ -283,15 +297,17 @@ class ZapretManager:
             if record:
                 self.vpn_applied = {"mode": "error", "error": str(exc), "interfaces": list(plan["interfaces"]),
                                     "servers_seen": list(plan["servers"])}
-                if self._vpn_error_shown != str(exc):
+                if self.alert is not None or self._vpn_error_shown != str(exc):
                     self._vpn_error_shown = str(exc)
-                    self.notify("warn", f"Совместимость с VPN не включилась ({exc}). Обход работает как обычно "
-                                        "и может задевать трафик VPN.")
+                    self._alert("zapret-vpnfilter", "warn", f"Совместимость с VPN не включилась ({exc}). Обход "
+                                                            "работает как обычно и может задевать трафик VPN.")
             return args
         if record:
             self._vpn_error_shown = None
-            self.vpn_applied = {"mode": "vpn", "interfaces": list(plan["interfaces"]), "servers": servers,
-                                "servers_seen": list(plan["servers"]), "at": time.time()}
+            self._alert("zapret-vpnfilter", None)
+            # «own» — совместимость выключена, а фильтр исключает только свой VPN Лазейки.
+            self.vpn_applied = {"mode": plan.get("mode", "vpn"), "interfaces": list(plan["interfaces"]),
+                                "servers": servers, "servers_seen": list(plan["servers"]), "at": time.time()}
         return vpnfilter.with_raw_filter(args, path)
 
     SERVICE_FILTER_STATE = "vpn-service.json"
@@ -309,7 +325,7 @@ class ZapretManager:
             data = json.loads((paths.ZAPRET_DIR / self.SERVICE_FILTER_STATE).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        if isinstance(data, dict) and data.get("mode") in ("plain", "vpn", "error"):
+        if isinstance(data, dict) and data.get("mode") in ("plain", "vpn", "own", "error"):
             self.vpn_applied = data
 
     def _target_ips(self) -> set[str]:
@@ -429,19 +445,22 @@ class ZapretManager:
         log.error("Обход остановился: %s", self.error)
         now = time.time()
         self._restarts = [t for t in self._restarts if now - t < 3600]
+        # Падение замечено без нажатия человека — плашка на главной (на странице обхода и так видна
+        # ошибка), Core снимет её, когда обход снова заработает.
         if ran_for > 60 and len(self._restarts) < 3:
             self._restarts.append(now)
-            self.notify("warn", "winws неожиданно остановился — перезапускаю.")
+            self._alert("zapret-down", "warn", "winws неожиданно остановился — перезапускаю.", page=None)
             threading.Timer(3.0, self._auto_restart).start()
         else:
-            self.notify("error", f"Обход остановился: {self.error}")
+            self._alert("zapret-down", "error", f"Обход остановился: {self.error}", action=_RETRY, page=None)
 
     def _auto_restart(self) -> None:
         try:
             if self.status == "error" and not self.paused_for_test:
                 self.start()
         except ZapretError as exc:
-            self.notify("error", f"Перезапуск не удался: {exc}")
+            self._alert("zapret-down", "error", f"Обход остановился, а перезапуск не удался: {exc}", action=_RETRY,
+                        page=None)
 
     # ------------------------------------------------------------ настройки
 

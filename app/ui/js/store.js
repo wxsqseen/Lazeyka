@@ -9,6 +9,7 @@
   const OFFLINE_AFTER_FAILURES = 3;
   const STATE_TIMEOUT_MS = 8000;
   const ACTIVE_UPDATE_STATES = new Set(['downloading', 'verifying', 'installing']);
+  const ACTIVE_RULES_STATES = new Set(['downloading', 'verifying', 'updating']);
 
   const stateListeners = new Set();
   const connectionListeners = new Set();
@@ -21,6 +22,22 @@
   /* Растёт после каждого действия: снимок, запрошенный до действия, уже устарел. */
   let mutationSeq = 0;
 
+  /** Свой VPN: импорт, задержки, тест скорости, установка ядер и списков маршрутов, обновление подписок. */
+  function vpnclientBusy(vc) {
+    if (!vc || typeof vc !== 'object') return false;
+    const cores = vc.cores && typeof vc.cores === 'object' ? Object.values(vc.cores) : [];
+    const rules = vc.routing && vc.routing.rules;
+    const subs = Array.isArray(vc.subscriptions) ? vc.subscriptions : [];
+    return Boolean(
+      (vc.import && vc.import.running) ||
+      (vc.latency && vc.latency.running) ||
+      (vc.speed && vc.speed.running) ||
+      cores.some((core) => core && ACTIVE_UPDATE_STATES.has(core.state)) ||
+      (rules && ACTIVE_RULES_STATES.has(rules.state)) ||
+      subs.some((sub) => sub && (sub.updating || (sub.probe && sub.probe.running)))
+    );
+  }
+
   function needsFastPolling(snapshot) {
     if (!snapshot) return false;
     const test = snapshot.zapret && snapshot.zapret.test;
@@ -32,7 +49,8 @@
       (fix && fix.running) ||
       (routes && routes.running) ||
       (snapshot.diag && snapshot.diag.running) ||
-      items.some((item) => ACTIVE_UPDATE_STATES.has(item.state))
+      items.some((item) => ACTIVE_UPDATE_STATES.has(item.state)) ||
+      vpnclientBusy(snapshot.vpnclient)
     );
   }
 

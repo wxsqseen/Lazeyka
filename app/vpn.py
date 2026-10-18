@@ -5,6 +5,9 @@
 только наблюдение: адаптеры (GetAdaptersAddresses), их драйверы (реестр), подключения RAS,
 маршруты, системный прокси, адреса серверов VPN и проверка, с какого адреса сайты видят нас
 через VPN и напрямую.
+
+Свой VPN Лазейки (app/vpnclient) сюда приходит готовым снимком OwnVpn: его адаптер, процессы
+ядер и системный прокси чужими не считаются, а его серверы обход не трогает всегда.
 """
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ import configparser
 import ctypes
 import ipaddress
 import logging
+import os
 import re
 import socket
 import struct
@@ -233,6 +237,7 @@ class Adapter:
     role: str = ""               # у туннелей: internet | lan | idle | system
     app: str | None = None       # программа, если её видно по самому адаптеру
     reason: str = ""
+    own: bool = False            # TUN своего VPN Лазейки
 
     @property
     def routable(self) -> bool:
@@ -593,39 +598,115 @@ def wireguard_endpoints(tunnels: list[Adapter]) -> list[str]:
 ROUTE_PROBES = ("1.1.1.1", "8.8.8.8", "77.88.8.8", "162.159.135.232", "149.154.167.51")
 
 
+# ------------------------------------------------------------ свой VPN
+
+OWN_LABEL = "Лазейка"
+MAX_OWN_SERVERS = 16    # столько же адресов умещает фильтр WinDivert (vpnfilter.MAX_SERVERS)
+
+
+@dataclass
+class OwnVpn:
+    """Снимок своего VPN от менеджера: готовые данные, без DNS, HTTP и блокировок.
+
+    pids — процессы ядер; adapter_name и tun_net — свой TUN (режим «весь трафик»); servers — IP
+    серверов из работающего конфига; proxy — системный прокси, который выставила сама Лазейка."""
+
+    pids: set[int] = field(default_factory=set)
+    adapter_name: str | None = None
+    tun_net: str | None = None
+    servers: list[str] = field(default_factory=list)
+    proxy: str | None = None
+    label: str = OWN_LABEL
+
+    @property
+    def mode(self) -> str:
+        if self.adapter_name or self.tun_net:
+            return "tun"
+        return "proxy" if self.proxy else "local"
+
+    def owns_address(self, ip: str) -> bool:
+        """Адрес из подсети своего TUN."""
+        return in_network(ip, self.tun_net)
+
+    def capped_servers(self) -> list[str]:
+        """Серверы без повторов — не больше, чем умещает фильтр WinDivert."""
+        return list(dict.fromkeys(str(s) for s in self.servers))[:MAX_OWN_SERVERS]
+
+
+def in_network(ip: str, net: str | None) -> bool:
+    if not net:
+        return False
+    try:
+        return ipaddress.ip_address(ip.split("%")[0]) in ipaddress.ip_network(net, strict=False)
+    except ValueError:
+        return False
+
+
+def _proxy_key(value: str | None) -> str:
+    """«http://127.0.0.1:20808» и «127.0.0.1:20808» — один и тот же прокси."""
+    return re.sub(r"^[a-z0-9]+://", "", (value or "").strip(), flags=re.I).rstrip("/").lower()
+
+
+def same_proxy(a: str | None, b: str | None) -> bool:
+    return bool(a and b) and _proxy_key(a) == _proxy_key(b)
+
+
 # ------------------------------------------------------------ снимок
 
 @dataclass
 class Snapshot:
     adapters: list[Adapter]
-    servers: list[str]
+    servers: list[str]            # серверы чужих VPN и свои (свои — первыми)
     apps: list[str]               # запущенные VPN-программы (подсказка)
     at: float
-    proxy: str | None = None      # системный прокси на этом компьютере (VPN в режиме прокси)
+    proxy: str | None = None      # чужой системный прокси на этом компьютере (VPN в режиме прокси)
     owners: list[str] = field(default_factory=list)  # программы, чьи соединения идут с прямого адреса
+    own: OwnVpn | None = None     # свой VPN Лазейки, если работает
 
     @property
     def tunnels(self) -> list[Adapter]:
-        """Туннели VPN — без системных туннелей IPv6 (Teredo, 6to4)."""
+        """Туннели VPN — без системных туннелей IPv6 (Teredo, 6to4). Свой TUN — тоже туннель."""
         return [a for a in self.adapters if a.kind == "tunnel" and a.role != "system"]
 
     @property
     def internet(self) -> list[Adapter]:
+        """Туннели, через которые идёт интернет, — и чужие, и свой."""
         return [a for a in self.adapters if a.kind == "tunnel" and a.role == "internet"]
+
+    @property
+    def foreign_internet(self) -> list[Adapter]:
+        return [a for a in self.internet if not a.own]
 
     @property
     def direct(self) -> list[Adapter]:
         return [a for a in self.adapters if a.kind == "direct"]
 
     @property
+    def own_active(self) -> bool:
+        return self.own is not None
+
+    @property
+    def foreign_active(self) -> bool:
+        """Работает чужой VPN в интернет: туннель или прокси на этом компьютере."""
+        return bool(self.foreign_internet or self.proxy)
+
+    @property
     def active(self) -> bool:
-        """Работает VPN в интернет: туннель или прокси на этом компьютере."""
-        return bool(self.internet or self.proxy)
+        """Работает хоть какой-то VPN в интернет — чужой или свой."""
+        return self.foreign_active or self.own_active
+
+    @property
+    def foreign_label(self) -> str:
+        return self.label()
+
+    @property
+    def own_servers(self) -> list[str]:
+        return self.own.capped_servers() if self.own else []
 
     @property
     def full_tunnel(self) -> bool:
-        """Весь интернет по умолчанию уходит в туннель (маршрут к 1.1.1.1 — через VPN)."""
-        return any(a.default_route for a in self.internet)
+        """Весь интернет по умолчанию уходит в чужой туннель (маршрут к 1.1.1.1 — через VPN)."""
+        return any(a.default_route for a in self.foreign_internet)
 
     @property
     def unseparable(self) -> list[str]:
@@ -635,6 +716,10 @@ class Snapshot:
 
     def direct_indices(self) -> list[int]:
         return sorted({i for a in self.direct for i in a.indices})
+
+    def indices_except_own(self) -> list[int]:
+        """Все интерфейсы, кроме своего TUN и петли: так перехватывает обход без совместимости."""
+        return sorted({i for a in self.adapters if a.kind != "skip" and not a.own for i in a.indices})
 
     def source_ip(self) -> str | None:
         """IPv4 прямого подключения с шлюзом — для проверок мимо VPN."""
@@ -668,26 +753,38 @@ class Snapshot:
         return sorted(nets, key=str)
 
     def signature(self) -> list[str]:
-        """Чем отличаются активные VPN — чтобы «не спрашивать снова» относилось к ним."""
-        out = [f"{a.component or a.if_type}:{a.guid.lower()}" for a in self.internet]
+        """Чем отличаются активные чужие VPN — чтобы «не спрашивать снова» относилось к ним.
+        Свой VPN сюда не входит: о нём не спрашивают."""
+        out = [f"{a.component or a.if_type}:{a.guid.lower()}" for a in self.foreign_internet]
         if self.proxy:
             out.append(f"proxy:{self.proxy}")
         return sorted(out)
 
     def plan(self) -> dict | None:
-        """Что исключить из перехвата: None — VPN-адаптеров нет, фильтр не нужен."""
-        if not self.tunnels:
+        """Что исключить из перехвата при включённой совместимости: прямые интерфейсы и все
+        серверы VPN (свои — всегда). None — ни туннелей, ни своих серверов: фильтр не нужен."""
+        if not self.tunnels and not self.own_servers:
             return None
         interfaces = self.direct_indices()
         if not interfaces:
             return None
         return {"interfaces": interfaces, "servers": list(self.servers)}
 
+    def own_plan(self) -> dict | None:
+        """Совместимость выключена, а работает свой VPN: перехват на всех интерфейсах, кроме
+        своего TUN, и без своих серверов (чужие VPN обход трогает, как просили)."""
+        if self.own is None:
+            return None
+        interfaces = self.indices_except_own()
+        if not interfaces:
+            return None
+        return {"interfaces": interfaces, "servers": self.own_servers, "mode": "own"}
+
     def candidates(self) -> list[str]:
-        """Какие программы могут держать VPN в интернет. Если адаптер сам называет программу —
-        это она. Иначе — запущенные программы-ядра; чей именно туннель или прокси, Windows
-        не говорит, поэтому при нескольких честно перечисляем всех."""
-        named = [a.app for a in self.internet if a.app]
+        """Какие программы могут держать чужой VPN в интернет. Если адаптер сам называет
+        программу — это она. Иначе — запущенные программы-ядра; чей именно туннель или прокси,
+        Windows не говорит, поэтому при нескольких честно перечисляем всех."""
+        named = [a.app for a in self.foreign_internet if a.app]
         if named:
             return list(dict.fromkeys(named))
         if self.owners:
@@ -695,50 +792,77 @@ class Snapshot:
         return [app for app in self.apps if app in CORE_APPS]
 
     def label(self) -> str:
+        """Имя чужого VPN для сообщений."""
         names = self.candidates()
         if names:
             return " или ".join(names[:3])
-        adapters = [a.name for a in self.internet]
+        adapters = [a.name for a in self.foreign_internet]
         if adapters:
             return f"VPN «{adapters[0]}»"
         return "VPN через системный прокси" if self.proxy else "VPN"
 
     def to_dict(self) -> dict:
+        """active, mode, label — про чужой VPN (с ним и работает совместимость); свой — в own."""
+        foreign = self.foreign_active
+        own_servers = set(self.own_servers)
         return {
-            "active": self.active,
-            "mode": "tunnel" if self.internet else "proxy" if self.proxy else None,
+            "active": foreign,
+            "mode": "tunnel" if self.foreign_internet else "proxy" if self.proxy else None,
             "full_tunnel": self.full_tunnel,
             "proxy": self.proxy,
-            "label": self.label() if self.active else None,
-            "candidates": self.candidates() if self.active else [],
+            "label": self.label() if foreign else None,
+            "candidates": self.candidates() if foreign else [],
             "apps": self.apps,
-            "servers": self.servers,
+            "servers": [s for s in self.servers if s not in own_servers],
             "source_ip": bool(self.source_ip()),
             "unseparable": self.unseparable,
             "at": self.at,
             "adapters": [{
                 "id": a.guid.lower(), "index": a.index, "name": a.name, "description": a.description,
-                "kind": a.kind, "role": a.role, "reason": a.reason, "up": a.up, "app": a.app,
+                "kind": a.kind, "role": a.role, "reason": a.reason, "up": a.up, "app": a.app, "own": a.own,
             } for a in self.adapters if a.kind != "skip" and not (a.kind == "tunnel" and a.role == "system")],
+            "own": {"active": self.own_active, "mode": self.own.mode if self.own else None},
         }
 
 
-def running_apps() -> list[str]:
+def running_apps(skip_pids: set[int] | None = None) -> list[str]:
+    """Запущенные VPN-программы. Свои процессы не считаются: дочерние процессы Лазейки (ядра
+    своего VPN, короткие version/check) и PID из skip_pids — sing-box.exe и xray.exe Лазейки
+    иначе выглядели бы чужим VPN."""
     import psutil
+    me = os.getpid()
+    skip = skip_pids or set()
     found: list[str] = []
-    for proc in psutil.process_iter(["name"]):
-        name = (proc.info.get("name") or "").lower()
+    for proc in psutil.process_iter(["name", "pid", "ppid"]):
+        info = proc.info
+        if info.get("pid") in skip or info.get("ppid") == me:
+            continue
+        name = (info.get("name") or "").lower()
         for pattern, app in VPN_PROCESSES:
             if re.match(pattern, name) and app not in found:
                 found.append(app)
     return found
 
 
-def active_core_apps(direct_ips: set[str]) -> list[str]:
+def own_child_pids() -> set[int]:
+    """Процессы, запущенные самой Лазейкой (как runner.foreign_winws отличает свой winws)."""
+    import psutil
+    me = os.getpid()
+    out: set[int] = set()
+    try:
+        for proc in psutil.process_iter(["pid", "ppid"]):
+            if proc.info.get("ppid") == me:
+                out.add(proc.info["pid"])
+    except (psutil.Error, OSError):
+        pass
+    return out
+
+
+def active_core_apps(direct_ips: set[str], skip_pids: set[int] | None = None) -> list[str]:
     """Чей туннель или прокси сейчас работает. Ядро VPN (Xray, sing-box, mihomo) само открывает
     соединения с адреса физического адаптера — к своему серверу и для правил «напрямую».
     Программа, которая просто висит в фоне (у владельца так висит служба Happ рядом с работающим
-    Incy), таких соединений не держит."""
+    Incy), таких соединений не держит. skip_pids — свои процессы (ядра Лазейки)."""
     import psutil
     if not direct_ips:
         return []
@@ -746,8 +870,9 @@ def active_core_apps(direct_ips: set[str]) -> list[str]:
         conns = psutil.net_connections(kind="tcp")
     except (psutil.Error, OSError):
         return []
+    skip = skip_pids or set()
     pids = {c.pid for c in conns if c.pid and c.laddr and c.status == psutil.CONN_ESTABLISHED
-            and c.laddr.ip.split("%")[0] in direct_ips}
+            and c.laddr.ip.split("%")[0] in direct_ips and c.pid not in skip}
     found: list[str] = []
     for pid in pids:
         try:
@@ -762,8 +887,21 @@ def active_core_apps(direct_ips: set[str]) -> list[str]:
     return sorted(found)
 
 
-def scan(overrides: dict[str, str] | None = None) -> Snapshot:
-    """Адаптеры, их роль и серверы VPN. Быстро (десятки миллисекунд): WinAPI и реестр."""
+def is_own_adapter(a: Adapter, own: OwnVpn | None) -> bool:
+    """Свой TUN: по имени адаптера или по адресу из своей подсети."""
+    if own is None:
+        return False
+    if own.adapter_name and a.name.lower() == own.adapter_name.lower():
+        return True
+    return bool(own.tun_net) and any(own.owns_address(ip) for ip in a.ipv4)
+
+
+def scan(overrides: dict[str, str] | None = None, own: OwnVpn | None = None) -> Snapshot:
+    """Адаптеры, их роль и серверы VPN. Быстро (десятки миллисекунд): WinAPI и реестр.
+
+    own — готовый снимок своего VPN от менеджера: его адаптер помечается own (это туннель, поправки
+    человека к нему не применяются), его процессы и системный прокси не считаются чужими, а его
+    серверы добавляются к серверам VPN первыми."""
     overrides = {k.lower(): v for k, v in (overrides or {}).items()}
     adapters = list_adapters()
     drivers = _driver_info()
@@ -776,6 +914,9 @@ def scan(overrides: dict[str, str] | None = None) -> Snapshot:
         a.component, a.characteristics = drivers.get(a.guid.lower(), ("", 0))
         if a.if_type == IF_TYPE_PPP:
             a.ras_device = ras.get(a.name)
+        if a.if_type != IF_TYPE_LOOPBACK and is_own_adapter(a, own):
+            a.own, a.kind, a.reason, a.app = True, "tunnel", "свой VPN Лазейки", own.label
+            continue
         a.kind, a.reason = classify(a, overrides.get(a.guid.lower()))
         if a.kind == "tunnel":
             a.app = adapter_app(a.component, a.description)
@@ -796,7 +937,7 @@ def scan(overrides: dict[str, str] | None = None) -> Snapshot:
             a.role = "lan"
         else:
             a.role = "idle"
-    tunnels = [a for a in adapters if a.kind == "tunnel" and a.role != "system"]
+    tunnels = [a for a in adapters if a.kind == "tunnel" and a.role != "system" and not a.own]
     servers: list[str] = []
     if tunnels:
         direct = {i for a in adapters if a.kind == "direct" for i in a.indices}
@@ -808,17 +949,24 @@ def scan(overrides: dict[str, str] | None = None) -> Snapshot:
             servers = sorted(set(servers) | set(wireguard_endpoints(tunnels)))
         except OSError:
             pass
+    own_servers = own.capped_servers() if own else []
+    # Свои — первыми: фильтр WinDivert умещает ограниченное число адресов.
+    servers = own_servers + [s for s in servers if s not in own_servers]
+    skip = set(own.pids) if own else set()
     try:
-        apps = running_apps()
+        apps = running_apps(skip)
     except Exception:  # noqa: BLE001
         apps = []
     proxy = system_proxy()
+    if own is not None and same_proxy(proxy, own.proxy):
+        proxy = None  # системный прокси выставила сама Лазейка
     owners: list[str] = []
     unnamed = [a for a in adapters if a.kind == "tunnel" and a.role == "internet" and not a.app]
     if unnamed or proxy:
         direct_ips = {ip for a in adapters if a.kind == "direct" for ip in (*a.ipv4, *a.ipv6)}
-        owners = active_core_apps(direct_ips)
-    return Snapshot(adapters=adapters, servers=servers, apps=apps, at=time.time(), proxy=proxy, owners=owners)
+        owners = active_core_apps(direct_ips, skip | own_child_pids())
+    return Snapshot(adapters=adapters, servers=servers, apps=apps, at=time.time(), proxy=proxy, owners=owners,
+                    own=own)
 
 
 def plan_changed(applied: dict | None, wanted: dict | None, direct: list[int] | None = None) -> bool:
@@ -827,11 +975,12 @@ def plan_changed(applied: dict | None, wanted: dict | None, direct: list[int] | 
     Появился VPN, новый прямой интерфейс, новый сервер VPN — нужен. VPN пропал — фильтр по
     прямым интерфейсам по-прежнему верен, пока сами прямые интерфейсы те же; сменились —
     перезапуск (без туннелей обход вернётся к обычному фильтру). Если фильтр при том же наборе
-    уже не собрался, повторять незачем: иначе обход перезапускался бы по кругу.
+    уже не собрался, повторять незачем: иначе обход перезапускался бы по кругу. Фильтр своего VPN
+    (mode «own») ведёт себя так же: выключили VPN — исключение его сервера никому не мешает.
     """
     applied = applied or {"mode": "plain"}
     if wanted is None:
-        return (applied.get("mode") == "vpn" and direct is not None
+        return (applied.get("mode") in ("vpn", "own") and direct is not None
                 and sorted(applied.get("interfaces") or []) != sorted(direct))
     if applied.get("mode") == "plain":
         return True
@@ -939,8 +1088,12 @@ def probe_routes(snapshot: Snapshot) -> dict:
     прямому подключению, и запрос через туннель (или системный прокси) VPN. Работает для любого
     VPN, в том числе с правилами внутри программы (Incy, Happ, Hiddify, v2rayN…), где таблица
     маршрутов ничего не говорит. Это маршрут проверочного запроса: если в VPN есть правила для
-    отдельных программ, у самих программ он может отличаться."""
-    proxy = snapshot.proxy if not snapshot.internet else None
+    отдельных программ, у самих программ он может отличаться. Свой VPN: эталон — привязка к своему
+    TUN или запрос через системный прокси, который выставила Лазейка."""
+    own_proxy = snapshot.own.proxy if snapshot.own is not None and snapshot.own.proxy else None
+    if own_proxy and "://" not in own_proxy:
+        own_proxy = f"http://{own_proxy}"
+    proxy = (snapshot.proxy or own_proxy) if not snapshot.internet else None
     direct_ip = snapshot.source_ip() if snapshot.internet else None
     tunnel_ip = snapshot.tunnel_ip()
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -977,4 +1130,5 @@ def probe_routes(snapshot: Snapshot) -> dict:
 
 def snapshot_dict(snapshot: Snapshot | None) -> dict:
     return snapshot.to_dict() if snapshot else {"active": False, "mode": None, "adapters": [], "servers": [],
-                                                "apps": [], "candidates": [], "proxy": None, "unseparable": []}
+                                                "apps": [], "candidates": [], "proxy": None, "unseparable": [],
+                                                "own": {"active": False, "mode": None}}

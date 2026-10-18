@@ -122,6 +122,22 @@
   function finishFix(stage, message, found) {
     setFix({ running: false, stage, message, found: found || null, current: null, finished_at: nowSec() });
     log('zapret', stage === 'done' ? 'info' : 'warn', `«Найти и включить»: ${message}`);
+    /* Как Core._reconcile_fix: удача снимает плашку сторожа, неудача подбора сторожа — меняет её текст. */
+    if (stage === 'done') {
+      mock.dropNotice('watchdog');
+    } else if (watchdogFixing) {
+      watchdogAlert(`${watchdogFixing}, а подобрать стратегию не вышло. ${message}`, true);
+    }
+    watchdogFixing = null;
+  }
+
+  /* Постоянная плашка сторожа (persistent): висит до удачной проверки, уведомлений нет. */
+  let watchdogFixing = null;
+  function watchdogAlert(text, withAction) {
+    mock.setNotice({
+      id: 'watchdog', level: 'warn', text, page: 'zapret', persistent: true, dismissible: true,
+      action: withAction ? { label: 'Найти и включить', call: 'zapret_fix', args: [] } : null,
+    });
   }
 
   function noticeFor(id, level, text) {
@@ -146,7 +162,6 @@
         return;
       }
       finishFix('done', `Включили «${label(found)}»: Discord и YouTube открываются.`, found);
-      mock.dropNotice('watchdog');
       noticeFor('fix-done', 'success', `Обход починен: включена стратегия «${label(found)}».`);
     });
   }
@@ -242,18 +257,19 @@
     const failing = results.filter((result) => !result.ok).map((result) => result.label);
     Object.assign(state.zapret.watchdog, { last_at: nowSec(), last_ok: !failing.length, failing });
     storeCheck(results);
-    if (!failing.length) return;
+    if (!failing.length) {
+      mock.dropNotice('watchdog');
+      return;
+    }
     const what = failing.join(' и ');
     const stopped = failing.length > 1 ? 'перестали открываться' : 'перестал открываться';
     if (state.settings.watchdog === 'auto') {
-      noticeFor('watchdog', 'warn', `${what} ${stopped} — подбираю рабочую стратегию.`);
+      watchdogAlert(`${what} ${stopped} — подбираю рабочую стратегию.`, false);
+      watchdogFixing = `${what} ${stopped}`;
       api.zapret_fix();
       return;
     }
-    mock.setNotice({
-      id: 'watchdog', level: 'warn', text: `${what} ${stopped}. Найти рабочую стратегию?`,
-      action: { label: 'Найти и включить', call: 'zapret_fix', args: [] }, dismissible: true,
-    });
+    watchdogAlert(`${what} ${stopped}. Найти рабочую стратегию?`, true);
   }
 
   function watchdogTick() {

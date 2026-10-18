@@ -8,12 +8,17 @@
   const { h, icon, setText, setHidden, setAttr } = Lz.dom;
   const ui = Lz.ui;
 
-  const PAGE_ORDER = ['home', 'zapret', 'telegram', 'help', 'updates', 'logs', 'settings'];
+  const PAGE_ORDER = ['home', 'zapret', 'telegram', 'vpnclient', 'help', 'updates', 'logs', 'settings'];
   /* Старые имена страниц: «Диагностика» стала разделом «Помощи», ссылки page=diag продолжают работать. */
   const PAGE_ALIASES = { diag: 'help' };
   const MOCK_GRACE_MS = 150;
   const SLOW_BACKEND_HINT_MS = 6000;
   const STATUS_DOT_TONE = { running: 'ok', starting: 'warn', stopping: 'warn', error: 'err' };
+  /* Свой VPN без проверки выхода через сервер — ещё не «зелёный». */
+  const VPNCLIENT_DOT_TONE = { ...STATUS_DOT_TONE, verifying: 'warn' };
+  /* Постоянная плашка страницы перекрашивает её точку: «работает, но не всё в порядке». */
+  const DOT_RANK = { '': 0, ok: 1, warn: 2, err: 3 };
+  const ALERT_DOT_TONE = { warn: 'warn', error: 'err' };
 
   const pages = new Map();
   const scrollPositions = new Map();
@@ -84,17 +89,36 @@
 
   /* ---------- Страницы ---------- */
 
+  /**
+   * Постоянные плашки своей страницы (notice.page) — сразу под заголовком. Главная показывает все
+   * плашки сама, поэтому ей не нужны. Страницы об этом не знают: вставляет оболочка.
+   */
+  function mountAlerts(name, instance) {
+    if (name === 'home') return null;
+    const alerts = Lz.notices.create({ page: name });
+    const head = instance.el.querySelector(':scope > .page-head');
+    if (head) head.after(alerts.el);
+    else instance.el.prepend(alerts.el);
+    return alerts;
+  }
+
+  function updatePage(entry, state) {
+    if (entry.alerts) entry.alerts.update(state.notices);
+    entry.instance.update(state);
+  }
+
   function mountPage(name) {
     let entry = pages.get(name);
     if (entry) return entry;
     const definition = Lz.pages[name];
     const instance = definition.create();
+    const alerts = mountAlerts(name, instance);
     const host = h('section', {
       class: ['page', `page--${name}`, definition.layout === 'fill' && 'page--fill'],
       hidden: true,
     }, instance.el);
     pagesRoot.append(host);
-    entry = { host, instance };
+    entry = { host, instance, alerts };
     pages.set(name, entry);
     return entry;
   }
@@ -125,7 +149,7 @@
       if (page === name) nav.btn.setAttribute('aria-current', 'page');
       else nav.btn.removeAttribute('aria-current');
     }
-    if (Lz.store.state) entry.instance.update(Lz.store.state);
+    if (Lz.store.state) updatePage(entry, Lz.store.state);
     if (switching) entry.host.scrollTop = scrollPositions.get(name) || 0;
     if (entry.instance.show) entry.instance.show(opts || {});
   }
@@ -165,8 +189,18 @@
 
     const zapret = state.zapret || {};
     const tg = state.tg || {};
-    navDots.get('zapret').dataset.tone = zapret.available === false ? '' : (STATUS_DOT_TONE[zapret.status] || '');
-    navDots.get('telegram').dataset.tone = STATUS_DOT_TONE[tg.status] || '';
+    const vc = state.vpnclient;
+    const tones = {
+      zapret: zapret.available === false ? '' : (STATUS_DOT_TONE[zapret.status] || ''),
+      telegram: STATUS_DOT_TONE[tg.status] || '',
+      vpnclient: vc ? (VPNCLIENT_DOT_TONE[Lz.texts.vpncPillStatus(vc)] || '') : '',
+    };
+    for (const notice of Array.isArray(state.notices) ? state.notices : []) {
+      const page = notice && notice.persistent === true && notice.page ? resolvePage(String(notice.page)) : null;
+      const tone = ALERT_DOT_TONE[notice && notice.level];
+      if (page && tone && page in tones && DOT_RANK[tone] > DOT_RANK[tones[page]]) tones[page] = tone;
+    }
+    for (const [page, tone] of Object.entries(tones)) navDots.get(page).dataset.tone = tone;
   }
 
   function renderBusy(state) {
@@ -180,13 +214,16 @@
       started = true;
       bootScreen.remove();
       appRoot.removeAttribute('aria-busy');
-      go(initialPage());
+      /* ?page=vpnclient&focus=more — сразу к нужному разделу страницы (как Lz.nav.go(page, { focus })). */
+      const focus = Lz.params.get('focus');
+      go(initialPage(), focus ? { focus } : undefined);
     }
     Lz.theme.sync(state.settings ? state.settings.theme : 'system');
+    Lz.scale.sync(state.settings ? state.settings.ui_scale : null);
     renderSidebar(state);
     renderBusy(state);
     const entry = currentPage ? pages.get(currentPage) : null;
-    if (entry) entry.instance.update(state);
+    if (entry) updatePage(entry, state);
     Lz.onboarding.sync(state);
   }
 

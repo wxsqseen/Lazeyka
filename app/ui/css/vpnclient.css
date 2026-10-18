@@ -1,0 +1,1401 @@
+/* Свой VPN: страница «VPN», карточка на главной, меню «⋯», окна раздела. */
+
+/* ===================== Общее ===================== */
+
+.seg--sm .seg__opt {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+/*
+ * Флаги стран. Windows не рисует эмодзи-флаги (вместо них две буквы), поэтому региональные
+ * индикаторы берём из локального шрифта Twemoji Country Flags (THIRD_PARTY.md). unicode-range —
+ * только флаги: остальной текст остаётся в Segoe UI, а файл читается, лишь когда флаг встретился.
+ */
+@font-face {
+  font-family: "Twemoji Country Flags";
+  src: url("../fonts/TwemojiCountryFlags.woff2") format("woff2");
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+  font-display: block;
+}
+
+/* Флаг, оставшийся в имени подписки, группы или сервера, тоже рисуется картинкой, а не буквами. */
+.page__inner--vpnclient,
+.vc-home {
+  font-family: "Twemoji Country Flags", var(--font);
+}
+
+/* Место флага: 26×18. Без страны — рамка со значком глобуса (у «Самого быстрого» — молнии). */
+.vc-flag {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 26px;
+  height: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--text-3);
+}
+
+/* Глиф Twemoji квадратный, полотнище флага — 26/36 его высоты: при 26 px оно ровно 26×18,7. */
+.vc-flag--emoji {
+  position: relative;
+  overflow: hidden;
+  border: 0;
+  border-radius: 3px;
+  font: 26px/18px "Twemoji Country Flags", var(--font);
+}
+
+/* Тонкий край поверх полотнища: белые флаги (Финляндия, Япония, Польша) не тонут в светлом фоне. */
+.vc-flag--emoji::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--border);
+  content: "";
+}
+
+.vc-latency {
+  flex: none;
+  min-width: 58px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.vc-latency.is-ok { color: var(--ok-text); }
+.vc-latency.is-warn { color: var(--warn-text); }
+.vc-latency.is-err { color: var(--err-text); }
+
+.vc-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  margin-left: 8px;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: 1px;
+}
+
+.vc-selected {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.vc-selected__name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.vc-selected__group {
+  flex: none;
+  color: var(--text-3);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.vc-selected.is-empty {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.vc-selected--lg .vc-flag {
+  width: 30px;
+  height: 21px;
+}
+
+.vc-selected--lg .vc-flag--emoji {
+  font-size: 30px;
+  line-height: 21px;
+}
+
+.vc-note {
+  max-width: 72ch;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.progress.is-warn .progress__fill { background: var(--warn); }
+.progress.is-err .progress__fill { background: var(--err); }
+
+/* ===================== Меню «⋯» ===================== */
+
+.menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 220px;
+  max-width: 340px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: var(--shadow-pop);
+  animation: rise-in var(--t-fast) var(--ease);
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menu__item .icon {
+  color: var(--text-3);
+}
+
+.menu__item:hover,
+.menu__item:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+
+.menu__item--danger {
+  color: var(--err-text);
+}
+
+.menu__item--danger .icon {
+  color: var(--err);
+}
+
+.menu__item[aria-disabled="true"] {
+  opacity: .45;
+  cursor: default;
+}
+
+.menu__item[aria-disabled="true"]:hover {
+  background: none;
+}
+
+/* ===================== Подключение ===================== */
+
+.vc-conn {
+  gap: 18px;
+}
+
+.vc-conn__main {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 8px 28px;
+  align-items: start;
+}
+
+.vc-conn__power {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding-top: 2px;
+}
+
+.vc-conn__caption {
+  max-width: 20ch;
+  min-height: 19px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.vc-conn__caption.is-error {
+  color: var(--err-text);
+}
+
+.vc-conn__info {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.vc-conn__status {
+  font-size: 14px;
+}
+
+.vc-conn__install[hidden] {
+  display: none;
+}
+
+.vc-conn__block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vc-conn__block-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  align-self: stretch;
+}
+
+.vc-conn__label {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/*
+ * Режим в узком окне или при крупном масштабе не вылезает за карточку: переносится только самая
+ * длинная подпись — «Только локальный прокси», она последняя; остальные остаются в одну строку.
+ */
+.vc-conn__block .seg__opt {
+  justify-content: center;
+  height: auto;
+  min-height: 26px;
+  padding-block: 4px;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.vc-conn__block .seg__opt:last-child {
+  flex: 1 1 0;
+  min-width: min-content;
+  white-space: normal;
+}
+
+.vc-conn__selected {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.vc-conn__server {
+  display: flex;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.vc-conn__proto {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.vc-conn__hint {
+  max-width: 66ch;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.vc-conn__listen {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.vc-conn__listen-label {
+  color: var(--text-3);
+}
+
+.vc-conn__stats {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.vc-conn__foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 16px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* Статистика и картинка состояния лежат в одной ячейке: карточка не меняет высоту, они сменяются плавно. */
+.vc-conn__view {
+  display: grid;
+}
+
+.vc-conn__view > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+  transition: opacity var(--t) var(--ease), visibility var(--t);
+}
+
+.vc-conn__live {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.vc-conn__view.is-scene > .vc-conn__live,
+.vc-conn__view:not(.is-scene) > .vc-scene {
+  visibility: hidden;
+  opacity: 0;
+}
+
+.vc-scene {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 0 8px;
+}
+
+.vc-scene__art {
+  flex: none;
+  width: 240px;
+  height: auto;
+}
+
+.vc-scene__text {
+  max-width: 46ch;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+/*
+ * «Подключаемся» и «Готовим ядро»: по синему пути бежит волна. Маска не трогает остальной рисунок —
+ * четыре прямоугольника вокруг пути открыты целиком, а на самом пути — бегущий градиент.
+ * Границы пути (--path-*) сняты с картинок в долях их ширины и высоты.
+ */
+@property --vc-wave {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
+
+.vc-scene__art--connect,
+.vc-scene__art--core {
+  --wave-dim: rgb(0 0 0 / .45);
+  mask-image:
+    linear-gradient(#000 0 0),
+    linear-gradient(#000 0 0),
+    linear-gradient(#000 0 0),
+    linear-gradient(#000 0 0),
+    linear-gradient(90deg, var(--wave-dim) calc(var(--vc-wave) - 12%), #000 var(--vc-wave), var(--wave-dim) calc(var(--vc-wave) + 12%));
+  mask-position: 0 0, 100% 0, 0 0, 0 100%, 0 0;
+  mask-size:
+    var(--path-x0) 100%,
+    calc(100% - var(--path-x1)) 100%,
+    100% var(--path-y0),
+    100% calc(100% - var(--path-y1)),
+    100% 100%;
+  mask-repeat: no-repeat;
+}
+
+.vc-scene__art--connect {
+  --path-x0: 38%;
+  --path-x1: 75.5%;
+  --path-y0: 44%;
+  --path-y1: 59.5%;
+  animation: vc-wave-connect 2s linear infinite;
+}
+
+.vc-scene__art--core {
+  --path-x0: 31.6%;
+  --path-x1: 56%;
+  --path-y0: 44%;
+  --path-y1: 54.6%;
+  animation: vc-wave-core 1.6s linear infinite;
+}
+
+.vc-conn__view:not(.is-scene) .vc-scene__art {
+  animation-play-state: paused;
+}
+
+@keyframes vc-wave-connect {
+  from { --vc-wave: 28%; }
+  to { --vc-wave: 86%; }
+}
+
+@keyframes vc-wave-core {
+  from { --vc-wave: 22%; }
+  to { --vc-wave: 66%; }
+}
+
+/* Без движения путь просто виден целиком. */
+@media (prefers-reduced-motion: reduce) {
+  .vc-scene__art--connect,
+  .vc-scene__art--core {
+    animation: none;
+    mask-image: none;
+  }
+}
+
+/* ===================== Серверы ===================== */
+
+.vc-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+}
+
+.vc-toolbar__search {
+  width: 240px;
+}
+
+.vc-servers__speed[hidden] {
+  display: none;
+}
+
+.vc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.vc-list:empty {
+  display: none;
+}
+
+.vc-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.vc-sub:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.vc-sub__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.vc-sub__titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.vc-sub__name {
+  margin: 0;
+  font: 600 15px/1.35 "Twemoji Country Flags", var(--font-display);
+  overflow-wrap: anywhere;
+}
+
+.vc-sub__meta {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.vc-sub__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+
+.vc-sub__announce {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--sunken);
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.vc-sub__announce .icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+.vc-sub__note {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+}
+
+.vc-sub__links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+}
+
+.vc-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vc-usage__row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 12px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.vc-usage__traffic {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.vc-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vc-group__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0 8px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.vc-group__count {
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.vc-servers {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -8px;
+  padding: 0;
+  list-style: none;
+}
+
+.vc-server {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding-right: 4px;
+  border-radius: var(--radius);
+  transition: background-color var(--t-fast) var(--ease);
+}
+
+.vc-server:hover {
+  background: var(--hover);
+}
+
+.vc-server.is-unsupported:hover {
+  background: transparent;
+}
+
+.vc-server__pick {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 46px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vc-server__pick[aria-disabled="true"] {
+  cursor: default;
+}
+
+.vc-server__pick:focus-visible {
+  outline-offset: -2px;
+}
+
+.vc-server__mark {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  transition: border-color var(--t-fast) var(--ease);
+}
+
+.vc-server.is-selected .vc-server__mark {
+  border: 5px solid var(--accent);
+}
+
+.vc-server.is-pending .vc-server__mark {
+  border-color: transparent;
+}
+
+.vc-server__mark .spinner {
+  width: 16px;
+  height: 16px;
+}
+
+.vc-server.is-unsupported .vc-server__mark {
+  border-style: dashed;
+}
+
+.vc-server__text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.vc-server__name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 13.5px;
+}
+
+.vc-server__label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.vc-server.is-selected .vc-server__label {
+  font-weight: 600;
+}
+
+.vc-server__meta,
+.vc-server__desc {
+  overflow: hidden;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.vc-server__meta {
+  color: var(--text-3);
+}
+
+.vc-server__desc {
+  color: var(--text-2);
+}
+
+.vc-server.is-unsupported .vc-server__label,
+.vc-server.is-unsupported .vc-flag {
+  color: var(--text-3);
+}
+
+.vc-server.is-unsupported .vc-flag--emoji {
+  opacity: .5;
+  filter: grayscale(1);
+}
+
+.vc-server__meta.is-unsupported {
+  white-space: normal;
+}
+
+.vc-server__speed {
+  flex: none;
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.vc-server__menu-gap {
+  flex: none;
+  width: 30px;
+}
+
+.vc-server--auto .vc-flag {
+  border-style: dashed;
+  color: var(--accent-text);
+}
+
+/* ===================== Добавить ===================== */
+
+.vc-empty-wrap[hidden] {
+  display: none;
+}
+
+.vc-empty {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  padding: 2px 0 8px;
+}
+
+.vc-empty__art {
+  flex: none;
+  width: 200px;
+  height: 150px;
+  object-fit: contain;
+}
+
+.vc-empty__text {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vc-empty__title {
+  font: 600 18px/1.3 var(--font-display);
+}
+
+.vc-empty__lead {
+  max-width: 60ch;
+  font-size: 14px;
+}
+
+.vc-empty__hint {
+  max-width: 60ch;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.vc-import__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.vc-import__group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vc-import__group--more {
+  gap: 2px;
+  margin-left: auto;
+}
+
+.vc-import__progress {
+  display: flex;
+  align-items: center;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.vc-import__result:empty {
+  display: none;
+}
+
+/* У предложений ядра бывает до трёх кнопок — они встают строкой под текстом, а не теснят его справа. */
+.vc-import__result .callout {
+  flex-wrap: wrap;
+}
+
+.vc-import__result .callout__actions {
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  margin-left: 30px;
+}
+
+/* ===================== Маршруты ===================== */
+
+.vc-presets {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.vc-presets.is-pending .mode__option {
+  opacity: .6;
+}
+
+.vc-bypass {
+  margin-top: -6px;
+}
+
+.vc-applists {
+  gap: 14px 16px;
+}
+
+.vc-applist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.vc-applist__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.vc-applist__title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.vc-applist__desc {
+  margin-top: -4px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.vc-applist__add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.vc-applist__add > .field {
+  flex: 1 1 180px;
+}
+
+.vc-applist__add > .btn {
+  flex: none;
+  height: 34px;
+}
+
+.vc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+}
+
+.vc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 3px 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 13px;
+}
+
+.vc-chip__text {
+  overflow: hidden;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.vc-chip__remove {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.vc-chip__remove:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.vc-apps-empty {
+  align-self: center;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.vc-chips .vc-apps-empty {
+  align-self: center;
+}
+
+.vc-sites {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vc-profiles {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vc-profile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.vc-profile:first-child {
+  padding-top: 0;
+}
+
+.vc-profile:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.vc-profile__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.vc-profile__name {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.vc-profile__source {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.vc-profile__summary {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.vc-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  font-size: 12.5px;
+  list-style: none;
+}
+
+.vc-rules__item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.vc-rules__meta {
+  color: var(--text-3);
+  text-align: right;
+}
+
+.vc-rules__item.is-error .vc-rules__meta {
+  color: var(--err-text);
+}
+
+/* ===================== Подробнее ===================== */
+
+.vc-more {
+  gap: 20px;
+}
+
+.vc-more-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.vc-form-grid--port,
+.vc-form-grid--fp {
+  grid-template-columns: minmax(0, 340px);
+}
+
+/* Переключатели сразу под полями — отделяем чертой, как строки настроек между собой. */
+.vc-more-form .form-grid + .settings-list {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.vc-more-form .settings-list + .form-grid,
+.vc-more-form .settings-list + .form-nested {
+  margin-top: 4px;
+}
+
+/* Логин и пароль — под своим переключателем, внутри списка настроек. */
+.vc-auth {
+  margin: 14px 0 2px 2px;
+}
+
+.vc-dns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vc-dns .select {
+  width: 100%;
+}
+
+.vc-form-actions {
+  margin: 4px -22px 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.vc-cores {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vc-core {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.vc-core__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.vc-core__titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.vc-core__title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.vc-core__status {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.vc-core__status.is-error {
+  color: var(--err-text);
+}
+
+.vc-core__note {
+  max-width: 72ch;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.vc-core__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ===================== Окна ===================== */
+
+.modal--vc-wide {
+  width: min(560px, 100%);
+}
+
+.vc-dialog__actions--wrap {
+  flex-wrap: wrap;
+}
+
+.vc-form-dialog__body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.vc-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+}
+
+.vc-form-dialog__switches .setting {
+  padding: 2px 0;
+}
+
+.modal--vc-qr {
+  width: min(380px, 100%);
+}
+
+/* QR читается только тёмным по белому — рамка белая в обеих темах. */
+.vc-qr__frame {
+  display: grid;
+  place-items: center;
+  margin: 8px auto 4px;
+  padding: 14px;
+  border-radius: var(--radius);
+  background: #FFFFFF;
+}
+
+.vc-qr__img {
+  display: block;
+  width: 240px;
+  height: 240px;
+  image-rendering: pixelated;
+}
+
+.vc-qr .dialog__details {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.vc-qr__warn {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warn);
+}
+
+.vc-deeplink {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--sunken);
+}
+
+.vc-deeplink__kind {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.vc-deeplink__text {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.vc-apps-search {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.vc-apps-wrap {
+  max-height: 300px;
+  margin: 0 -6px;
+  overflow: auto;
+}
+
+.vc-apps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vc-apps__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.vc-apps__item:hover {
+  background: var(--hover);
+}
+
+.vc-apps__item .icon {
+  color: var(--text-3);
+}
+
+.vc-apps__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.vc-apps__name {
+  font-size: 13px;
+}
+
+.vc-apps__path {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ===================== Главная ===================== */
+
+.hero--vpnc {
+  grid-column: 1 / -1;
+}
+
+.vc-home {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 8px 28px;
+  align-items: center;
+  padding-top: 18px;
+}
+
+.vc-home__power {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.vc-home__info {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.vc-home__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+.vc-home__server {
+  max-width: 100%;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.vc-home__stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 120px)) minmax(0, 1fr);
+  gap: 12px 16px;
+  align-items: end;
+}
+
+.vc-home__stats .spark-wrap {
+  height: 40px;
+}
+
+.vc-home__sub {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.vc-home__sub[hidden] {
+  display: none;
+}
+
+.vc-home__sub-text {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 12px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.vc-home__sub-text .is-warn {
+  color: var(--warn-text);
+}
+
+.vc-home__sub-text .is-err {
+  color: var(--err-text);
+}
+
+.home-vpnc {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 0 4px;
+}
+
+.home-vpnc .conn {
+  color: var(--text-2);
+}
+
+/* ===================== Узкое окно ===================== */
+
+@container app (max-width: 999px) {
+  .vc-conn__main,
+  .vc-home {
+    grid-template-columns: 148px minmax(0, 1fr);
+    gap: 8px 20px;
+  }
+
+  .vc-toolbar__search {
+    width: 200px;
+  }
+
+  .vc-home__stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .vc-home__stats .spark-wrap {
+    grid-column: 1 / -1;
+  }
+
+  /* Три карточки пресетов в ряд оставляли тексту колонку в два-три слова — в узком окне они строками. */
+  .vc-presets {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .vc-scene {
+    gap: 20px;
+  }
+
+  .vc-scene__art {
+    width: 200px;
+  }
+}
+
+/* Совсем узко (крупный масштаб): списки программ в две колонки переносили заголовок, а «Добавить» уезжало под поле. */
+@container app (max-width: 859px) {
+  .vc-applists {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ===================== Помощь: свой VPN ===================== */
+
+.vc-traces__title {
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.vc-traces:empty {
+  display: none;
+}

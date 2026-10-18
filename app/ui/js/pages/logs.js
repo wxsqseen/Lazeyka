@@ -1,6 +1,6 @@
 'use strict';
 /*
- * Журнал: живой хвост строк из трёх источников. get_logs опрашивается только
+ * Журнал: живой хвост строк из четырёх источников. get_logs опрашивается только
  * пока страница открыта. Автопрокрутка встаёт на паузу, когда пользователь
  * листает вверх, и возобновляется, когда он возвращается вниз.
  */
@@ -18,8 +18,9 @@
     { value: 'app', label: 'Приложение' },
     { value: 'zapret', label: 'zapret' },
     { value: 'tg', label: 'Telegram' },
+    { value: 'vpn', label: 'VPN', title: 'Свой VPN: ядра, подписки, маршруты' },
   ];
-  const SOURCE_TAG = { app: 'Лазейка', zapret: 'zapret', tg: 'Telegram' };
+  const SOURCE_TAG = { app: 'Лазейка', zapret: 'zapret', tg: 'Telegram', vpn: 'VPN' };
   const LEVEL_WORD = { debug: 'отладка', info: 'инфо', warn: 'внимание', error: 'ошибка' };
 
   function create() {
@@ -68,7 +69,7 @@
 
     const header = ui.pageHeader({
       title: 'Журнал',
-      subtitle: 'Что происходит внутри: запуск обхода, работа прокси, проверки и ошибки.',
+      subtitle: 'Что происходит внутри: запуск обхода, работа прокси и своего VPN, проверки и ошибки.',
     });
     const toolbar = h('div', { class: 'log-toolbar' },
       sourceSeg.el, h('span', { class: 'spacer' }), copyBtn.el, folderBtn.el, clearBtn.el);

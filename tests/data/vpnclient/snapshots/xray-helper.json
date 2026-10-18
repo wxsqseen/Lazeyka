@@ -1,0 +1,317 @@
+{
+ "log": {
+  "loglevel": "warning",
+  "access": "none"
+ },
+ "inbounds": [
+  {
+   "tag": "in-d5934c9cd2ec65cd",
+   "listen": "127.0.0.1",
+   "port": 21000,
+   "protocol": "socks",
+   "settings": {
+    "auth": "password",
+    "udp": true,
+    "ip": "127.0.0.1",
+    "accounts": [
+     {
+      "user": "help-user",
+      "pass": "help-pass"
+     }
+    ]
+   }
+  },
+  {
+   "tag": "in-023115bb3f0032f8",
+   "listen": "127.0.0.1",
+   "port": 21001,
+   "protocol": "socks",
+   "settings": {
+    "auth": "password",
+    "udp": true,
+    "ip": "127.0.0.1",
+    "accounts": [
+     {
+      "user": "help-user",
+      "pass": "help-pass"
+     }
+    ]
+   }
+  },
+  {
+   "tag": "in-d411f6d1d583ae30",
+   "listen": "127.0.0.1",
+   "port": 21002,
+   "protocol": "socks",
+   "settings": {
+    "auth": "password",
+    "udp": true,
+    "ip": "127.0.0.1",
+    "accounts": [
+     {
+      "user": "help-user",
+      "pass": "help-pass"
+     }
+    ]
+   }
+  },
+  {
+   "tag": "in-0f7b4bad568799c0",
+   "listen": "127.0.0.1",
+   "port": 21003,
+   "protocol": "socks",
+   "settings": {
+    "auth": "password",
+    "udp": true,
+    "ip": "127.0.0.1",
+    "accounts": [
+     {
+      "user": "help-user",
+      "pass": "help-pass"
+     }
+    ]
+   }
+  }
+ ],
+ "outbounds": [
+  {
+   "tag": "block",
+   "protocol": "blackhole"
+  },
+  {
+   "tag": "out-d5934c9cd2ec65cd",
+   "protocol": "vless",
+   "settings": {
+    "address": "198.51.100.1",
+    "port": 443,
+    "id": "11111111-2222-4333-8444-555555555555",
+    "encryption": "none"
+   },
+   "streamSettings": {
+    "network": "xhttp",
+    "xhttpSettings": {
+     "path": "/xh",
+     "mode": "packet-up",
+     "host": "www.example.org",
+     "extra": {
+      "xPaddingBytes": "100-1000",
+      "noGRPCHeader": false
+     }
+    },
+    "security": "reality",
+    "realitySettings": {
+     "serverName": "www.example.org",
+     "fingerprint": "chrome",
+     "password": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+     "shortId": ""
+    },
+    "sockopt": {
+     "dialerProxy": "dial-d5934c9cd2ec65cd",
+     "interface": "Ethernet"
+    }
+   }
+  },
+  {
+   "tag": "dial-d5934c9cd2ec65cd",
+   "protocol": "freedom",
+   "settings": {
+    "noises": [
+     {
+      "type": "rand",
+      "packet": "10-20",
+      "delay": "10-16"
+     }
+    ]
+   },
+   "streamSettings": {
+    "sockopt": {
+     "interface": "Ethernet"
+    }
+   }
+  },
+  {
+   "tag": "out-023115bb3f0032f8",
+   "protocol": "vless",
+   "settings": {
+    "address": "198.51.100.2",
+    "port": 2053,
+    "id": "11111111-2222-4333-8444-555555555555",
+    "encryption": "none"
+   },
+   "streamSettings": {
+    "network": "kcp",
+    "kcpSettings": {},
+    "finalmask": {
+     "udp": [
+      {
+       "type": "mkcp-aes128gcm",
+       "settings": {
+        "password": "s33d"
+       }
+      },
+      {
+       "type": "header-wechat"
+      }
+     ]
+    },
+    "sockopt": {
+     "dialerProxy": "dial-023115bb3f0032f8",
+     "interface": "Ethernet"
+    }
+   }
+  },
+  {
+   "tag": "dial-023115bb3f0032f8",
+   "protocol": "freedom",
+   "settings": {
+    "noises": [
+     {
+      "type": "rand",
+      "packet": "10-20",
+      "delay": "10-16"
+     }
+    ]
+   },
+   "streamSettings": {
+    "sockopt": {
+     "interface": "Ethernet"
+    }
+   }
+  },
+  {
+   "tag": "out-d411f6d1d583ae30",
+   "protocol": "vmess",
+   "settings": {
+    "address": "198.51.100.3",
+    "port": 8443,
+    "id": "33333333-4444-4555-8666-777777777777",
+    "security": "none"
+   },
+   "streamSettings": {
+    "network": "grpc",
+    "grpcSettings": {
+     "serviceName": "vm-grpc",
+     "multiMode": true
+    },
+    "security": "tls",
+    "tlsSettings": {
+     "serverName": "grpc.example.org"
+    },
+    "sockopt": {
+     "dialerProxy": "dial-d411f6d1d583ae30",
+     "interface": "Ethernet"
+    }
+   }
+  },
+  {
+   "tag": "dial-d411f6d1d583ae30",
+   "protocol": "freedom",
+   "settings": {
+    "noises": [
+     {
+      "type": "rand",
+      "packet": "10-20",
+      "delay": "10-16"
+     }
+    ]
+   },
+   "streamSettings": {
+    "sockopt": {
+     "interface": "Ethernet"
+    }
+   }
+  },
+  {
+   "tag": "out-0f7b4bad568799c0",
+   "protocol": "vless",
+   "settings": {
+    "vnext": [
+     {
+      "address": "198.51.100.4",
+      "port": 443,
+      "users": [
+       {
+        "id": "11111111-2222-4333-8444-555555555555",
+        "encryption": "none"
+       }
+      ]
+     }
+    ]
+   },
+   "streamSettings": {
+    "network": "xhttp",
+    "security": "reality",
+    "realitySettings": {
+     "serverName": "www.example.org",
+     "fingerprint": "chrome",
+     "password": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+     "shortId": ""
+    },
+    "xhttpSettings": {
+     "path": "/x",
+     "mode": "auto"
+    },
+    "sockopt": {
+     "dialerProxy": "dial-0f7b4bad568799c0",
+     "interface": "Ethernet"
+    }
+   }
+  },
+  {
+   "tag": "dial-0f7b4bad568799c0",
+   "protocol": "freedom",
+   "settings": {
+    "fragment": {
+     "packets": "tlshello",
+     "length": "100-200",
+     "interval": "10-20"
+    },
+    "noises": [
+     {
+      "type": "rand",
+      "packet": "10-20",
+      "delay": "10-16"
+     }
+    ]
+   },
+   "streamSettings": {
+    "sockopt": {
+     "interface": "Ethernet"
+    }
+   }
+  }
+ ],
+ "routing": {
+  "domainStrategy": "AsIs",
+  "rules": [
+   {
+    "type": "field",
+    "inboundTag": [
+     "in-d5934c9cd2ec65cd"
+    ],
+    "outboundTag": "out-d5934c9cd2ec65cd"
+   },
+   {
+    "type": "field",
+    "inboundTag": [
+     "in-023115bb3f0032f8"
+    ],
+    "outboundTag": "out-023115bb3f0032f8"
+   },
+   {
+    "type": "field",
+    "inboundTag": [
+     "in-d411f6d1d583ae30"
+    ],
+    "outboundTag": "out-d411f6d1d583ae30"
+   },
+   {
+    "type": "field",
+    "inboundTag": [
+     "in-0f7b4bad568799c0"
+    ],
+    "outboundTag": "out-0f7b4bad568799c0"
+   }
+  ]
+ }
+}

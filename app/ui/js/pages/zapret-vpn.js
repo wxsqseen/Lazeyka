@@ -18,6 +18,7 @@
   /* ---------- Адаптеры ---------- */
 
   function adapterMeta(adapter) {
+    if (adapter.own) return [adapter.description, 'свой туннель — обход его не трогает'].filter(Boolean).join(' · ');
     return [
       adapter.description,
       KIND_TEXT[adapter.kind] || adapter.kind,
@@ -32,7 +33,18 @@
     return Boolean(result && result.ok);
   }
 
+  /* Адаптер своего TUN («Lazeyka»): поправка не нужна — Лазейка знает его сама. */
+  function ownAdapterRow(adapter) {
+    const name = String(adapter.name || adapter.id);
+    return h('li', { class: 'vpn-adapter' },
+      h('div', { class: 'vpn-adapter__text' },
+        h('p', { class: 'vpn-adapter__name' }, name),
+        h('p', { class: 'vpn-adapter__meta', text: adapterMeta(adapter) })),
+      h('span', { class: 'tag tag--ok', text: 'Свой VPN Лазейки' }));
+  }
+
   function adapterRow(adapter, data) {
+    if (adapter.own) return ownAdapterRow(adapter);
     const name = String(adapter.name || adapter.id);
     /* Программу показываем, если имя адаптера её не называет: «wwan99 · Incy», но не «Radmin VPN · Radmin VPN». */
     const app = adapter.app && !name.toLowerCase().includes(String(adapter.app).toLowerCase()) ? String(adapter.app) : '';
@@ -175,10 +187,11 @@
         const line = Lz.vpn.compatStatus(vpn, zapret);
         status.dataset.tone = line.tone;
         setText(statusText, line.text);
-        setHidden(probe.el, !vpn.active);
+        const relevant = Lz.vpn.routesRelevant(vpn);
+        setHidden(probe.el, !relevant);
         probe.setBusy(Boolean(vpn.routes && vpn.routes.running));
         serviceHint.update(zapret.mode === 'service' && vpn.compat !== false && settings.autostart === false);
-        routes.update(vpn.active ? Lz.vpn.routesData(state, 'view') : { checked: false });
+        routes.update(relevant ? Lz.vpn.routesData(state, 'view') : { checked: false });
         details.update(state);
       },
     };

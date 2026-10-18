@@ -1,0 +1,1036 @@
+{
+ "log": {
+  "level": "error",
+  "timestamp": true
+ },
+ "dns": {
+  "servers": [
+   {
+    "type": "https",
+    "tag": "dns-remote",
+    "server": "1.1.1.1",
+    "server_port": 443,
+    "path": "/dns-query",
+    "detour": "proxy"
+   },
+   {
+    "type": "https",
+    "tag": "dns-direct",
+    "server": "8.8.8.8",
+    "server_port": 443,
+    "path": "/dns-query"
+   },
+   {
+    "type": "https",
+    "tag": "dns-bypass",
+    "server": "8.8.8.8",
+    "server_port": 443,
+    "path": "/dns-query",
+    "detour": "bypass"
+   }
+  ],
+  "rules": [
+   {
+    "domain": [
+     "cdn.example.com",
+     "example.com",
+     "example.net",
+     "example.org",
+     "hy.example.com",
+     "tuic.example.com"
+    ],
+    "action": "route",
+    "server": "dns-direct"
+   },
+   {
+    "process_path_regex": [
+     "(?i)(^|\\\\)Telegram\\.exe$"
+    ],
+    "action": "route",
+    "server": "dns-remote"
+   },
+   {
+    "domain_suffix": [
+     "blocked.example"
+    ],
+    "action": "route",
+    "server": "dns-remote"
+   },
+   {
+    "process_path_regex": [
+     "(?i)(^|\\\\)steam\\.exe$"
+    ],
+    "action": "route",
+    "server": "dns-direct"
+   },
+   {
+    "domain_suffix": [
+     "example.org"
+    ],
+    "action": "route",
+    "server": "dns-direct"
+   },
+   {
+    "rule_set": [
+     "bypass-0",
+     "bypass-2",
+     "bypass-3",
+     "bypass-4"
+    ],
+    "action": "route",
+    "server": "dns-bypass"
+   },
+   {
+    "rule_set": [
+     "geosite-category-game-platforms-download"
+    ],
+    "action": "route",
+    "server": "dns-direct"
+   },
+   {
+    "domain_suffix": [
+     "ipify.org",
+     "checkip.amazonaws.com",
+     "ifconfig.me",
+     "ifconfig.co",
+     "ip.sb",
+     "ipapi.is",
+     "iplocate.io",
+     "api.sypexgeo.net",
+     "showip.net",
+     "ipinfo.io",
+     "ip-api.com",
+     "icanhazip.com",
+     "2ip.ru",
+     "2ip.io"
+    ],
+    "action": "route",
+    "server": "dns-direct"
+   },
+   {
+    "rule_set": [
+     "refilter-domains",
+     "russia-inside"
+    ],
+    "action": "route",
+    "server": "dns-remote"
+   }
+  ],
+  "final": "dns-direct",
+  "strategy": "ipv4_only"
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "mixed-in",
+   "listen": "127.0.0.1",
+   "listen_port": 20808
+  },
+  {
+   "type": "mixed",
+   "tag": "internal-in",
+   "listen": "127.0.0.1",
+   "listen_port": 20900,
+   "users": [
+    {
+     "username": "int-user",
+     "password": "int-pass"
+    }
+   ]
+  }
+ ],
+ "outbounds": [
+  {
+   "type": "selector",
+   "tag": "proxy",
+   "outbounds": [
+    "grp-g-all",
+    "grp-g-two",
+    "srv-be728789714ae239",
+    "srv-243ae83b718753f1",
+    "srv-db4ef4622cd60bb5",
+    "srv-d5934c9cd2ec65cd",
+    "srv-edfb9ce9d303ee2a",
+    "srv-836a58596e719a24",
+    "srv-63abbb04b000011f",
+    "srv-5e8906713e839bbb",
+    "srv-79577efedff205d8",
+    "srv-023115bb3f0032f8",
+    "srv-63a75ba8c48a0db8",
+    "srv-d411f6d1d583ae30",
+    "srv-1a3fd2990b86da8a",
+    "srv-3e9242b27f9e0a32",
+    "srv-7bd8e790207c7ad0",
+    "srv-a8f830ecb806f6f0",
+    "srv-147c6629c09e0000",
+    "srv-11a913a9a02a802d",
+    "srv-fd62c5a6226bdf3a",
+    "srv-8992b8d05b749555",
+    "srv-704ddd39f7281abf",
+    "srv-72ca6b57983e596b",
+    "srv-fb06c2c4a9a5ea06",
+    "srv-ba82dd6841ca8c0c",
+    "srv-c96dde20bfbbf2ed",
+    "srv-3df54525ffae70e8"
+   ],
+   "default": "grp-g-all",
+   "interrupt_exist_connections": true
+  },
+  {
+   "type": "urltest",
+   "tag": "grp-g-all",
+   "outbounds": [
+    "srv-be728789714ae239",
+    "srv-243ae83b718753f1",
+    "srv-db4ef4622cd60bb5",
+    "srv-d5934c9cd2ec65cd",
+    "srv-edfb9ce9d303ee2a",
+    "srv-836a58596e719a24",
+    "srv-63abbb04b000011f",
+    "srv-5e8906713e839bbb",
+    "srv-79577efedff205d8",
+    "srv-023115bb3f0032f8",
+    "srv-63a75ba8c48a0db8",
+    "srv-d411f6d1d583ae30",
+    "srv-1a3fd2990b86da8a",
+    "srv-3e9242b27f9e0a32",
+    "srv-7bd8e790207c7ad0",
+    "srv-a8f830ecb806f6f0"
+   ],
+   "url": "https://www.gstatic.com/generate_204",
+   "interval": "300s",
+   "tolerance": 50,
+   "interrupt_exist_connections": true
+  },
+  {
+   "type": "urltest",
+   "tag": "grp-g-two",
+   "outbounds": [
+    "srv-be728789714ae239",
+    "srv-243ae83b718753f1"
+   ],
+   "url": "https://www.gstatic.com/generate_204",
+   "interval": "300s",
+   "tolerance": 50,
+   "interrupt_exist_connections": true
+  },
+  {
+   "type": "selector",
+   "tag": "bypass",
+   "outbounds": [
+    "direct",
+    "proxy"
+   ],
+   "default": "direct",
+   "interrupt_exist_connections": true
+  },
+  {
+   "type": "vless",
+   "tag": "srv-be728789714ae239",
+   "server": "198.51.100.1",
+   "server_port": 443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "flow": "xtls-rprx-vision",
+   "tls": {
+    "enabled": true,
+    "server_name": "www.example.org",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    },
+    "reality": {
+     "enabled": true,
+     "public_key": "ae4k-ShjTC9gh3NHRS_pjKyBGyPS5qpgAK8sA4FIizQ",
+     "short_id": "6ba85179e30d4fc2"
+    }
+   }
+  },
+  {
+   "type": "vless",
+   "tag": "srv-243ae83b718753f1",
+   "server": "198.51.100.2",
+   "server_port": 443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "tls": {
+    "enabled": true,
+    "server_name": "cdn.example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "firefox"
+    }
+   },
+   "transport": {
+    "type": "ws",
+    "path": "/ws",
+    "headers": {
+     "Host": "cdn.example.com"
+    },
+    "max_early_data": 2048,
+    "early_data_header_name": "Sec-WebSocket-Protocol"
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "socks",
+   "tag": "srv-db4ef4622cd60bb5",
+   "server": "127.0.0.1",
+   "server_port": 21002,
+   "version": "5",
+   "username": "help-user",
+   "password": "help-pass"
+  },
+  {
+   "type": "socks",
+   "tag": "srv-d5934c9cd2ec65cd",
+   "server": "127.0.0.1",
+   "server_port": 21003,
+   "version": "5",
+   "username": "help-user",
+   "password": "help-pass"
+  },
+  {
+   "type": "vless",
+   "tag": "srv-edfb9ce9d303ee2a",
+   "server": "198.51.100.5",
+   "server_port": 80,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "transport": {
+    "type": "httpupgrade",
+    "path": "/up",
+    "host": "example.com"
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "vless",
+   "tag": "srv-836a58596e719a24",
+   "server": "198.51.100.6",
+   "server_port": 8443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "tls": {
+    "enabled": true,
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    }
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "vless",
+   "tag": "srv-63abbb04b000011f",
+   "server": "198.51.100.7",
+   "server_port": 80,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "transport": {
+    "type": "http",
+    "method": "GET",
+    "host": [
+     "a.example.com",
+     "b.example.com"
+    ],
+    "path": "/x"
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "socks",
+   "tag": "srv-5e8906713e839bbb",
+   "server": "127.0.0.1",
+   "server_port": 21007,
+   "version": "5",
+   "username": "help-user",
+   "password": "help-pass"
+  },
+  {
+   "type": "vless",
+   "tag": "srv-79577efedff205d8",
+   "server": "198.51.100.9",
+   "server_port": 443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    }
+   },
+   "transport": {
+    "type": "http",
+    "path": "/h2",
+    "host": [
+     "example.com"
+    ]
+   }
+  },
+  {
+   "type": "socks",
+   "tag": "srv-023115bb3f0032f8",
+   "server": "127.0.0.1",
+   "server_port": 21009,
+   "version": "5",
+   "username": "help-user",
+   "password": "help-pass"
+  },
+  {
+   "type": "vmess",
+   "tag": "srv-63a75ba8c48a0db8",
+   "server": "198.51.100.11",
+   "server_port": 443,
+   "uuid": "22222222-3333-4444-8555-666666666666",
+   "security": "auto",
+   "alter_id": 0,
+   "tls": {
+    "enabled": true,
+    "server_name": "cdn.example.net",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    }
+   },
+   "transport": {
+    "type": "ws",
+    "path": "/vm",
+    "headers": {
+     "Host": "cdn.example.net"
+    },
+    "max_early_data": 2048,
+    "early_data_header_name": "Sec-WebSocket-Protocol"
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "socks",
+   "tag": "srv-d411f6d1d583ae30",
+   "server": "127.0.0.1",
+   "server_port": 21011,
+   "version": "5",
+   "username": "help-user",
+   "password": "help-pass"
+  },
+  {
+   "type": "vmess",
+   "tag": "srv-1a3fd2990b86da8a",
+   "server": "198.51.100.13",
+   "server_port": 10086,
+   "uuid": "44444444-5555-4666-8777-888888888888",
+   "security": "auto",
+   "alter_id": 64,
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "vmess",
+   "tag": "srv-3e9242b27f9e0a32",
+   "server": "198.51.100.14",
+   "server_port": 35897,
+   "uuid": "5dc94f3a-ecf0-42d8-ae27-722a68a6456c",
+   "security": "aes-128-gcm",
+   "alter_id": 0,
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    }
+   },
+   "transport": {
+    "type": "ws",
+    "path": "/somewhere",
+    "headers": {
+     "Host": "example.com"
+    }
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "srv-7bd8e790207c7ad0",
+   "server": "198.51.100.15",
+   "server_port": 8888,
+   "method": "aes-128-gcm",
+   "password": "test",
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "srv-a8f830ecb806f6f0",
+   "server": "198.51.100.16",
+   "server_port": 8888,
+   "method": "2022-blake3-aes-256-gcm",
+   "password": "YctPZ6U7xPPcU+gp3u+0tx/tRizJN9K8y+uKlW2qjlI=",
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "srv-147c6629c09e0000",
+   "server": "198.51.100.17",
+   "server_port": 8888,
+   "method": "chacha20-ietf-poly1305",
+   "password": "test/!@#:",
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "shadowsocks",
+   "tag": "srv-11a913a9a02a802d",
+   "server": "198.51.100.18",
+   "server_port": 443,
+   "method": "aes-128-gcm",
+   "password": "v2p",
+   "plugin": "v2ray-plugin",
+   "plugin_opts": "tls;host=cdn.example.com;path=/ss"
+  },
+  {
+   "type": "trojan",
+   "tag": "srv-fd62c5a6226bdf3a",
+   "server": "198.51.100.19",
+   "server_port": 443,
+   "password": "p@ss#w0rd+1",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.org",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "firefox"
+    }
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "srv-8992b8d05b749555",
+   "server": "198.51.100.20",
+   "server_port": 8443,
+   "password": "secret",
+   "tls": {
+    "enabled": true,
+    "server_name": "cdn.example.org",
+    "insecure": true,
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    }
+   },
+   "transport": {
+    "type": "ws",
+    "path": "/tr",
+    "headers": {
+     "Host": "cdn.example.org"
+    }
+   },
+   "multiplex": {
+    "enabled": true,
+    "protocol": "h2mux",
+    "max_connections": 4,
+    "min_streams": 4
+   }
+  },
+  {
+   "type": "trojan",
+   "tag": "srv-704ddd39f7281abf",
+   "server": "198.51.100.21",
+   "server_port": 443,
+   "password": "secret",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.org",
+    "utls": {
+     "enabled": true,
+     "fingerprint": "chrome"
+    }
+   },
+   "transport": {
+    "type": "grpc",
+    "service_name": "tr-grpc"
+   }
+  },
+  {
+   "type": "hysteria2",
+   "tag": "srv-72ca6b57983e596b",
+   "server": "198.51.100.22",
+   "server_ports": [
+    "443:443",
+    "20000:30000"
+   ],
+   "password": "pw",
+   "obfs": {
+    "type": "salamander",
+    "password": "obfspw"
+   },
+   "tls": {
+    "enabled": true,
+    "server_name": "hy.example.com",
+    "alpn": [
+     "h3"
+    ]
+   }
+  },
+  {
+   "type": "hysteria2",
+   "tag": "srv-fb06c2c4a9a5ea06",
+   "server": "198.51.100.23",
+   "server_port": 8443,
+   "password": "pw2",
+   "tls": {
+    "enabled": true,
+    "server_name": "example.com",
+    "alpn": [
+     "h3"
+    ],
+    "insecure": true
+   }
+  },
+  {
+   "type": "tuic",
+   "tag": "srv-ba82dd6841ca8c0c",
+   "server": "198.51.100.24",
+   "server_port": 443,
+   "uuid": "11111111-2222-4333-8444-555555555555",
+   "password": "tuicpw",
+   "congestion_control": "bbr",
+   "udp_relay_mode": "native",
+   "tls": {
+    "enabled": true,
+    "server_name": "tuic.example.com",
+    "alpn": [
+     "h3"
+    ]
+   }
+  },
+  {
+   "type": "socks",
+   "tag": "srv-c96dde20bfbbf2ed",
+   "server": "198.51.100.25",
+   "server_port": 1080,
+   "version": "5",
+   "username": "user",
+   "password": "pass"
+  },
+  {
+   "type": "direct",
+   "tag": "direct"
+  }
+ ],
+ "route": {
+  "rules": [
+   {
+    "action": "sniff",
+    "sniffer": [
+     "http",
+     "tls",
+     "quic",
+     "dns",
+     "bittorrent",
+     "stun"
+    ]
+   },
+   {
+    "inbound": [
+     "internal-in"
+    ],
+    "action": "route",
+    "outbound": "proxy"
+   },
+   {
+    "inbound": [
+     "mixed-in"
+    ],
+    "network": [
+     "udp"
+    ],
+    "action": "reject"
+   },
+   {
+    "ip_is_private": true,
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "domain_suffix": [
+     "localhost",
+     "local",
+     "lan",
+     "home.arpa"
+    ],
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "process_path_regex": [
+     "(?i)(^|\\\\)Telegram\\.exe$"
+    ],
+    "action": "route",
+    "outbound": "proxy"
+   },
+   {
+    "domain_suffix": [
+     "blocked.example"
+    ],
+    "action": "route",
+    "outbound": "proxy"
+   },
+   {
+    "process_path_regex": [
+     "(?i)(^|\\\\)steam\\.exe$"
+    ],
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "domain_suffix": [
+     "example.org"
+    ],
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "network": [
+     "udp"
+    ],
+    "port": [
+     443
+    ],
+    "rule_set": [
+     "bypass-0"
+    ],
+    "action": "route",
+    "outbound": "bypass"
+   },
+   {
+    "process_name": [
+     "Discord.exe",
+     "DiscordPTB.exe",
+     "DiscordCanary.exe",
+     "Vesktop.exe"
+    ],
+    "network": [
+     "udp"
+    ],
+    "port_range": [
+     "19294:19344",
+     "50000:50100"
+    ],
+    "action": "route",
+    "outbound": "bypass"
+   },
+   {
+    "protocol": [
+     "stun"
+    ],
+    "network": [
+     "udp"
+    ],
+    "port_range": [
+     "19294:19344",
+     "50000:50100"
+    ],
+    "action": "route",
+    "outbound": "bypass"
+   },
+   {
+    "network": [
+     "tcp"
+    ],
+    "port": [
+     2053,
+     2083,
+     2087,
+     2096,
+     8443
+    ],
+    "rule_set": [
+     "bypass-2"
+    ],
+    "action": "route",
+    "outbound": "bypass"
+   },
+   {
+    "network": [
+     "tcp"
+    ],
+    "port": [
+     443
+    ],
+    "rule_set": [
+     "bypass-3"
+    ],
+    "action": "route",
+    "outbound": "bypass"
+   },
+   {
+    "network": [
+     "tcp"
+    ],
+    "port": [
+     80,
+     443
+    ],
+    "rule_set": [
+     "bypass-4"
+    ],
+    "action": "route",
+    "outbound": "bypass"
+   },
+   {
+    "network": [
+     "udp"
+    ],
+    "port": [
+     443
+    ],
+    "rule_set": [
+     "bypass-5-ip"
+    ],
+    "action": "route",
+    "outbound": "bypass"
+   },
+   {
+    "network": [
+     "udp"
+    ],
+    "port": [
+     443
+    ],
+    "rule_set": [
+     "bypass-3"
+    ],
+    "action": "reject"
+   },
+   {
+    "network": [
+     "udp"
+    ],
+    "port": [
+     443
+    ],
+    "rule_set": [
+     "bypass-4"
+    ],
+    "action": "reject"
+   },
+   {
+    "rule_set": [
+     "geosite-category-game-platforms-download"
+    ],
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "protocol": [
+     "bittorrent"
+    ],
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "process_path_regex": [
+     "(?i)(^|\\\\)qbittorrent\\.exe$",
+     "(?i)(^|\\\\)utorrent\\.exe$",
+     "(?i)(^|\\\\)bittorrent\\.exe$",
+     "(?i)(^|\\\\)utweb\\.exe$",
+     "(?i)(^|\\\\)transmission-qt\\.exe$",
+     "(?i)(^|\\\\)transmission-daemon\\.exe$",
+     "(?i)(^|\\\\)deluge\\.exe$",
+     "(?i)(^|\\\\)deluged\\.exe$",
+     "(?i)(^|\\\\)tixati\\.exe$",
+     "(?i)(^|\\\\)bitcomet\\.exe$",
+     "(?i)(^|\\\\)biglybt\\.exe$",
+     "(?i)(^|\\\\)vuze\\.exe$",
+     "(?i)(^|\\\\)azureus\\.exe$",
+     "(?i)(^|\\\\)picotorrent\\.exe$",
+     "(?i)(^|\\\\)motrix\\.exe$",
+     "(?i)(^|\\\\)aria2c\\.exe$",
+     "(?i)(^|\\\\)fdm\\.exe$",
+     "(?i)(^|\\\\)frostwire\\.exe$",
+     "(?i)(^|\\\\)mediaget\\.exe$"
+    ],
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "domain_suffix": [
+     "ipify.org",
+     "checkip.amazonaws.com",
+     "ifconfig.me",
+     "ifconfig.co",
+     "ip.sb",
+     "ipapi.is",
+     "iplocate.io",
+     "api.sypexgeo.net",
+     "showip.net",
+     "ipinfo.io",
+     "ip-api.com",
+     "icanhazip.com",
+     "2ip.ru",
+     "2ip.io"
+    ],
+    "action": "route",
+    "outbound": "direct"
+   },
+   {
+    "rule_set": [
+     "refilter-domains",
+     "russia-inside",
+     "geoip-ru-blocked"
+    ],
+    "action": "route",
+    "outbound": "proxy"
+   }
+  ],
+  "rule_set": [
+   {
+    "type": "local",
+    "tag": "bypass-0",
+    "format": "source",
+    "path": "C:\\lz\\run\\bypass-0.json"
+   },
+   {
+    "type": "local",
+    "tag": "bypass-2",
+    "format": "source",
+    "path": "C:\\lz\\run\\bypass-2.json"
+   },
+   {
+    "type": "local",
+    "tag": "bypass-3",
+    "format": "source",
+    "path": "C:\\lz\\run\\bypass-3.json"
+   },
+   {
+    "type": "local",
+    "tag": "bypass-4",
+    "format": "source",
+    "path": "C:\\lz\\run\\bypass-4.json"
+   },
+   {
+    "type": "local",
+    "tag": "bypass-5-ip",
+    "format": "source",
+    "path": "C:\\lz\\run\\bypass-5-ip.json"
+   },
+   {
+    "type": "local",
+    "tag": "geosite-category-game-platforms-download",
+    "format": "binary",
+    "path": "C:\\lz\\rules\\geosite-category-game-platforms-download.srs"
+   },
+   {
+    "type": "local",
+    "tag": "refilter-domains",
+    "format": "binary",
+    "path": "C:\\lz\\rules\\refilter-domains.srs"
+   },
+   {
+    "type": "local",
+    "tag": "russia-inside",
+    "format": "binary",
+    "path": "C:\\lz\\rules\\russia-inside.srs"
+   },
+   {
+    "type": "local",
+    "tag": "geoip-ru-blocked",
+    "format": "binary",
+    "path": "C:\\lz\\rules\\geoip-ru-blocked.srs"
+   }
+  ],
+  "final": "direct",
+  "auto_detect_interface": true,
+  "default_domain_resolver": {
+   "server": "dns-direct",
+   "strategy": "ipv4_only"
+  }
+ },
+ "experimental": {
+  "clash_api": {
+   "external_controller": "127.0.0.1:20901",
+   "secret": "clash-secret-1",
+   "access_control_allow_origin": [
+    "http://127.0.0.1"
+   ]
+  }
+ },
+ "endpoints": [
+  {
+   "type": "wireguard",
+   "tag": "srv-3df54525ffae70e8",
+   "address": [
+    "10.0.0.2/32",
+    "fd00::2/128"
+   ],
+   "private_key": "wMTJ9bV1x6qRdnQk2eBcUJbQ8Wl0Jp0r3o0t5s6Y7m4=",
+   "peers": [
+    {
+     "address": "198.51.100.26",
+     "port": 51820,
+     "public_key": "Pq3dQ0vYb8h3mJ9nT2kR5sX7cZ1eF4gH6jK8lN0pQ2Q=",
+     "allowed_ips": [
+      "0.0.0.0/0",
+      "::/0"
+     ],
+     "reserved": [
+      1,
+      2,
+      3
+     ]
+    }
+   ],
+   "mtu": 1420
+  }
+ ]
+}

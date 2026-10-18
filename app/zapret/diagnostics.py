@@ -47,7 +47,8 @@ def _process_running(name: str) -> bool:
     return False
 
 
-def run_all(pack_dir: Path | None, zapret_running: bool) -> list[dict]:
+def run_all(pack_dir: Path | None, zapret_running: bool, own=None) -> list[dict]:
+    """own — снимок своего VPN Лазейки (vpn.OwnVpn): его адаптер и прокси — не чужие."""
     items: list[dict] = []
     services = winutil.service_list()
     names = [(n, d, s) for n, d, s in services]
@@ -74,7 +75,10 @@ def run_all(pack_dir: Path | None, zapret_running: bool) -> list[dict]:
             server = winreg.QueryValueEx(key, "ProxyServer")[0] if enabled else ""
     except OSError:
         enabled, server = 0, ""
-    if enabled:
+    own_proxy = (getattr(own, "proxy", None) or "").split("://")[-1].lower()
+    if enabled and own_proxy and own_proxy in str(server).lower():
+        items.append(_item("proxy", "Системный прокси", "ok", "Его включил свой VPN Лазейки"))
+    elif enabled:
         items.append(_item("proxy", "Системный прокси", "warn",
                            f"Включён прокси {server}. Если вы им не пользуетесь — выключите его в "
                            "параметрах Windows."))
@@ -112,7 +116,7 @@ def run_all(pack_dir: Path | None, zapret_running: bool) -> list[dict]:
 
     # VPN — по адаптерам и системному прокси: по именам служб не угадать (Radmin VPN — не VPN в
     # интернет, а у Incy и Happ слова «VPN» в названии нет). Только сообщаем.
-    items.append(_vpn_item())
+    items.append(_vpn_item(own))
 
     # Безопасный DNS
     if doh_configured():
@@ -173,19 +177,22 @@ def run_all(pack_dir: Path | None, zapret_running: bool) -> list[dict]:
     return items
 
 
-def _vpn_item() -> dict:
+def _vpn_item(own=None) -> dict:
     from .. import vpn
     try:
-        snap = vpn.scan()
+        snap = vpn.scan(own=own)
     except Exception:  # noqa: BLE001
         log.debug("VPN не проверен", exc_info=True)
         return _item("vpn", "VPN", "info", "Не удалось проверить сетевые адаптеры.")
-    if snap.active:
-        how = ("через системный прокси" if not snap.internet else
+    if snap.foreign_active:
+        how = ("через системный прокси" if not snap.foreign_internet else
                "весь трафик" if snap.full_tunnel else "часть трафика")
         return _item("vpn", "VPN", "info",
-                     f"Работает {snap.label()} ({how}). При включённой «Совместимости с VPN» обход его не "
+                     f"Работает {snap.foreign_label} ({how}). При включённой «Совместимости с VPN» обход его не "
                      "трогает; что куда идёт — на странице «Обход».")
+    if snap.own_active:
+        return _item("vpn", "VPN", "ok", "Работает свой VPN Лазейки — обход не трогает ни его туннель, ни "
+                                         "соединение с сервером.")
     lan = [a.app or a.name for a in snap.tunnels if a.role == "lan"]
     if lan:
         return _item("vpn", "VPN", "ok", f"VPN в интернет не работает. Виртуальные сети ({', '.join(lan[:3])}) "

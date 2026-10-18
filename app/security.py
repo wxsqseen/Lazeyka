@@ -32,6 +32,8 @@ SYSTEM = "S-1-5-18"
 MARKER = ".secured-v1"
 # Владелец — администраторы; DACL защищён от наследования (P) и наследуется вниз (OICI).
 SDDL = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
+# Папка с секретами (ключи и подписки своего VPN): то же, но без чтения для пользователей.
+PRIVATE_SDDL = "O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
 _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -103,9 +105,9 @@ def _remove(path: Path) -> None:
         path.unlink()
 
 
-def _apply_protected_acl(path: Path) -> None:
+def _apply_protected_acl(path: Path, sddl: str = SDDL) -> None:
     descriptor = ctypes.c_void_p()
-    if not _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(SDDL, 1, ctypes.byref(descriptor), None):
+    if not _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
         raise OSError(ctypes.get_last_error(), "ConvertStringSecurityDescriptorToSecurityDescriptorW")
     try:
         owner = ctypes.c_void_p()
@@ -125,6 +127,22 @@ def _apply_protected_acl(path: Path) -> None:
             raise OSError(err, f"SetNamedSecurityInfoW {path}")
     finally:
         _kernel32.LocalFree(descriptor)
+
+
+def secure_private_dir(path: Path) -> None:
+    """Папка с секретами внутри папки данных (vpnclient/): полный доступ — SYSTEM и
+    администраторам, обычные пользователи её не читают. Ядра VPN — дочерние процессы Лазейки
+    с теми же правами — свои конфиги читают. Создаёт папку, если её нет; права на уже лежащие
+    в ней файлы Windows переносит сама (наследование).
+
+    В тестах (LAZEYKA_DATA) не делает ничего: там нет прав менять владельца."""
+    if paths.test_data_override():
+        return
+    path = Path(path)
+    if is_link(path):
+        _remove(path)   # ссылка увела бы ключи в чужую папку
+    path.mkdir(parents=True, exist_ok=True)
+    _apply_protected_acl(path, PRIVATE_SDDL)
 
 
 def secure_data_root() -> list[str]:

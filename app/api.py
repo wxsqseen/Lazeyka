@@ -12,23 +12,35 @@ from typing import Any, Callable
 
 from .core import Core, fail
 from .errors import UserError
+from .log import scrub
 
 log = logging.getLogger("lazeyka.api")
 
 
 def _guard(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Исключение → {ok: false}. Текст ошибки чистится от секретов своего VPN: он уходит на
+    страницу (в журнал — тоже вычищенным, фильтром на обработчиках)."""
     @functools.wraps(fn)
     def wrapper(self: "Api", *args: Any) -> Any:
         try:
             return fn(self, *args)
         except (UserError, PermissionError) as exc:
-            return fail(str(exc) or type(exc).__name__)
+            return fail(scrub(str(exc) or type(exc).__name__))
         except (ValueError, RuntimeError, OSError) as exc:
-            return fail(str(exc) or type(exc).__name__)
+            return fail(scrub(str(exc) or type(exc).__name__))
         except Exception as exc:  # noqa: BLE001
             log.exception("Ошибка в %s", fn.__name__)
-            return fail(f"Внутренняя ошибка: {exc!r}")
+            return fail(scrub(f"Внутренняя ошибка: {exc!r}"))
     return wrapper
+
+
+def _str_or_none(value: Any) -> str | None:
+    return str(value) if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value) else None
+
+
+def _str_list(value: Any) -> list[str] | None:
+    return [str(v) for v in value if isinstance(v, (str, int)) and not isinstance(v, bool)] \
+        if isinstance(value, list) else None
 
 
 class Api:
@@ -288,3 +300,152 @@ class Api:
     @_guard
     def updates_rollback(self, key):
         return self._core.updates_rollback(str(key))
+
+    # ---- свой VPN
+    @_guard
+    def vpnclient_import(self, text="", ua_preset=None, hwid=False):
+        """text пустой или null — повторить прошлое добавление (страница так предлагает другой UA или HWID)."""
+        if text is not None and not isinstance(text, str):
+            return fail("Вставьте ссылку на подписку или сервер")
+        if text and len(text) > 5 * 1024 * 1024:
+            return fail("Слишком длинный текст")
+        return self._core.vpnclient_import(text.strip() if text and text.strip() else None,
+                                           _str_or_none(ua_preset), bool(hwid))
+
+    @_guard
+    def vpnclient_sub_update(self, sub_id=None):
+        return self._core.vpnclient_sub_update(_str_or_none(sub_id))
+
+    @_guard
+    def vpnclient_sub_remove(self, sub_id):
+        return self._core.vpnclient_sub_remove(str(sub_id))
+
+    @_guard
+    def vpnclient_sub_set(self, sub_id, values=None):
+        return self._core.vpnclient_sub_set(str(sub_id), values if isinstance(values, dict) else {})
+
+    @_guard
+    def vpnclient_server_remove(self, server_id):
+        return self._core.vpnclient_server_remove(str(server_id))
+
+    @_guard
+    def vpnclient_server_rename(self, server_id, name=""):
+        return self._core.vpnclient_server_rename(str(server_id), str(name or ""))
+
+    @_guard
+    def vpnclient_copy_link(self, server_id):
+        return self._core.vpnclient_copy_link(str(server_id))
+
+    @_guard
+    def vpnclient_open_link(self, sub_id, kind):
+        if kind not in ("support", "page"):
+            return fail("Неизвестная ссылка подписки")
+        return self._core.vpnclient_open_link(str(sub_id), kind)
+
+    @_guard
+    def vpnclient_select(self, server_id):
+        return self._core.vpnclient_select(str(server_id))
+
+    @_guard
+    def vpnclient_preflight(self):
+        return self._core.vpnclient_preflight()
+
+    @_guard
+    def vpnclient_start(self, quiet=False):
+        return self._core.vpnclient_start(quiet=bool(quiet))
+
+    @_guard
+    def vpnclient_stop(self):
+        return self._core.vpnclient_stop()
+
+    @_guard
+    def vpnclient_restart(self):
+        return self._core.vpnclient_restart()
+
+    @_guard
+    def vpnclient_set_mode(self, mode):
+        return self._core.vpnclient_set_mode(str(mode))
+
+    @_guard
+    def vpnclient_latency(self, ids=None):
+        if ids is not None and not isinstance(ids, list):
+            return fail("Неверный список серверов")
+        return self._core.vpnclient_latency(_str_list(ids))
+
+    @_guard
+    def vpnclient_save_settings(self, values=None):
+        return self._core.vpnclient_save_settings(values if isinstance(values, dict) else {})
+
+    @_guard
+    def vpnclient_core_install(self, name):
+        return self._core.vpnclient_core_install(str(name))
+
+    @_guard
+    def vpnclient_rules_update(self):
+        return self._core.vpnclient_rules_update()
+
+    @_guard
+    def vpnclient_running_apps(self):
+        return self._core.vpnclient_running_apps()
+
+    @_guard
+    def vpnclient_import_file(self):
+        return self._core.vpnclient_import_file()
+
+    @_guard
+    def vpnclient_import_qr(self, source="screen"):
+        return self._core.vpnclient_import_qr(str(source))
+
+    @_guard
+    def vpnclient_qr(self, item_id):
+        return self._core.vpnclient_qr(str(item_id))
+
+    @_guard
+    def vpnclient_backup_export(self, password=""):
+        if not isinstance(password, str) or not password:
+            return fail("Придумайте пароль для резервной копии")
+        return self._core.vpnclient_backup_export(password)
+
+    @_guard
+    def vpnclient_backup_import(self, password=""):
+        if not isinstance(password, str) or not password:
+            return fail("Введите пароль резервной копии")
+        return self._core.vpnclient_backup_import(password)
+
+    @_guard
+    def vpnclient_profile_import(self, text=""):
+        if not isinstance(text, str) or not text.strip():
+            return fail("Вставьте профиль маршрутизации")
+        return self._core.vpnclient_profile_import(text)
+
+    @_guard
+    def vpnclient_profile_set(self, profile_id, active=True):
+        return self._core.vpnclient_profile_set(str(profile_id), bool(active))
+
+    @_guard
+    def vpnclient_profile_remove(self, profile_id):
+        return self._core.vpnclient_profile_remove(str(profile_id))
+
+    @_guard
+    def vpnclient_speedtest(self, server_id=None):
+        return self._core.vpnclient_speedtest(_str_or_none(server_id))
+
+    @_guard
+    def vpnclient_deeplink_confirm(self, token, accept=False):
+        return self._core.vpnclient_deeplink_confirm(str(token), bool(accept))
+
+    @_guard
+    def vpnclient_sub_probe(self, sub_id):
+        return self._core.vpnclient_sub_probe(str(sub_id))
+
+    @_guard
+    def vpnclient_help(self):
+        return self._core.vpnclient_help()
+
+    @_guard
+    def vpnclient_proxy_fix(self):
+        return self._core.vpnclient_proxy_fix()
+
+    @_guard
+    def vpnclient_open_adapters(self):
+        return self._core.vpnclient_open_adapters()
