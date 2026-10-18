@@ -471,8 +471,8 @@ class Core:
 
     def startup(self) -> None:
         log.info("%s %s, администратор: %s, данные: %s", APP_NAME, __version__, self.is_admin, paths.DATA)
-        from .updates.manager import cleanup_stale_exe
-        cleanup_stale_exe(self.settings.get("updates", "app_backup"))  # убрать временные копии exe
+        from .updates.manager import settle_app_files
+        settle_app_files(self.settings)   # прежняя версия — в backups, рядом с exe ничего лишнего
         if self.first_launch and self.is_admin:
             self._first_launch_import()
         self.zapret.init()

@@ -353,8 +353,9 @@ class UpdateManager:
     #
     # Скачиваем новый Lazeyka.exe из релиза, сверяем по SHA-256, опубликованному GitHub, и
     # заменяем работающий файл. Работающий exe на Windows удалить нельзя, но можно переименовать:
-    # отодвигаем его в <имя>.old, ставим новый на его место, прежний удаляется при следующем
-    # запуске. Всё по кнопке и с проверкой целостности; подпись сертификатом — отдельный шаг.
+    # отодвигаем его в скрытый <имя>.old, ставим новый на его место. При запуске новой версии
+    # прежняя переезжает в backups папки данных (settle_app_files) — это копия для «Откатить»,
+    # рядом с exe ничего не остаётся. Всё по кнопке и с проверкой целостности.
 
     EXE_ASSET = "lazeyka.exe"
 
@@ -386,6 +387,7 @@ class UpdateManager:
             except OSError:
                 backup = current.with_name(f"{current.name}-{uuid.uuid4().hex[:6]}.old")
             os.replace(current, backup)        # сдвигаем работающий exe (Windows это разрешает)
+            _hide(backup)                      # до перезапуска; потом переедет в backups
             try:
                 os.replace(staging, current)   # ставим новый на его место
             except OSError:
@@ -402,13 +404,24 @@ class UpdateManager:
         if not backup or not Path(backup).is_file():
             raise UpdateError("Нет сохранённой прежней версии")
         current = Path(paths.exe_path())
+        # Копия может лежать на другом диске (backups в папке данных): сначала рядом с exe.
+        staging = current.with_name(f".{current.stem}-{uuid.uuid4().hex[:8]}.new")
         aside = current.with_name(f".{current.stem}-{uuid.uuid4().hex[:8]}.old")
-        os.replace(current, aside)             # сдвигаем нынешний (запущенный) exe
         try:
-            os.replace(backup, current)        # возвращаем прежний
+            shutil.copy2(backup, staging)
+            os.replace(current, aside)         # сдвигаем нынешний (запущенный) exe
+            _hide(aside)                       # уберётся при следующем запуске
+            try:
+                os.replace(staging, current)   # возвращаем прежний
+            except OSError:
+                os.replace(aside, current)
+                raise
+        finally:
+            staging.unlink(missing_ok=True)
+        try:
+            Path(backup).unlink()              # прежняя версия снова на месте exe
         except OSError:
-            os.replace(aside, current)
-            raise
+            pass
         self.settings.update(lambda d: d["updates"].__setitem__("app_backup", None))
         return "Вернулась прежняя версия Лазейки. Перезапустите её."
 
@@ -561,18 +574,56 @@ def remove_component_dirs(keep: set[str]) -> None:
             shutil.rmtree(child, ignore_errors=True)
 
 
-def cleanup_stale_exe(keep: str | None = None) -> None:
-    """При запуске убирает временные копии exe от самообновления: недокачанные .new и осиротевшие
-    .old рядом с exe. Резервную копию для отката (keep — путь из настроек) НЕ трогаем."""
+APP_BACKUP_NAME = "Lazeyka-previous.exe"     # копия прежней версии для «Откатить» — в backups
+
+
+def _hide(path: Path) -> None:
+    """Скрытый файл: копия рядом с exe не мозолит глаза до перезапуска."""
+    if os.name != "nt":
+        return
+    import ctypes
+    try:
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x2)   # FILE_ATTRIBUTE_HIDDEN
+    except (OSError, AttributeError):
+        pass
+
+
+def _same(a: Path | str, b: Path | str) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def settle_app_files(settings: "Settings") -> None:
+    """При запуске: копия прежней версии из папки exe переезжает в backups папки данных (кнопка
+    «Откатить» берёт её оттуда), временные .new и .old рядом с exe — в том числе после отката —
+    удаляются. Без прав на папку данных копия остаётся рядом с exe (скрытой)."""
     if not paths.IS_FROZEN:
         return
     exe = Path(paths.exe_path())
-    keep_norm = os.path.normcase(os.path.abspath(keep)) if keep else None
+    backup = settings.get("updates", "app_backup")
+    keep: Path | None = None
+    if backup and Path(backup).is_file():
+        keep = Path(backup)
+        if _same(keep.parent, exe.parent):
+            target = paths.BACKUPS_DIR / APP_BACKUP_NAME
+            tmp = target.with_name(target.name + ".tmp")
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(keep, tmp)
+                os.replace(tmp, target)
+                keep.unlink()
+                settings.update(lambda d: d["updates"].__setitem__("app_backup", str(target)))
+                log.info("Прежняя версия Лазейки перенесена в %s (для «Откатить»)", target)
+                keep = target
+            except OSError as err:
+                log.debug("Прежняя версия осталась рядом с exe: %r", err)
+                Path(tmp).unlink(missing_ok=True)
+    elif backup:
+        settings.update(lambda d: d["updates"].__setitem__("app_backup", None))
     try:
-        for sibling in exe.parent.glob(f".{exe.stem}-*.new"):
-            sibling.unlink(missing_ok=True)
-        for sibling in exe.parent.glob(f"{exe.name}*.old"):
-            if os.path.normcase(str(sibling.resolve())) != keep_norm:
+        stale = [*exe.parent.glob(f".{exe.stem}-*.new"), *exe.parent.glob(f".{exe.stem}-*.old"),
+                 *exe.parent.glob(f"{exe.name}*.old")]
+        for sibling in stale:
+            if keep is None or not _same(sibling, keep):
                 sibling.unlink(missing_ok=True)
     except OSError as err:
         log.debug("Старые копии exe не убраны: %r", err)

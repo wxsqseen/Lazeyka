@@ -59,7 +59,7 @@ from pathlib import Path
 
 from app import __version__
 from app.settings import Settings
-from app.updates.manager import UpdateManager, UpdateError, cleanup_stale_exe
+from app.updates.manager import UpdateManager, UpdateError, settle_app_files
 
 
 class _FakeTg:
@@ -144,19 +144,57 @@ def test_rollback_app_without_backup_refused(tmp_path, monkeypatch):
         m._rollback_app()
 
 
-def test_cleanup_stale_exe_keeps_rollback_backup(tmp_path, monkeypatch):
+def test_settle_moves_backup_out_of_exe_folder(tmp_path, monkeypatch):
+    """Прежняя версия после обновления не остаётся рядом с exe: при запуске новой она переезжает в
+    backups папки данных, а временные копии (в том числе после отката) удаляются."""
+    (tmp_path / "app").mkdir()
+    exe = _frozen_exe(tmp_path / "app", monkeypatch, b"cur")
+    backups = tmp_path / "data" / "backups"
+    monkeypatch.setattr(paths, "BACKUPS_DIR", backups)
+    old = exe.with_name("Lazeyka.exe.old")
+    old.write_bytes(b"backup")
+    leftovers = [exe.with_name("Lazeyka.exe-abc123.old"), exe.with_name(".Lazeyka-deadbe.new"),
+                 exe.with_name(".Lazeyka-1234abcd.old")]          # последний — от отката
+    for f in leftovers:
+        f.write_bytes(b"x")
+    settings = Settings(tmp_path / "s.json")
+    settings.update(lambda d: d["updates"].__setitem__("app_backup", str(old)))
+    settle_app_files(settings)
+    moved = backups / "Lazeyka-previous.exe"
+    assert moved.read_bytes() == b"backup" and settings.get("updates", "app_backup") == str(moved)
+    assert sorted(f.name for f in exe.parent.iterdir()) == ["Lazeyka.exe"]
+    settle_app_files(settings)                     # следующий запуск: копия в backups не трогается
+    assert moved.is_file()
+
+
+def test_settle_keeps_backup_when_data_folder_is_read_only(tmp_path, monkeypatch):
     exe = _frozen_exe(tmp_path, monkeypatch, b"cur")
-    keep = tmp_path / "Lazeyka.exe.old"
-    keep.write_bytes(b"backup")
-    orphan = tmp_path / "Lazeyka.exe-abc123.old"
-    orphan.write_bytes(b"orphan")
-    partial = tmp_path / ".Lazeyka-deadbe.new"
-    partial.write_bytes(b"partial")
-    cleanup_stale_exe(str(keep))
-    assert keep.is_file()           # резерв для отката сохранён
-    assert not orphan.exists()      # осиротевший .old убран
-    assert not partial.exists()     # недокачанный .new убран
-    assert exe.is_file()
+    monkeypatch.setattr(paths, "BACKUPS_DIR", tmp_path / "data" / "backups")
+    old = exe.with_name("Lazeyka.exe.old")
+    old.write_bytes(b"backup")
+    settings = Settings(tmp_path / "s.json")
+    settings.update(lambda d: d["updates"].__setitem__("app_backup", str(old)))
+    import shutil as real_shutil
+
+    def denied(*a, **kw):
+        raise PermissionError("нет прав")
+    monkeypatch.setattr(real_shutil, "copy2", denied)
+    settle_app_files(settings)
+    assert old.read_bytes() == b"backup" and settings.get("updates", "app_backup") == str(old)
+
+
+def test_rollback_from_data_backups(tmp_path, monkeypatch):
+    exe = _frozen_exe(tmp_path, monkeypatch, b"NEW")
+    backups = tmp_path / "data" / "backups"
+    backups.mkdir(parents=True)
+    backup = backups / "Lazeyka-previous.exe"
+    backup.write_bytes(b"PREV")
+    m = _mgr(tmp_path)
+    m.settings.update(lambda d: d["updates"].__setitem__("app_backup", str(backup)))
+    m._rollback_app()
+    assert exe.read_bytes() == b"PREV" and not backup.exists()
+    assert m.settings.get("updates", "app_backup") is None
+    assert not list(tmp_path.glob(".Lazeyka-*.new"))        # копия для замены убрана
 
 
 def test_app_rollback_flag_in_snapshot(tmp_path, monkeypatch):
