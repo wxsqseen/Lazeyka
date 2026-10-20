@@ -322,6 +322,13 @@ def run(report_path: str) -> int:
     def licenses():
         return check_licenses(paths.resource_dir() / "licenses", frozen=bool(getattr(sys, "frozen", False)))
 
+    def window_engine():
+        # То же, что main() до создания окна: загрузка движка окна pywebview и замок навигации. Движок при
+        # загрузке ищет свои библиотеки (WebView2, папки runtimes всех архитектур) — без них exe падает на старте.
+        from . import webview_guard
+        webview_guard.install()
+        return "движок edgechromium загружается, замок навигации поставлен"
+
     _check(results, "Библиотеки", imports)
     _check(results, "Сертификаты", certifi_bundle)
     _check(results, "Файлы интерфейса", ui_files)
@@ -335,6 +342,7 @@ def run(report_path: str) -> int:
     _check(results, "Свой VPN: разбор и конфиг", vpnclient_parsing)
     _check(results, "Свой VPN: закреплённые ядра", vpnclient_cores)
     _check(results, "Лицензии сторонних компонентов", licenses)
+    _check(results, "Окно WebView2", window_engine)
 
     report = {"version": __version__, "frozen": bool(getattr(sys, "frozen", False)),
               "ok": all(r["ok"] for r in results), "checks": results}

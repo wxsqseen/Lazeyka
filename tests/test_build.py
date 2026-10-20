@@ -33,6 +33,21 @@ def test_webp_is_built_in():
     assert selftest.check_webp() == "WebP записывается и читается"
 
 
+def test_window_engine_files_are_not_filtered_out():
+    """1.3.0 не запускалась: сборка вырезала webview/lib/runtimes/win-arm64 и win-x86, а pywebview при загрузке
+    окна (platforms/edgechromium.py) ищет папки всех трёх архитектур. Фильтр чужих архитектур их не трогает,
+    а самопроверка exe грузит движок окна так же, как main()."""
+    import webview.util
+    spec = (BUILD / "lazeyka.spec").read_text(encoding="utf-8")
+    foreign = re.search(r"_FOREIGN = \((.*?)\)", spec, re.S).group(1).lower()
+    for platform in ("win-arm64", "win-x64", "win-x86"):
+        assert platform not in foreign, platform
+        assert webview.util.interop_dll_path(platform)          # и в исходной раскладке pywebview она есть
+    assert "webbrowserinterop" not in foreign
+    source = (paths.resource_dir() / "app" / "selftest.py").read_text(encoding="utf-8")
+    assert '_check(results, "Окно WebView2", window_engine)' in source and "webview_guard.install()" in source
+
+
 def test_selftest_report_path_is_quoted():
     script = (BUILD / "build.ps1").read_text(encoding="utf-8-sig")
     assert "-ArgumentList ('--selftest \"{0}\"' -f $report)" in script

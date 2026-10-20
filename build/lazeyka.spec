@@ -68,9 +68,11 @@ a = Analysis(
     excludes=["setuptools", "distutils", "_distutils_hack", "tkinter", "pytest", "_pytest", "unittest.mock",
               "httpx._main", "pygments", "PIL._avif", "PIL._imagingtk", "PIL.ImageTk"],
 )
-# Сборка — только для 64-битной Windows: Android-часть pywebview и библиотеки под x86/arm64 не нужны.
-_FOREIGN = ("pywebview-android.jar", "\\win-arm64\\", "\\win-x86\\", "webbrowserinterop.x86.dll",
-            "\\ffi\\dlls\\x86\\", "\\ffi\\dlls\\arm64\\")
+# Сборка — только для 64-битной Windows: Android-часть pywebview и загрузчики .NET под x86/arm64 не нужны
+# (clr_loader берёт библиотеку своей архитектуры). Папки webview/lib/runtimes всех трёх архитектур остаются:
+# pywebview при загрузке окна (platforms/edgechromium.py) ищет каждую и без любой из них не запускается —
+# так сломалась 1.3.0. Что окно загружается, проверяет самопроверка exe («Окно WebView2»).
+_FOREIGN = ("pywebview-android.jar", "\\ffi\\dlls\\x86\\", "\\ffi\\dlls\\arm64\\")
 
 
 def _ours(entry):
