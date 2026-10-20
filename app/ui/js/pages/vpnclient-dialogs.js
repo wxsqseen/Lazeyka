@@ -316,6 +316,28 @@
       return shown;
     }
 
+    /* Как подписка выглядела при открытии окна — с ней сравниваем, что человек поменял. */
+    const initial = {
+      name: String(sub.name || '').trim(),
+      ua_preset: sub.ua_preset || 'lazeyka',
+      ua: String(sub.user_agent || ''),
+      hwid: Boolean(sub.hwid),
+      update_hours: sub.update_hours != null ? Number(sub.update_hours) : null,
+      dns: sub.dns || null,
+      mtu: sub.mtu != null ? Number(sub.mtu) : null,
+      provider_routes: Boolean(sub.provider_routes),
+    };
+
+    /** Только изменившиеся поля: свой UA — если он нужен (пресет «Свой») и другой, чем был, или пресет только что стал «Свой». */
+    function changedValues(values) {
+      const out = {};
+      for (const key of ['name', 'ua_preset', 'hwid', 'update_hours', 'dns', 'mtu', 'provider_routes']) {
+        if (values[key] !== initial[key]) out[key] = values[key];
+      }
+      if (values.ua_preset === 'custom' && (values.ua !== initial.ua || initial.ua_preset !== 'custom')) out.ua = values.ua;
+      return out;
+    }
+
     formDialog({
       title: 'Свойства подписки',
       iconName: 'sliders',
@@ -345,9 +367,12 @@
         if (values.ua_preset === 'custom') values.ua = uaField.input.value.trim();
         setHidden(formError, true);
         if (showErrors(validate(values))) return false;
+        const changes = changedValues(values);
+        /* Ничего не поменяли — ядро не зовём: смена dns, mtu или маршрутов провайдера переподключила бы VPN. */
+        if (!Object.keys(changes).length) return true;
         const result = await Lz.api.run({
           method: 'vpnclient_sub_set',
-          args: [sub.id, values],
+          args: [sub.id, changes],
           key: `vpnclient_sub_set:${sub.id}`,
           success: 'Свойства подписки сохранены',
           silent: true,

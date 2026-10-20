@@ -67,8 +67,13 @@ def _snapshot(apps=("Incy", "Radmin VPN", "Happ", "Cloudflare WARP"), with_vpn=T
         _adapter(19, "vEthernet (Default Switch)", 6, "", "Hyper-V Virtual Ethernet Adapter", chars=vpn.NCF_VIRTUAL,
                  ipv4=["172.20.0.1"]),
         _adapter(9, "Teredo", 131),
-        _adapter(14, "Radmin VPN", 6, r"x\RvNetMP60", "Famatech Radmin VPN Ethernet Adapter", ipv4=["26.1.2.3"]),
+        # Настоящие параметры Radmin VPN на ПК разработчика: шлюз 26.0.0.1, метрика интерфейса 1 и маршрут по
+        # умолчанию с метрикой 9256 (у Ethernet — 35 и 0). Прямым выходом он не становится.
+        _adapter(14, "Radmin VPN", 6, r"x\RvNetMP60", "Famatech Radmin VPN Ethernet Adapter", ipv4=["26.1.2.3"],
+                 gateways=["26.0.0.1"]),
     ]
+    adapters[0].metric, adapters[0].default4_metric = 35, 0
+    adapters[3].metric, adapters[3].default4_metric = 1, 9256
     if with_vpn:
         adapters.append(_adapter(5, "wwan99", 53, "Wintun", "Wintun Tunnel", ipv4=["172.19.0.1"],
                                  guid="{2E219888-9139-4199-EA45-CB771D7DAD1D}"))
@@ -123,6 +128,8 @@ def test_active_core_apps(monkeypatch):
 
 def test_vpn_without_adapter_is_flagged():
     snap = _snapshot(apps=("ExpressVPN",), with_vpn=False)
+    assert snap.unseparable == [], "служба висит в фоне без подключения — предупреждать не о чем"
+    snap.connected = ["ExpressVPN"]                 # держит соединения с адреса Ethernet — работает
     assert snap.unseparable == ["ExpressVPN"] and snap.to_dict()["unseparable"] == ["ExpressVPN"]
     assert _snapshot(apps=("Incy",)).unseparable == []
 
@@ -445,7 +452,9 @@ def test_preflight_silent_without_vpn(tmp_path, monkeypatch):
 
 def test_compat_off_means_plain(tmp_path, monkeypatch):
     core = _core(tmp_path, monkeypatch, _snapshot())
-    assert core._vpn_plan() == {"interfaces": [17, 19], "servers": ["203.0.113.7"]}
+    # strict — рядом VPN в интернет: не собрался фильтр — обход не запускается обычным перехватом.
+    assert core._vpn_plan() == {"interfaces": [17, 19], "servers": ["203.0.113.7"], "own_servers": [],
+                                "strict": True}
     core.settings.update(lambda d: d["vpn"].__setitem__("compat", False))
     assert core._vpn_plan() is None
 

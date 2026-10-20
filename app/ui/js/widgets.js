@@ -12,8 +12,8 @@
   const buttonControllers = new WeakMap();
 
   /**
-   * Кнопка с состоянием загрузки. busyKey связывает её с вызовом Lz.api.run:
-   * пока вызов с этим ключом идёт, кнопка показывает спиннер и не нажимается.
+   * Кнопка с состоянием загрузки. busyKey (ключ или список ключей) связывает её с вызовом Lz.api.run:
+   * пока идёт вызов с любым из этих ключей, кнопка показывает спиннер и не нажимается.
    * Неактивная кнопка остаётся в порядке Tab (aria-disabled), чтобы не терять фокус.
    */
   function button(options) {
@@ -21,6 +21,7 @@
       label, icon: iconName, kind = 'secondary', size, onClick, busyKey, title, ariaLabel, cls, iconRight,
     } = options;
     const iconSize = size === 'sm' ? SMALL_ICON : REGULAR_ICON;
+    const busyKeys = [].concat(busyKey || []);
     let iconEl = iconName ? icon(iconName, { size: iconSize }) : null;
     const labelEl = label != null ? h('span', { class: 'btn__label', text: label }) : null;
     const el = h('button', {
@@ -28,13 +29,13 @@
       class: ['btn', `btn--${kind}`, size && `btn--${size}`, label == null && 'btn--icon', cls],
       title,
       'aria-label': ariaLabel,
-      dataset: busyKey ? { busyKey } : null,
+      dataset: busyKeys.length ? { busyKey: busyKeys.join(' ') } : null,
     }, h('span', { class: 'spinner', 'aria-hidden': 'true' }), iconEl, labelEl,
     iconRight ? icon(iconRight, { size: iconSize, cls: 'btn__icon-right' }) : null);
 
     const ctl = { el, busy: false, disabled: false };
     ctl.sync = function sync() {
-      const busy = ctl.busy || Boolean(busyKey && Lz.api.isBusy(busyKey));
+      const busy = ctl.busy || busyKeys.some((key) => Lz.api.isBusy(key));
       el.classList.toggle('is-busy', busy);
       setAttr(el, 'aria-busy', busy);
       setAttr(el, 'aria-disabled', busy || ctl.disabled);
@@ -435,6 +436,8 @@
     locked: { text: 'Недоступно', tone: 'off' },
     /* Свой VPN: ядро работает, но выход через сервер ещё не подтверждён. */
     verifying: { text: 'Проверяем…', tone: 'warn' },
+    /* Свой VPN: ядро работает, а проверка выхода через сервер не прошла. */
+    noexit: { text: 'Нет выхода', tone: 'err' },
   };
 
   function statusPill() {

@@ -1,7 +1,7 @@
 'use strict';
 /*
  * Главная: плашки и уведомления (notices.js — все, в том числе постоянные плашки других страниц),
- * сводка, карточки (home-cards.js) — обход для Discord/YouTube, прокси для Telegram и во всю ширину
+ * сводка, карточки (home-cards.js) — обход для Discord/YouTube, Telegram-прокси и во всю ширину
  * «Свой VPN» (без серверов — тихая строка) — и строка про чужой VPN.
  */
 (function (Lz) {
@@ -20,15 +20,17 @@
   };
   const TELEGRAM_PHRASE = {
     running: 'Telegram ускорен',
-    starting: 'прокси для Telegram запускается',
-    stopping: 'прокси для Telegram выключается',
-    error: 'прокси для Telegram не запустился',
-    stopped: 'прокси для Telegram выключен',
+    starting: 'Telegram-прокси запускается',
+    stopping: 'Telegram-прокси выключается',
+    error: 'Telegram-прокси не запустился',
+    stopped: 'Telegram-прокси выключен',
   };
 
+  /* По тому, что написано на пилюле карточки (vpncPillShown): проверка выхода не прошла — «нет выхода». */
   const VPNC_PHRASE = {
     running: 'свой VPN подключён',
     verifying: 'свой VPN проверяет соединение',
+    noexit: 'через свой VPN сайты не открываются',
     starting: 'свой VPN подключается',
     stopping: 'свой VPN выключается',
     error: 'свой VPN не подключился',
@@ -38,16 +40,27 @@
   function vpnclientPhrase(state) {
     const vc = state.vpnclient;
     if (!vc || vc.available === false || !texts.vpncHasServers(vc)) return null;
-    return VPNC_PHRASE[texts.vpncPillStatus(vc)] || null;
+    return VPNC_PHRASE[texts.vpncPillShown(vc)] || null;
   }
 
   function capitalize(text) {
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
+  /**
+   * Почему обход недоступен — коротко, для сводки. Без прав — так и сказать; с правами причина другая
+   * (например, пакет стратегий ещё не установлен) — её называет ядро.
+   */
+  function lockedPhrase(zapret, admin) {
+    const reason = String(zapret.unavailable_reason || '').trim().replace(/\.$/, '');
+    if (admin && reason) return reason.charAt(0).toLowerCase() + reason.slice(1);
+    if (admin) return 'обход Discord и YouTube сейчас недоступен';
+    return 'для обхода Discord и YouTube нужны права администратора';
+  }
+
   /** Только подтверждённое: «открываются» — если свежая проверка прошла, «ускорен» — если Telegram подключён. */
-  function zapretPhrase(zapret, status) {
-    if (status === 'locked') return 'для обхода Discord и YouTube нужны права администратора';
+  function zapretPhrase(zapret, status, admin) {
+    if (status === 'locked') return lockedPhrase(zapret, admin);
     if (zapret.fix && zapret.fix.running) return 'подбираем стратегию для Discord и YouTube';
     if (status !== 'running') return ZAPRET_PHRASE[status] || ZAPRET_PHRASE.stopped;
     const results = zapret.check && Array.isArray(zapret.check.results) ? zapret.check.results : [];
@@ -71,7 +84,7 @@
     if (zapretStatus === 'stopped' && tgStatus === 'stopped' && !(zapret.fix && zapret.fix.running) && !vp) {
       return 'Всё выключено. Нажмите на большую кнопку, чтобы включить.';
     }
-    const zp = zapretPhrase(zapret, zapretStatus);
+    const zp = zapretPhrase(zapret, zapretStatus, Boolean(state.app && state.app.admin));
     const tp = telegramPhrase(tg, tgStatus);
     if (zp === ZAPRET_PHRASE.running && tp === TELEGRAM_PHRASE.running && (!vp || vp === VPNC_PHRASE.running)) {
       return vp

@@ -387,7 +387,7 @@ def _sb_tls(plan: RunPlan, server: Server, *, quic: bool) -> dict[str, Any] | No
         out["insecure"] = True
     reality = server.security == "reality" and not quic
     if not quic:
-        fp = sb_fingerprint(plan.fingerprint or t.get("fingerprint"))
+        fp = sb_fingerprint(t.get("fingerprint") or plan.fingerprint)   # отпечаток сервера важнее общего
         if reality and fp is None:
             fp = "chrome"                # REALITY без uTLS не работает
         if fp:
@@ -1042,6 +1042,9 @@ def _inbounds(plan: RunPlan) -> list[dict[str, Any]]:
                                  "listen_port": int(plan.ports.proxy)}
         if plan.secrets.local_user and plan.secrets.local_pass:
             mixed["users"] = [{"username": plan.secrets.local_user, "password": plan.secrets.local_pass}]
+        elif _loopback(plan.proxy_listen) is not True:
+            # Без пароля это открытый прокси для всей локальной сети — через сервер человека.
+            raise ConfigError("Вход для устройств из сети — только с логином и паролем, а их в плане нет")
         out.append(mixed)
     if not plan.ports.internal or not plan.secrets.internal_user or not plan.secrets.internal_pass:
         raise ConfigError("Не выбраны порт и учётная запись служебного входа")
@@ -1078,10 +1081,15 @@ def _has_proxy_inbound(plan: RunPlan) -> bool:
     """Системный и локальный прокси — всегда; в TUN — только для раздачи в локальную сеть."""
     if plan.mode in ("proxy", "local"):
         return True
+    return _loopback(plan.proxy_listen) is False
+
+
+def _loopback(listen: str) -> bool | None:
+    """Вход слушает только этот компьютер (127.0.0.1, ::1); None — это не адрес."""
     try:
-        return not ipaddress.ip_address(plan.proxy_listen).is_loopback
+        return ipaddress.ip_address(listen).is_loopback
     except ValueError:
-        return False
+        return None
 
 
 def build_singbox(plan: RunPlan) -> dict[str, Any]:
@@ -1156,7 +1164,7 @@ def _xray_tls(plan: RunPlan, server: Server, *, quic: bool) -> tuple[str, dict[s
     t = server.tls or {}
     if server.security == "reality" and not quic:
         settings: dict[str, Any] = {"serverName": str(t.get("sni") or ""),
-                                    "fingerprint": str(plan.fingerprint or t.get("fingerprint") or "chrome"),
+                                    "fingerprint": str(t.get("fingerprint") or plan.fingerprint or "chrome"),
                                     "password": _need(server, _b64url(t.get("pbk")), "публичного ключа REALITY (pbk)"),
                                     "shortId": str(t.get("sid") or "")}
         if t.get("spx"):
@@ -1175,7 +1183,7 @@ def _xray_tls(plan: RunPlan, server: Server, *, quic: bool) -> tuple[str, dict[s
     alpn = _as_list(t.get("alpn")) or (["h3"] if quic else [])
     if alpn:
         settings["alpn"] = alpn
-    fp = plan.fingerprint or t.get("fingerprint")
+    fp = t.get("fingerprint") or plan.fingerprint
     if fp and not quic:
         settings["fingerprint"] = str(fp)
     pins = _as_list(t.get("pcs"))

@@ -14,9 +14,12 @@ from urllib.parse import unquote
 
 from ..errors import UserError
 from . import guard
+from .sysproxy import process_user_sid, shell_user_sid
 
 log = logging.getLogger("lazeyka.vpnclient.deeplink")
 SCHEME = "lazeyka"
+# Имена каналов общие на весь компьютер, а Лазейка — одна на сеанс Windows (мьютекс Local\…): к имени
+# добавляется номер сеанса (session_pipe_name). Без него Лазейка второго сеанса свой канал не открыла бы.
 PIPE_NAME = r"\\.\pipe\Lazeyka.Links"
 MAX_BYTES = 64 * 1024
 _KEY = r"Software\Classes\lazeyka"
@@ -36,17 +39,29 @@ def parse(url: str) -> str | None:
         return None
 
 
+def _branch() -> tuple[int, str]:
+    """(корень, ключ) обработчика ссылок в ветке того, кто сидит за компьютером. Лазейку с правами могут
+    запустить под другой учётной записью (в окне UAC ввели пароль другого администратора): её HKCU чужой,
+    и ссылки lazeyka:// в браузере человека открывали бы не Лазейку. Классы пользователя лежат в
+    HKEY_USERS\\<SID>_Classes — туда же указывает его HKCU\\Software\\Classes."""
+    mine, desk = process_user_sid(), shell_user_sid()
+    if mine and desk and mine != desk:
+        return winreg.HKEY_USERS, desk + "_Classes\\lazeyka"
+    return winreg.HKEY_CURRENT_USER, _KEY
+
+
 def register(exe: str) -> None:
     guard.ensure_allowed(_ACTION)
     if not isinstance(exe, str) or not ntpath.isabs(exe) or any(c in exe for c in '\x00\r\n"'):
         raise UserError("Для регистрации ссылок нужен полный путь к Лазейке")
+    root, base = _branch()
     try:
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _KEY) as key:
+        with winreg.CreateKey(root, base) as key:
             winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "URL:Лазейка")
             winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
         for suffix, value in (("DefaultIcon", f'"{exe}",0'),
                               (r"shell\open\command", f'"{exe}" "%1"')):
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _KEY + "\\" + suffix) as key:
+            with winreg.CreateKey(root, base + "\\" + suffix) as key:
                 winreg.SetValueEx(key, "", 0, winreg.REG_SZ, value)
     except OSError as exc:
         raise UserError("Не удалось зарегистрировать ссылки lazeyka://") from exc
@@ -54,28 +69,16 @@ def register(exe: str) -> None:
 
 def unregister() -> None:
     guard.ensure_allowed(_ACTION)
+    root, base = _branch()
     try:
         # Только свой известный ключ, снизу вверх; чужие ветки не обходим.
         for suffix in (r"\shell\open\command", r"\shell\open", r"\shell", r"\DefaultIcon", ""):
             try:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _KEY + suffix)
+                winreg.DeleteKey(root, base + suffix)
             except FileNotFoundError:
                 pass
     except OSError as exc:
         raise UserError("Не удалось убрать обработчик ссылок lazeyka://") from exc
-
-
-def registered() -> bool:
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _KEY) as key:
-            protocol, kind = winreg.QueryValueEx(key, "URL Protocol")
-            if protocol != "" or kind != winreg.REG_SZ:
-                return False
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _KEY + r"\shell\open\command") as key:
-            command, kind = winreg.QueryValueEx(key, "")
-            return kind == winreg.REG_SZ and bool(command) and command.endswith('" "%1"')
-    except OSError:
-        return False
 
 
 class SECURITY_ATTRIBUTES(ctypes.Structure):
@@ -118,6 +121,9 @@ class _PipeApi:
             "CancelIoEx": ([handle, overlapped], wintypes.BOOL),
             "CloseHandle": ([handle], wintypes.BOOL),
             "GetCurrentProcess": ([], handle),
+            "GetCurrentProcessId": ([], dword),
+            "ProcessIdToSessionId": ([dword, pdword], wintypes.BOOL),
+            "GetNamedPipeServerSessionId": ([handle, pdword], wintypes.BOOL),
             "LocalFree": ([pointer], pointer),
         }
         for name, (args, result) in definitions.items():
@@ -156,6 +162,20 @@ class _PipeApi:
                 self.kernel.LocalFree(sid)
         finally:
             self.kernel.CloseHandle(token)
+
+    def session_id(self) -> int:
+        """Номер сеанса Windows этого процесса."""
+        session = wintypes.DWORD()
+        if not self.kernel.ProcessIdToSessionId(self.kernel.GetCurrentProcessId(), ctypes.byref(session)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return session.value
+
+    def server_session(self, handle: int) -> int:
+        """Номер сеанса Windows процесса, который открыл канал (по дескриптору клиента)."""
+        session = wintypes.DWORD()
+        if not self.kernel.GetNamedPipeServerSessionId(handle, ctypes.byref(session)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return session.value
 
     def create(self, name: str) -> int:
         descriptor = ctypes.c_void_p()
@@ -225,9 +245,17 @@ def _pipe_name(name: str) -> str:
     return name
 
 
+def session_pipe_name(api: _PipeApi | None = None) -> str:
+    """Канал ссылок своего сеанса Windows. Отправитель — второй экземпляр, его запускает браузер того же
+    сеанса: он и получатель вычисляют одно и то же имя."""
+    return f"{PIPE_NAME}.{(api or _PipeApi()).session_id()}"
+
+
 class LinkServer:
-    def __init__(self, *, pipe_name: str = PIPE_NAME) -> None:
-        self.pipe_name = _pipe_name(pipe_name)
+    """pipe_name None — канал своего сеанса Windows (session_pipe_name)."""
+
+    def __init__(self, *, pipe_name: str | None = None) -> None:
+        self.pipe_name = _pipe_name(pipe_name) if pipe_name is not None else None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -238,6 +266,7 @@ class LinkServer:
                 return
             api = _PipeApi()
             try:
+                self.pipe_name = self.pipe_name or session_pipe_name(api)
                 handle = api.create(self.pipe_name)
             except OSError as exc:
                 raise UserError("Не удалось открыть канал ссылок Лазейки") from exc
@@ -285,10 +314,11 @@ class LinkServer:
             thread.join(timeout=3.0)
 
 
-def send_to_running(text: str, timeout: float = 2.0, *, pipe_name: str = PIPE_NAME) -> bool:
+def send_to_running(text: str, timeout: float = 2.0, *, pipe_name: str | None = None) -> bool:
+    """Передать строку ссылки работающей Лазейке своего сеанса Windows. Канал, открытый процессом другого
+    сеанса (имя мог занять раньше Лазейки другой пользователь), ссылку не получает: в ней секрет подписки."""
     if not isinstance(text, str) or not text or "\x00" in text or not math.isfinite(timeout) or timeout < 0:
         return False
-    name = _pipe_name(pipe_name)
     try:
         payload = text.encode("utf-8")
     except UnicodeError:
@@ -296,6 +326,12 @@ def send_to_running(text: str, timeout: float = 2.0, *, pipe_name: str = PIPE_NA
     if len(payload) > MAX_BYTES:
         return False
     api = _PipeApi()
+    try:
+        name = _pipe_name(pipe_name) if pipe_name is not None else session_pipe_name(api)
+        session = api.session_id()
+    except OSError as exc:
+        log.warning("Канал ссылок Лазейки не определён: %s", exc)
+        return False
     deadline = time.monotonic() + timeout
     while True:
         # SQOS_PRESENT | SECURITY_IDENTIFICATION: сервер не может выдать себя за клиента.
@@ -308,6 +344,11 @@ def send_to_running(text: str, timeout: float = 2.0, *, pipe_name: str = PIPE_NA
             return False
         time.sleep(min(0.02, remaining))
     try:
+        server = api.server_session(handle)
+        if server != session:
+            log.warning("Канал ссылок открыт программой другого сеанса Windows (%d, а не %d) — ссылку не передаём",
+                        server, session)
+            return False
         buffer = ctypes.create_string_buffer(payload, len(payload))
         return api.io(handle, "write", buffer, deadline=deadline) == len(payload)
     except OSError:

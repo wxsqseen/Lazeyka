@@ -35,6 +35,9 @@
     if (top + box.height > window.innerHeight - EDGE_PX && rect.top - GAP_PX - box.height >= EDGE_PX) {
       top = rect.top - GAP_PX - box.height;
     }
+    /* Ни снизу, ни сверху не помещается (крупный масштаб, низкое окно) — прижимаем к краю окна: прокрутка
+     * меню закрывает, и нижние пункты («Удалить») иначе было бы не достать. Выше окна — своя прокрутка (CSS). */
+    top = Math.max(EDGE_PX, Math.min(top, window.innerHeight - box.height - EDGE_PX));
     menu.style.left = `${(left / zoom).toFixed(1)}px`;
     menu.style.top = `${(top / zoom).toFixed(1)}px`;
   }
@@ -46,6 +49,7 @@
         class: ['menu__item', item.tone && `menu__item--${item.tone}`],
         role: 'menuitem',
         tabIndex: -1,
+        title: item.title,
       }, item.icon ? icon(item.icon, { size: ITEM_ICON }) : null, h('span', { text: item.label }));
       setAttr(btn, 'aria-disabled', Boolean(item.disabled));
       btn.addEventListener('click', () => {
@@ -130,7 +134,7 @@
   }
 
   /**
-   * items — массив или функция, возвращающая [{ label, icon, onSelect, tone: 'danger', disabled }].
+   * items — массив или функция, возвращающая [{ label, icon, onSelect, tone: 'danger', disabled, title }].
    * Пустые элементы (null/false) пропускаются: так удобно собирать меню по условиям.
    * fk — ключ кнопки (data-fk): по нему меню находит её после перерисовки слота.
    */
@@ -158,5 +162,6 @@
     return trigger;
   }
 
-  Lz.ui = Object.assign(Lz.ui || {}, { menuButton, closeMenu: () => closeCurrent(false) });
+  /* closeMenu(true) — вернуть фокус на кнопку «⋯» (окно поверх меню вернёт его туда же, когда закроется). */
+  Lz.ui = Object.assign(Lz.ui || {}, { menuButton, closeMenu: (restoreFocus) => closeCurrent(Boolean(restoreFocus)) });
 })(window.Lz);

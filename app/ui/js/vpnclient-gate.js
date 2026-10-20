@@ -3,7 +3,7 @@
  * Свой VPN: включение и выключение с любых страниц. Перед включением — окно «Уже работает
  * другой VPN» (решает ядро: vpnclient_preflight). Окна «Скачать ядро?» нет: ядра Лазейка
  * скачивает с GitHub сама при запуске, а «Включить» во время подкачки ждёт её (ход — на
- * странице «VPN»). Здесь же — окно «Добавить из ссылки lazeyka://?»: ссылка может прийти в
+ * странице «Свой VPN»). Здесь же — окно «Добавить из ссылки lazeyka://?»: ссылка может прийти в
  * любой момент, поэтому оно следит за снимками само.
  */
 (function (Lz) {
@@ -12,6 +12,8 @@
   const texts = Lz.texts;
 
   const POWER_KEY = 'vpnclient_power';
+  /* Проверка обычно отвечает сразу; зависшая не должна держать кнопку включения занятой вечно. */
+  const PREFLIGHT_TIMEOUT_MS = 15000;
   const DEEPLINK_KIND = {
     subscription: 'Подписка',
     links: 'Серверы',
@@ -20,18 +22,33 @@
 
   /* ---------- Окно «Уже работает другой VPN» ---------- */
 
+  /** Имя чужого VPN из ядра бывает уже со словом «VPN» («VPN «wwan99»») — тогда без повтора. */
+  function otherVpnTitle(label) {
+    if (!label) return 'Уже работает другой VPN';
+    return /^VPN\b/.test(label) ? `Уже работает другой ${label}` : `Уже работает другой VPN — ${label}`;
+  }
+
   function conflictTitle(conflict) {
     const label = conflict.label ? String(conflict.label) : '';
     if (conflict.kind === 'proxy') return label ? `Работает системный прокси ${label}` : 'Уже работает системный прокси';
     if (conflict.kind === 'uac_user') return 'Системный прокси недоступен';
-    return label ? `Уже работает другой VPN — ${label}` : 'Уже работает другой VPN';
+    return otherVpnTitle(label);
   }
+
+  /** Режим «Системный прокси» недоступен (Лазейка под чужой учётной записью UAC): причина или ''. */
+  function proxyDenied(conflict) {
+    return conflict && conflict.proxy_denied ? String(conflict.proxy_denied) : '';
+  }
+
+  /* Ядро называет только причину uac_user, без совета: что с ней делать — говорим сами. */
+  const UAC_ADVICE = 'Включите режим «Весь трафик» — или запустите Лазейку из своей учётной записи, тогда заработает и системный прокси.';
 
   function conflictText(conflict) {
     if (conflict.text) return String(conflict.text);
     const label = conflict.label ? String(conflict.label) : 'другой VPN';
     if (conflict.kind === 'proxy') return `Лазейка заменит системный прокси ${label} и вернёт его, когда выключится.`;
     if (conflict.kind === 'uac_user') return 'Лазейка запущена от другой учётной записи и не может поменять ваш системный прокси.';
+    if (proxyDenied(conflict)) return `Два VPN мешают друг другу: выключите ${label}.`;
     return `Два VPN мешают друг другу: выключите ${label} или включите Лазейку как системный прокси.`;
   }
 
@@ -57,6 +74,11 @@
         primary = ui.button({ label: 'Включить', kind: 'primary', onClick: () => finish('force') });
       } else if (conflict.kind === 'uac_user') {
         primary = ui.button({ label: 'Включить весь трафик (TUN)', kind: 'primary', onClick: () => finish('tun') });
+        note = UAC_ADVICE;
+      } else if (proxyDenied(conflict)) {
+        /* Уйти в системный прокси нельзя (чужая учётная запись UAC) — не предлагаем то, что откажет. */
+        primary = ui.button({ label: 'Всё равно включить', kind: 'primary', onClick: () => finish('force') });
+        note = Lz.fmt.sentence(proxyDenied(conflict));
       } else {
         const force = ui.button({ label: 'Всё равно включить', onClick: () => finish('force') });
         buttons.push(force.el);
@@ -82,6 +104,16 @@
     });
   }
 
+  /*
+   * Проверка не ответила за PREFLIGHT_TIMEOUT_MS или отказала — включаем без окна, как и раньше при её ошибке:
+   * мешает другой VPN — ядро не подключится и назовёт причину (error_kind conflict). Не включать вовсе значило бы,
+   * что сломанная проверка выключает свой VPN. Человеку — тост, а не молчание.
+   */
+  function withoutWindow(reason) {
+    ui.toast({ kind: 'warn', text: `Не удалось проверить, не мешает ли другой VPN: ${Lz.fmt.sentence(reason)} Включаем без окна.` });
+    return { proceed: true, quiet: false, mode: null };
+  }
+
   /**
    * Перед включением: спросить, если работает чужой VPN. Promise<{ proceed, quiet, mode }>:
    * quiet — окно показывали (ядро не повторит предупреждение), mode — сначала сменить режим.
@@ -91,15 +123,12 @@
     if (!Lz.api.hasMethod('vpnclient_preflight')) return { proceed: true, quiet: false, mode: null };
     let reply;
     try {
-      reply = await Lz.api.call('vpnclient_preflight');
+      reply = await Lz.api.callWithTimeout('vpnclient_preflight', PREFLIGHT_TIMEOUT_MS);
     } catch (err) {
-      console.warn('vpnclient_preflight не ответил — включаем без окна про другой VPN:', err);
-      return { proceed: true, quiet: false, mode: null };
+      return withoutWindow(Lz.api.describeError(err));
     }
-    if (!reply || !reply.ask || !reply.conflict) {
-      if (reply && reply.ok === false) console.warn(`vpnclient_preflight отказал: ${reply.error} — включаем без окна`);
-      return { proceed: true, quiet: false, mode: null };
-    }
+    if (reply && reply.ok === false) return withoutWindow(String(reply.error || 'ядро отказало и не назвало причину'));
+    if (!reply || !reply.ask || !reply.conflict) return { proceed: true, quiet: false, mode: null };
     const answer = await askConflict(reply.conflict);
     if (!answer) return { proceed: false, quiet: true, mode: null };
     return { proceed: true, quiet: true, mode: answer === 'proxy' || answer === 'tun' ? answer : null };
@@ -107,21 +136,19 @@
 
   /* ---------- Включить и выключить ---------- */
 
-  /* Пока идут окна перед включением, повторное нажатие ничего не открывает. */
-  let starting = false;
-
   async function startFlow() {
     const gate = await preflight();
     if (!gate.proceed) return null;
     if (gate.mode) {
       /* Ядро меняет режим до ответа: ok — режим уже другой, отказ (прокси под чужой учётной записью UAC) —
        * VPN не включаем вовсе, иначе он поднял бы TUN рядом с чужим VPN. */
-      const switched = await Lz.api.run({ method: 'vpnclient_set_mode', args: [gate.mode], key: POWER_KEY });
+      const switched = await Lz.api.run({ method: 'vpnclient_set_mode', args: [gate.mode], key: 'vpnclient_set_mode' });
       if (!switched || !switched.ok) return switched;
     }
-    return Lz.api.run({ method: 'vpnclient_start', args: [gate.quiet], key: POWER_KEY });
+    return Lz.api.run({ method: 'vpnclient_start', args: [gate.quiet], key: 'vpnclient_start' });
   }
 
+  /** Пока идут окна перед включением и ответ ядра, кнопки с POWER_KEY заняты, а повторное нажатие ничего не открывает. */
   async function start() {
     const state = Lz.store.state;
     const vc = state && state.vpnclient;
@@ -134,13 +161,7 @@
       Lz.nav.go('vpnclient', { focus: 'add' });
       return null;
     }
-    if (starting) return null;
-    starting = true;
-    try {
-      return await startFlow();
-    } finally {
-      starting = false;
-    }
+    return Lz.api.hold(POWER_KEY, startFlow);
   }
 
   function stop() {
@@ -182,7 +203,7 @@
         method: 'vpnclient_deeplink_confirm',
         args: [token, accept],
         key: 'vpnclient_deeplink_confirm',
-        success: accept ? 'Добавляем — ход виден на странице «VPN»' : null,
+        success: accept ? 'Добавляем — ход виден на странице «Свой VPN»' : null,
       });
     }
 
@@ -218,5 +239,5 @@
     if (deeplinkModal) closeDeeplink();
   });
 
-  Lz.vpnclientGate = { start, stop, toggle, select, POWER_KEY };
+  Lz.vpnclientGate = { start, stop, toggle, select, conflictTitle, POWER_KEY };
 })(window.Lz);

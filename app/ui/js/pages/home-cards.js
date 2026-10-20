@@ -19,19 +19,21 @@
 
   /* ---------- Карточка обхода ---------- */
 
+  /** [текст, тихий хвост] — см. Lz.power.caption. */
   function zapretCaption(zapret) {
-    if (zapret.fix && zapret.fix.running) return 'Ищем рабочую стратегию…';
+    if (zapret.fix && zapret.fix.running) return ['Ищем рабочую стратегию…', ''];
+    if (zapret.test && zapret.test.running) return ['Идёт подбор стратегии…', ''];
     switch (zapret.status) {
       case 'running':
-        return zapret.started_at ? `Работает ${fmt.since(zapret.started_at)}` : 'Обход включён';
+        return runningParts(zapret.started_at, 'Обход включён');
       case 'starting':
-        return 'Запускаем обход…';
+        return ['Запускаем обход…', ''];
       case 'stopping':
-        return 'Выключаем обход…';
+        return ['Выключаем обход…', ''];
       case 'error':
-        return zapret.error || 'Обход не запустился. Подробности — в журнале.';
+        return [zapret.error || 'Обход не запустился. Подробности — в журнале.', ''];
       default:
-        return 'Нажмите, чтобы включить';
+        return ['Нажмите, чтобы включить', ''];
     }
   }
 
@@ -54,7 +56,10 @@
     ];
   }
 
-  /** Под кнопками: ход «Найти и включить», идущая проверка или чипы последней проверки с итогом подбора. */
+  /**
+   * Под кнопками: ход «Найти и включить», идущая проверка, итог подбора или чипы последней проверки.
+   * Итог подбора новее проверки (Lz.fix.isLatest) — он один: чипы прежней проверки ему бы противоречили.
+   */
   function renderCheckArea(data) {
     if (data.fix && data.fix.running) return Lz.fix.render(data.fix);
     if (data.checking) {
@@ -62,7 +67,7 @@
         'Проверяем, открываются ли сайты…');
     }
     const nodes = [
-      data.results.length ? Lz.fix.checkChips(data.results) : null,
+      data.results.length && !data.fixLatest ? Lz.fix.checkChips(data.results) : null,
       Lz.fix.render(data.fix),
     ].filter(Boolean);
     if (!nodes.length) {
@@ -71,14 +76,20 @@
     return nodes;
   }
 
+  /** «Работает» и тихий счётчик времени; без времени запуска — fallback одной строкой. */
+  function runningParts(startedAt, fallback) {
+    return startedAt ? ['Работает', ` ${fmt.since(startedAt)}`] : [fallback, ''];
+  }
+
   function createZapretHero() {
     const pill = ui.statusPill();
     const power = Lz.power.create({
       label: 'Обход блокировок для Discord и YouTube',
+      busyKey: Lz.actions.POWER_KEY.zapret,
       onToggle: (status) => Lz.actions.toggleZapret(status),
     });
-    const caption = h('p', { class: 'hero__caption', 'aria-live': 'polite' });
-    const powerArea = h('div', { class: 'hero__power' }, power.el, caption);
+    const caption = Lz.power.caption(power, 'hero__caption');
+    const powerArea = h('div', { class: 'hero__power' }, power.el, caption.el);
 
     const lockedText = h('p', { class: 'hero__locked-text' });
     const relaunch = ui.actionButton({
@@ -133,23 +144,24 @@
         pickLink.el));
 
     const el = h('article', { class: 'panel hero hero--zapret', dataset: { state: 'stopped' } },
-      heroHead({ title: 'Discord и YouTube', subtitle: 'Обход замедления · zapret', pill }),
+      heroHead({ title: 'Discord и YouTube', subtitle: 'Обход блокировок · zapret', pill }),
       powerArea,
       lockedArea,
       h('div', { class: 'hero__sep', 'aria-hidden': 'true' }),
       settingsSection,
       checkSection);
 
-    function updateChecks(zapret, available, fixFlags) {
+    function updateChecks(zapret, available, fixFlags, testing) {
       const check = zapret.check || {};
       const checking = Boolean(check.running);
       const results = Array.isArray(check.results) ? check.results : [];
+      const fixLatest = Lz.fix.isLatest(zapret);
       fixBtn.set(fixFlags);
       checkBtn.setBusy(checking);
-      checkBtn.setDisabled(!available || fixFlags.running);
-      checkArea.update({ checking, results, fix: Lz.fix.view(zapret) });
+      checkBtn.setDisabled(!available || fixFlags.running || testing);
+      checkArea.update({ checking, results, fixLatest, fix: Lz.fix.view(zapret) });
 
-      const shown = !checking && !fixFlags.running && results.length > 0;
+      const shown = !checking && !fixFlags.running && results.length > 0 && !fixLatest;
       const checked = shown ? Lz.fix.checkedLine(fmt.relative(check.at), Boolean(check.direct)) : '';
       setText(checkedAgo, checked);
       setHidden(checkedAgo, !checked);
@@ -163,15 +175,17 @@
       const available = zapret.available !== false;
       const status = available ? (zapret.status || 'stopped') : 'locked';
       const fixFlags = Lz.fix.flags(zapret);
+      /* Во время подбора и «Найти и включить» обходом управляет ядро: включить, выключить и сменить стратегию нельзя. */
+      const testing = Boolean(zapret.test && zapret.test.running);
+      const managed = fixFlags.running || testing;
       if (el.dataset.state !== status) el.dataset.state = status;
       pill.set(status);
 
       setHidden(powerArea, !available);
       setHidden(lockedArea, available);
-      /* Во время «Найти и включить» обходом управляет ядро: кнопка питания и выбор стратегии ждут. */
-      power.update(zapret.status, { disabled: !available || fixFlags.running });
-      setText(caption, zapretCaption(zapret));
-      caption.classList.toggle('is-error', zapret.status === 'error' && !fixFlags.running);
+      power.update(zapret.status, { disabled: !available || managed });
+      const [captionText, captionTail] = zapretCaption(zapret);
+      caption.set(captionText, captionTail, { error: zapret.status === 'error' && !managed });
 
       setText(lockedText, zapret.unavailable_reason || 'Для обхода нужны права администратора.');
       setHidden(relaunch.el, Boolean(state.app && state.app.admin));
@@ -181,13 +195,13 @@
       if (!zapret.strategy) options.unshift({ value: '', label: 'Не выбрана' });
       strategy.setOptions(options);
       strategy.sync(zapret.strategy || '');
-      strategy.setDisabled(!available || fixFlags.running);
+      strategy.setDisabled(!available || managed);
 
       modeChips.update({
         game: zapret.game_filter ? zapret.game_filter.mode : 'disabled',
         ipset: zapret.ipset ? zapret.ipset.mode : 'none',
       });
-      updateChecks(zapret, available, fixFlags);
+      updateChecks(zapret, available, fixFlags, testing);
     }
 
     return { el, update };
@@ -219,10 +233,11 @@
   function createTelegramHero() {
     const pill = ui.statusPill();
     const power = Lz.power.create({
-      label: 'Прокси для Telegram',
+      label: 'Telegram-прокси',
+      busyKey: Lz.actions.POWER_KEY.tg,
       onToggle: (status) => Lz.actions.toggleTelegram(status),
     });
-    const caption = h('p', { class: 'hero__caption', 'aria-live': 'polite' });
+    const caption = Lz.power.caption(power, 'hero__caption');
 
     const connect = ui.button({
       label: 'Подключить Telegram',
@@ -244,16 +259,17 @@
     const downValue = h('span', { class: 'stat__value num' });
     const totalValue = h('span', { class: 'stat__value num' });
     const spark = ui.sparkline({ label: 'Скорость за последние две минуты' });
+    /* Загрузка первой — как у своего VPN: на обеих карточках цифры стоят в одном порядке. */
     const statsSection = h('div', { class: 'hero__section hero__section--end hero__stats' },
       h('div', { class: 'stats' },
-        statTile('arrowUp', 'Отдача', upValue, 'up'),
         statTile('arrowDown', 'Загрузка', downValue, 'down'),
+        statTile('arrowUp', 'Отдача', upValue, 'up'),
         statTile(null, 'За сеанс', totalValue)),
       h('div', { class: 'spark-wrap' }, spark.el));
 
     const el = h('article', { class: 'panel hero hero--tg', dataset: { state: 'stopped' } },
       heroHead({ title: 'Telegram', subtitle: 'Ускорение без VPN · tg-ws-proxy', pill }),
-      h('div', { class: 'hero__power' }, power.el, caption),
+      h('div', { class: 'hero__power' }, power.el, caption.el),
       h('div', { class: 'hero__sep', 'aria-hidden': 'true' }),
       h('div', { class: 'hero__section' },
         h('div', { class: 'hero__row hero__row--buttons' }, connect.el, copy.el),
@@ -267,9 +283,8 @@
       if (el.dataset.state !== status) el.dataset.state = status;
       pill.set(status);
       power.update(status);
-      setText(caption, telegramCaption(tg));
-      caption.classList.toggle('is-error', status === 'error');
-      caption.classList.toggle('mono', status === 'running');
+      caption.set(telegramCaption(tg), '', { error: status === 'error' });
+      caption.el.classList.toggle('mono', status === 'running');
 
       const line = texts.telegramConnection(tg);
       conn.dataset.tone = line.tone;
@@ -309,9 +324,10 @@
     const pill = ui.statusPill();
     const power = Lz.power.create({
       label: 'Свой VPN',
+      busyKey: Lz.vpnclientGate.POWER_KEY,
       onToggle: (status) => Lz.vpnclientGate.toggle(status),
     });
-    const caption = h('p', { class: 'hero__caption', 'aria-live': 'polite' });
+    const caption = Lz.power.caption(power, 'hero__caption');
     const statusText = h('span', { class: 'conn__text' });
     const statusLine = h('p', { class: 'conn', role: 'status' }, h('span', { class: 'conn__dot', 'aria-hidden': 'true' }), statusText);
     const server = ui.slot((data) => [
@@ -319,7 +335,7 @@
       data.mode ? ui.chip({
         icon: 'vpn',
         text: data.mode,
-        title: 'Режим и сервер — на странице «VPN»',
+        title: 'Режим и сервер — на странице «Свой VPN»',
         onClick: () => Lz.nav.go('vpnclient'),
       }) : null,
       data.bypass ? ui.chip({ icon: 'route', text: 'Discord и YouTube — через обход', tone: 'accent', title: data.bypass }) : null,
@@ -347,7 +363,7 @@
         h('div', { class: 'hero__titles' }, h('h2', { class: 'hero__title', text: 'Свой VPN' }), subtitleEl),
         pill.el),
       h('div', { class: 'vc-home' },
-        h('div', { class: 'vc-home__power' }, power.el, caption),
+        h('div', { class: 'vc-home__power' }, power.el, caption.el),
         h('div', { class: 'vc-home__info' }, statusLine, server.el, stats, subBox)));
 
     function update(state) {
@@ -356,10 +372,10 @@
       const pillStatus = texts.vpncPillStatus(vc);
       const status = vc.status || 'stopped';
       if (el.dataset.state !== pillStatus) el.dataset.state = pillStatus;
-      pill.set(pillStatus);
+      pill.set(texts.vpncPillShown(vc));
       power.update(pillStatus === 'verifying' ? 'running' : (vc.available === false ? 'stopped' : status), { disabled: vc.available === false });
-      setText(caption, texts.vpncCaption(vc, pillStatus));
-      caption.classList.toggle('is-error', status === 'error');
+      const [captionText, captionTail] = texts.vpncCaptionParts(vc, pillStatus);
+      caption.set(captionText, captionTail, { error: status === 'error' });
       setText(subtitleEl, `Ваш сервер · ${texts.vpncMode(vc.mode).short.toLowerCase()}`);
 
       const line = texts.vpncLine(vc);

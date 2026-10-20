@@ -6,7 +6,7 @@
  * проверки на конфиге человека, а карточка показывает итог. Браузер сам ничего не открывает:
  * страница релиза — лишь по клику.
  *
- * На каждый компонент (сама Лазейка, стратегии zapret, ядро прокси для Telegram, ядро своего
+ * На каждый компонент (сама Лазейка, стратегии zapret, ядро Telegram-прокси, ядро своего
  * VPN и помощник Xray) — отдельная карточка: текущая версия → новая, что нового, как файл
  * проверяется, и ход установки по этапам (скачивание → проверка → установка → готово).
  */
@@ -15,18 +15,22 @@
   const ui = Lz.ui;
   const fmt = Lz.fmt;
 
-  const ACTIVE_STATES = new Set(['downloading', 'verifying', 'installing']);
+  const ACTIVE_STATES = new Set(['downloading', 'verifying', 'installing', 'rolling_back']);
+  /* Этапы — только у установки: откат ничего не скачивает и не сверяет. */
+  const INSTALL_STATES = new Set(['downloading', 'verifying', 'installing', 'done']);
 
   /* Этап установки по индексу; done — четвёртый, отдельно. */
   const STEP_INDEX = { downloading: 0, verifying: 1, installing: 2 };
   const STEPS = ['Скачивание', 'Проверка', 'Установка', 'Готово'];
 
+  /* Проверку файла описывает строка доверия (VERIFY…doing): у хода установки на этом этапе своего текста нет. */
   const STATE_TEXT = {
     downloading: 'Скачиваем обновление…',
-    verifying: 'Проверяем целостность файла…',
-    installing: 'Устанавливаем и перезапускаем компонент…',
+    installing: 'Устанавливаем обновление…',
+    rolling_back: 'Возвращаем прежнюю версию…',
     done: 'Обновление установлено.',
-    error: 'Не удалось установить обновление.',
+    rolled_back: 'Прежняя версия возвращена.',
+    error: 'Не удалось.',
   };
 
   /*
@@ -75,8 +79,11 @@
 
   function badgeFor(item) {
     if (item.state === 'error') return { tone: 'err', text: 'Ошибка' };
+    if (item.state === 'rolling_back') return { tone: 'warn', text: 'Откатывается' };
     if (ACTIVE_STATES.has(item.state)) return { tone: 'warn', text: 'Устанавливается' };
+    if (item.restart) return { tone: 'accent', text: 'Ждёт перезапуска' };
     if (item.state === 'done') return { tone: 'ok', text: 'Установлено' };
+    if (item.state === 'rolled_back' && !item.available) return { tone: 'ok', text: 'Прежняя версия' };
     if (item.available && item.skipped) return { tone: 'off', text: 'Версия пропущена' };
     if (item.available) return { tone: 'accent', text: 'Есть обновление' };
     return { tone: 'ok', text: 'Актуальная версия' };
@@ -115,7 +122,10 @@
     const textEl = h('span', { class: 'update__trust-text' });
     const el = h('p', { class: 'update__trust' }, iconBox, textEl);
 
+    /* Только при смене фазы: пересозданный на каждом опросе (раз в 400 мс) спиннер начинал бы оборот заново и дёргался. */
     function setIcon(kind) {
+      if (iconBox.dataset.kind === kind) return;
+      iconBox.dataset.kind = kind;
       iconBox.replaceChildren(kind === 'doing'
         ? h('span', { class: 'spinner', 'aria-hidden': 'true' })
         : icon(kind === 'done' ? 'shieldCheck' : 'lock', { size: 15 }));
@@ -124,7 +134,8 @@
     function update(item) {
       const cfg = VERIFY[item.id] || VERIFY_FALLBACK;
       let phase = null;
-      if (item.state === 'verifying') phase = 'doing';
+      if (item.state === 'rolling_back' || item.state === 'rolled_back') phase = null;
+      else if (item.state === 'verifying') phase = 'doing';
       else if (item.state === 'installing' || item.state === 'done') phase = 'done';
       else if (item.available && item.state !== 'error') phase = 'idle';
       setHidden(el, !phase);
@@ -143,6 +154,18 @@
     const { item } = data;
     if (ACTIVE_STATES.has(item.state)) return null;
     const buttons = [];
+
+    /* «Перезапустить» — как в плашке app-restart ядра; ключ тот же, что у плашки (notices.js). */
+    if (item.restart) {
+      buttons.push(ui.actionButton({
+        method: 'app_restart',
+        key: 'app_restart',
+        label: 'Перезапустить',
+        icon: 'refresh',
+        kind: 'primary',
+        cls: 'btn--hero',
+      }).el);
+    }
 
     if (item.admin && item.available && item.state !== 'done') {
       buttons.push(ui.actionButton({
@@ -179,6 +202,7 @@
     }
 
     if (item.admin && item.can_rollback) {
+      /* Итог отката приходит уведомлением от самой задачи: тост здесь сказал бы «возвращена» раньше времени. */
       buttons.push(ui.actionButton({
         method: 'updates_rollback',
         args: [item.id],
@@ -186,10 +210,11 @@
         label: 'Откатить',
         icon: 'undo',
         kind: 'ghost',
-        success: 'Предыдущая версия возвращена',
         confirm: {
           title: `Откатить «${item.title || item.id}»?`,
-          text: 'Вернём предыдущую версию, которую Лазейка сохранила перед обновлением. Если компонент сейчас работает, он перезапустится.',
+          text: item.id === 'app'
+            ? 'Вернём версию Лазейки, которую она сохранила перед обновлением. Заработает она после перезапуска.'
+            : 'Вернём предыдущую версию, которую Лазейка сохранила перед обновлением. Если компонент сейчас работает, он перезапустится.',
           confirmLabel: 'Откатить',
           tone: 'danger',
           icon: 'undo',
@@ -268,19 +293,28 @@
       trust.update(item);
 
       const active = ACTIVE_STATES.has(item.state);
-      const showStage = active || item.state === 'done';
-      setHidden(stage, !showStage);
-      if (showStage) stepper.update(item.state);
+      const steps = INSTALL_STATES.has(item.state);
+      setHidden(stage, !(active || steps));
+      setHidden(stepper.el, !steps);
+      if (steps) stepper.update(item.state);
       setHidden(progressBox, !active);
       if (active) {
         progress.set(item.state === 'downloading' && item.progress != null ? item.progress : null);
-        setText(progressText, item.message || STATE_TEXT[item.state]);
+        /* Во время проверки о ней говорит строка доверия со спиннером — второй такой же строки не нужно. */
+        const progressValue = item.state === 'verifying' ? '' : (item.message || STATE_TEXT[item.state]);
+        setText(progressText, progressValue);
+        setHidden(progressText, !progressValue);
       }
 
-      if (item.state === 'error') message.update({ tone: 'err', text: item.message || STATE_TEXT.error });
-      else if (item.state === 'done') message.update({ tone: 'ok', text: item.message || STATE_TEXT.done });
+      /* В ходе установки или отката message — текст хода: он уже над полосой, плашкой его не повторяем. */
+      if (active) message.update(null);
+      else if (item.state === 'error') message.update({ tone: 'err', text: item.message || STATE_TEXT.error });
+      else if (item.state === 'done' || item.state === 'rolled_back') {
+        message.update({ tone: 'ok', text: item.message || STATE_TEXT[item.state] });
+      }
       /* Без установки в ходе пояснение шлют только ядра своего VPN: «поставлено автоматически», «не подошло». */
       else if (item.message) message.update({ tone: 'info', text: item.message });
+      else if (item.check_error) message.update({ tone: 'warn', text: `Не удалось проверить: ${item.check_error}` });
       else message.update(null);
 
       actions.update({ item: {
@@ -291,6 +325,7 @@
         available: Boolean(item.available),
         skipped: Boolean(item.skipped),
         can_rollback: Boolean(item.can_rollback),
+        restart: Boolean(item.restart),
         admin: Boolean(item.admin),
       } });
 
@@ -325,7 +360,7 @@
 
     const autoCheck = ui.switchRow({
       title: 'Проверять при запуске',
-      description: 'Только уведомление о новой версии — ничего не скачивается без вас. Ядра своего VPN обновляются сами, это выключается на странице «VPN».',
+      description: 'Только уведомление о новой версии: Лазейку, стратегии и Telegram-прокси обновляем лишь по вашей кнопке. Ядра своего VPN обновляются сами — это выключается на странице «Свой VPN».',
       onChange: async (value) => {
         const result = await Lz.api.run({ method: 'save_settings', args: [{ check_updates: value }] });
         return Boolean(result && result.ok);
@@ -344,17 +379,17 @@
         h('div', { class: 'policy__icon', 'aria-hidden': 'true' }, icon('shieldCheck', { size: 22 })),
         h('div', { class: 'policy__text' },
           h('h2', { class: 'policy__title', text: 'Обновления — только когда вы захотите' }),
-          h('p', { class: 'policy__desc', text: 'Лазейка только сообщает о новых версиях. Скачиваем и устанавливаем — лишь после того, как вы нажмёте «Установить». Никаких самовольных загрузок и внезапно открытых страниц.' }))),
+          h('p', { class: 'policy__desc', text: 'Лазейка только сообщает о новых версиях: скачивает и устанавливает их, лишь когда вы нажмёте «Установить». Сами обновляются только ядра своего VPN (это выключается на странице «Свой VPN»), а ядро Telegram-прокси раз в час берёт с GitHub список доменов Cloudflare. Страницы в браузере сами не открываются.' }))),
       h('div', { class: 'policy__controls' },
         autoCheck.el,
         h('div', { class: 'policy__check' }, checkBtn.el, lastCheck)));
 
     const banner = ui.slot(renderBanner, { cls: 'page__banners' });
     const globalError = ui.slot((text) => (text ? ui.callout({ tone: 'err', title: 'Проверка не удалась', text }) : null));
-    const allok = ui.slot((data) => (data ? ui.callout({
+    const allok = ui.slot((titles) => (titles ? ui.callout({
       tone: 'ok',
       title: 'Всё актуально',
-      text: 'Установлены последние версии Лазейки, стратегий zapret, ядра прокси и ядер своего VPN.',
+      text: `Установлены последние версии: ${titles}.`,
     }) : null));
 
     const list = h('div', { class: 'updates-list' });
@@ -364,7 +399,7 @@
       text: 'Нажмите «Проверить сейчас» — мы только посмотрим, есть ли новые версии.',
     });
 
-    const header = ui.pageHeader({ title: 'Обновления', subtitle: 'Сама Лазейка, стратегии zapret, ядро прокси для Telegram и ядра своего VPN' });
+    const header = ui.pageHeader({ title: 'Обновления', subtitle: 'Сама Лазейка, стратегии zapret, ядро Telegram-прокси и ядра своего VPN' });
     const el = h('div', { class: 'page__inner' }, header.el, banner.el, policy, globalError.el, allok.el, list, empty);
 
     function syncItems(items, admin) {
@@ -408,9 +443,12 @@
         syncItems(items, admin);
         setHidden(empty, items.length > 0);
 
-        const calm = items.length > 0 && items.every((item) => !item.available
+        /* «Всё актуально» — только когда GitHub ответил про каждый установленный компонент в этом сеансе. */
+        const installed = items.filter((item) => item.current != null);
+        const calm = installed.length > 0 && !updates.error && installed.every((item) => item.checked
+          && !item.check_error && !item.available && !item.restart
           && !ACTIVE_STATES.has(item.state) && item.state !== 'done' && item.state !== 'error');
-        allok.update(calm ? true : null);
+        allok.update(calm ? installed.map((item) => item.title || item.id).join(', ') : null);
       },
     };
   }

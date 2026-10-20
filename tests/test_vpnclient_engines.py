@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from app import paths, winutil
+from app.filehash import sha256_file
 from app.updates import github
 from app.vpnclient import engines, guard
 
@@ -163,10 +164,108 @@ def test_wrong_version_inside_archive_is_rejected(cores):
         engines.install("sing-box", download=serve(SINGBOX_ZIP))
 
 
+def test_failed_swap_restores_previous_install(cores, monkeypatch):
+    """Переустановка той же версии: прежняя ушла в .old-*, а новая на её место не встала — прежняя
+    возвращается, ядро по-прежнему установлено."""
+    engines.install("sing-box", download=serve(SINGBOX_ZIP))
+    real_rename = os.rename
+
+    def rename(src, dst):
+        if str(src).endswith(".staging"):
+            raise PermissionError(5, "Access is denied", str(src))
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(engines.os, "rename", rename)
+    with pytest.raises(engines.EngineError, match="установка не удалась"):
+        engines.install("sing-box", download=serve(SINGBOX_ZIP))
+    monkeypatch.setattr(engines.os, "rename", real_rename)
+    assert engines.installed("sing-box") == "1.14.3" and engines.verify("sing-box", "1.14.3")
+    assert [p.name for p in (cores["root"] / "sing-box").iterdir()] == ["1.14.3"]
+
+
+def test_install_interrupted_between_renames_is_recovered(cores):
+    """Процесс завершился между переименованиями: папки версии нет, прежняя лежит как .old-* — её
+    находит первая же проверка установленных версий."""
+    engines.install("sing-box", download=serve(SINGBOX_ZIP))
+    root = cores["root"] / "sing-box"
+    os.rename(root / "1.14.3", root / f"1.14.3{engines.OLD_MARK}deadbeef")
+    assert engines.installed("sing-box", "1.14.3") == "1.14.3"
+    assert engines.versions("sing-box") == ["1.14.3"] and not list(root.glob(f"*{engines.OLD_MARK}*"))
+    engines.prune("sing-box", {"1.14.3"})
+    assert engines.installed("sing-box") == "1.14.3", "уборка не удаляет единственную копию"
+
+
+def test_listing_versions_does_not_block_install(cores, monkeypatch):
+    """Уборка прерванной установки (её зовут versions() и installed() — снимок страницы, тикер) не держит
+    блокировку установки: install() рядом с ней не отвечает ложным «уже устанавливается»."""
+    root = cores["root"] / "sing-box"
+    (root / "1.14.3").mkdir(parents=True)
+    entered, release = threading.Event(), threading.Event()
+    real_iterdir = Path.iterdir
+
+    def slow_iterdir(self):
+        if self == root and threading.current_thread().name == "lister":
+            entered.set()
+            release.wait(5)                  # антивирус или медленный диск: чтение папки занимает время
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", slow_iterdir)
+    lister = threading.Thread(target=engines.versions, args=("sing-box",), name="lister")
+    lister.start()
+    assert entered.wait(5)
+    calls: list[str] = []
+    real_download = serve(SINGBOX_ZIP, calls)
+
+    def download(*args, **kwargs):
+        release.set()                        # установка уже идёт, пока уборка читает папку, — дальше вместе
+        return real_download(*args, **kwargs)
+
+    try:
+        assert engines.install("sing-box", download=download) == "1.14.3"
+    finally:
+        release.set()
+        lister.join(5)
+    assert calls and engines.installed("sing-box") == "1.14.3"
+
+
+def test_recovery_waits_for_swap_in_progress(cores, monkeypatch):
+    """Переустановка той же версии: между двумя переименованиями папки версии нет, а прежняя лежит как
+    .old-*. Уборка в этот миг ждёт конца замены — иначе вернула бы прежнюю на место, и новая не встала бы."""
+    engines.install("sing-box", download=serve(SINGBOX_ZIP))
+    root = cores["root"] / "sing-box"
+    real_rename = os.rename
+    recovered = threading.Event()
+    lister: list[threading.Thread] = []
+
+    def rename(src, dst):
+        real_rename(src, dst)
+        if engines.OLD_MARK in Path(dst).name and not lister:     # прежняя ушла в сторону, новой ещё нет
+            thread = threading.Thread(target=lambda: (engines._recover_interrupted("sing-box"), recovered.set()))
+            lister.append(thread)
+            thread.start()
+            assert not recovered.wait(0.3), "уборка не должна вмешаться посреди замены"
+
+    monkeypatch.setattr(engines.os, "rename", rename)
+    engines.install("sing-box", download=serve(SINGBOX_ZIP))
+    lister[0].join(5)
+    assert recovered.is_set() and [p.name for p in root.iterdir()] == ["1.14.3"]
+    assert engines.verify("sing-box", "1.14.3")
+
+
 def test_core_that_does_not_answer_version_is_rejected(cores):
     cores["runner"].versions["sing-box.exe"] = None
-    with pytest.raises(engines.ReleaseRejected, match="не сообщил версию"):
+    with pytest.raises(engines.ReleaseRejected, match=r"Ядро VPN \(sing-box\) не сообщило версию"):
         engines.install("sing-box", download=serve(SINGBOX_ZIP))
+
+
+def test_messages_agree_with_core_title(cores):
+    """«Ядро VPN» — средний род, «Помощник Xray» — мужской: «не установлено» / «не установлен»."""
+    with pytest.raises(engines.EngineError, match=r"^Ядро VPN \(sing-box\) 1\.14\.3 не установлено$"):
+        engines.verify("sing-box", "1.14.3")
+    with pytest.raises(engines.EngineError, match=r"^Помощник Xray не установлен$"):
+        engines.verify("xray")
+    assert engines.spec("sing-box").agree("запущен") == "запущено"
+    assert engines.spec("xray").agree("запущен") == "запущен"
 
 
 def test_broken_zip_is_rejected(cores, monkeypatch):
@@ -397,7 +496,7 @@ def test_release_for_checks_digest_place_and_asset():
 CORES_SRC = Path(os.environ.get("LAZEYKA_CORES_DIR") or ROOT / "vendor" / "cores")
 
 
-@pytest.mark.skipif(os.environ.get("LAZEYKA_CORE_CHECK") != "1", reason="только с LAZEYKA_CORE_CHECK=1")
+@pytest.mark.core_check
 @pytest.mark.parametrize("name", ["sing-box", "xray"])
 def test_real_core_installs_and_answers_statically(name, tmp_path, monkeypatch, core_static):
     """Настоящий zip (кэш vendor/cores вместо GitHub): сверка хешей, распаковка, `version` и `check` —
@@ -413,7 +512,7 @@ def test_real_core_installs_and_answers_statically(name, tmp_path, monkeypatch, 
     def from_cache(url, dest, sha256, *, cancel=None, progress=None):
         assert url == spec.release_url()
         shutil.copyfile(src, dest)
-        return engines.sha256_file(dest)
+        return sha256_file(dest)
 
     assert engines.install(name, download=from_cache) == spec.version
     assert engines.version(name) == spec.version

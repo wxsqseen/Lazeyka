@@ -532,14 +532,17 @@ def _decode_text(text: str, sub_id: str | None, *, nested: bool) -> tuple[Decode
     return Decoded("links", servers=parsed.servers, errors=parsed.errors, route_lines=parsed.route_lines), parsed.meta
 
 
-def _is_stub(server: Server) -> bool:
-    """Заглушка провайдера: «серверы» на 0.0.0.0, 127.x, ::1 или с портом ≤ 1 — это текст, а не сервер."""
+def _is_stub(server: Server, keep_local: bool = False) -> bool:
+    """Заглушка провайдера: «серверы» на 0.0.0.0, 127.x, ::1 или с портом ≤ 1 — это текст, а не сервер.
+    keep_local — ссылки, вставленные человеком: 127.x и localhost там настоящие (свой прокси на ПК)."""
     host = server.host
-    return host in ("0.0.0.0", "::", "::1", "localhost") or host.startswith("127.") or server.port <= 1
+    if host in ("0.0.0.0", "::") or server.port <= 1:
+        return True
+    return not keep_local and (host in ("::1", "localhost") or host.startswith("127."))
 
 
-def _split_stubs(decoded: Decoded) -> None:
-    stubs = [s for s in decoded.servers if _is_stub(s)]
+def _split_stubs(decoded: Decoded, keep_local: bool = False) -> None:
+    stubs = [s for s in decoded.servers if _is_stub(s, keep_local)]
     if not stubs:
         return
     decoded.notices = [s.name or f"{s.host}:{s.port}" for s in stubs]
@@ -552,9 +555,11 @@ def _split_stubs(decoded: Decoded) -> None:
     decoded.groups = [g for g in decoded.groups if g.members]
 
 
-def decode(body: bytes, headers: Mapping[str, str] | None = None, *, sub_id: str | None = None) -> Decoded:
+def decode(body: bytes, headers: Mapping[str, str] | None = None, *, sub_id: str | None = None,
+           keep_local: bool = False) -> Decoded:
     """Тело и заголовки подписки (или текст из поля импорта) → Decoded. Целиком негодное тело —
-    SubscriptionError (empty, html, format, too_big); незнакомые строки — в errors, не в отказ."""
+    SubscriptionError (empty, html, format, too_big); незнакомые строки — в errors, не в отказ.
+    keep_local — текст вставил человек: серверы на 127.x и localhost не считаются заглушками."""
     if not body or not body.strip():
         raise SubscriptionError("empty", "Провайдер прислал пустой ответ — серверов нет")
     if len(body) > MAX_BODY:
@@ -567,7 +572,7 @@ def decode(body: bytes, headers: Mapping[str, str] | None = None, *, sub_id: str
         raise SubscriptionError("empty", "Провайдер прислал пустой ответ — серверов нет")
     decoded, body_meta = _decode_text(text, sub_id, nested=False)
     decoded.meta = sub_meta(headers or {}, body_meta)
-    _split_stubs(decoded)
+    _split_stubs(decoded, keep_local)
     for server in decoded.servers:
         server.sub = sub_id
     return decoded

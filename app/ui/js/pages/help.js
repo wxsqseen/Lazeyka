@@ -42,7 +42,8 @@
     const sections = Lz.helpSections;
     const header = ui.pageHeader({
       title: 'Помощь',
-      subtitle: 'Что-то не открывается? Выберите, что именно, — проверим и подскажем, как починить.',
+      /* «Выберите, что не работает…» — подсказка в карточке признаков; здесь — что есть на странице. */
+      subtitle: 'Подсказки по признакам, проверка DNS и компьютера, отчёт для помощи человека.',
     });
     const symptoms = sections.createSymptoms({ initial: Lz.params.get('symptom') });
     const all = [symptoms, sections.createDns(), createReport(), sections.createDiagnostics()];

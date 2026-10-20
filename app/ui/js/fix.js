@@ -9,6 +9,9 @@
   const texts = Lz.texts;
 
   const FIX_KEY = 'zapret_fix';
+  const POWER_KEY = Lz.actions.POWER_KEY.zapret;
+  /* Кнопки «Найти и включить» заняты и своим ключом, и ключом включения обхода (кнопка питания, плашки). */
+  const BUSY_KEYS = [FIX_KEY, POWER_KEY];
   const REVERT_KEY = 'zapret_fix_revert';
   const FINISHED_STAGES = new Set(['done', 'failed']);
   const RUNNING_LIKE = new Set(['running', 'starting']);
@@ -19,15 +22,26 @@
     return (zapret && zapret.fix) || {};
   }
 
-  /** «Найти и включить» включает выключенный обход — тогда сначала окно «Работает VPN», если нужно. */
-  async function start() {
-    const state = Lz.store.state;
-    const status = state && state.zapret ? state.zapret.status : 'stopped';
-    if (!RUNNING_LIKE.has(status)) {
-      const gate = await Lz.vpnGate.confirmStart('zapret');
-      if (!gate.proceed) return null;
-    }
-    return Lz.api.run({ method: 'zapret_fix', key: FIX_KEY });
+  function callFix() {
+    return Lz.api.run({ method: 'zapret_fix', key: `${FIX_KEY}:call` });
+  }
+
+  /**
+   * «Найти и включить» включает выключенный обход — тогда сначала окно «Работает VPN», если нужно. Это то же
+   * включение, что у кнопки питания, поэтому оно держит и её ключ: «Включить» и «Найти и включить» подряд дают одно
+   * окно и один старт. Кнопка занята с нажатия до ответа ядра: двойное нажатие второго подбора не даст.
+   */
+  function start() {
+    return Lz.api.hold(FIX_KEY, async () => {
+      const state = Lz.store.state;
+      const status = state && state.zapret ? state.zapret.status : 'stopped';
+      if (RUNNING_LIKE.has(status)) return callFix();
+      return Lz.api.hold(POWER_KEY, async () => {
+        const gate = await Lz.vpnGate.confirmStart('zapret');
+        if (!gate.proceed) return null;
+        return callFix();
+      });
+    });
   }
 
   function revert() {
@@ -55,7 +69,7 @@
       icon: 'sparkle',
       kind: 'primary',
       size: options.size,
-      busyKey: FIX_KEY,
+      busyKey: BUSY_KEYS,
       title: 'Проверит Discord и YouTube и, если они не открываются, подберёт и включит рабочую стратегию',
       onClick: () => start(),
     });
@@ -169,5 +183,5 @@
     })));
   }
 
-  Lz.fix = { start, revert, flags, button, isLatest, view, render, checkChips, checkedLine };
+  Lz.fix = { FIX_KEY, BUSY_KEYS, start, revert, flags, button, isLatest, view, render, checkChips, checkedLine };
 })(window.Lz);

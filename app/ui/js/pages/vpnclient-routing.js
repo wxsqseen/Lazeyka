@@ -331,7 +331,7 @@
     if (active) {
       const summary = profile.summary || {};
       const confirmed = await ui.confirm({
-        title: `Включить профиль «${profile.name}»?`,
+        title: `Включить профиль ${fmt.quote(profile.name)}?`,
         text: `Правила профиля: ${summaryText(summary)}. Свои правила Лазейки — программы, сайты и «через обход» — останутся важнее.`,
         details: summary.block ? 'Профиль блокирует часть адресов — эти сайты перестанут открываться, пока он включён.' : null,
         confirmLabel: 'Включить профиль',
@@ -350,7 +350,7 @@
 
   async function removeProfile(profile) {
     const confirmed = await ui.confirm({
-      title: `Удалить профиль «${profile.name}»?`,
+      title: `Удалить профиль ${fmt.quote(profile.name)}?`,
       text: 'Его правила перестанут действовать. Профиль из подписки вернётся при её обновлении.',
       confirmLabel: 'Удалить',
       tone: 'danger',
@@ -364,7 +364,7 @@
     return h('ul', { class: 'vc-profiles' }, data.items.map((profile) => {
       const sw = ui.switchControl({
         checked: Boolean(profile.active),
-        label: `Профиль «${profile.name}»`,
+        label: `Профиль ${fmt.quote(profile.name)}`,
         onChange: (on) => setProfile(profile, on),
       });
       sw.el.dataset.fk = `profile:${profile.id}`;
@@ -372,7 +372,7 @@
         icon: 'trash',
         kind: 'ghost',
         size: 'sm',
-        ariaLabel: `Удалить профиль «${profile.name}»`,
+        ariaLabel: `Удалить профиль ${fmt.quote(profile.name)}`,
         title: 'Удалить',
         onClick: () => removeProfile(profile),
       });
@@ -550,7 +550,7 @@
 
     const card = ui.card({
       title: 'Маршруты',
-      subtitle: 'Что идёт через ваш сервер, а что — напрямую или через обход Лазейки. Меняется на лету, без переподключения.',
+      subtitle: 'Что идёт через ваш сервер, а что — напрямую или через обход Лазейки. Применяется сразу; включённый VPN переподключится на пару секунд.',
     });
     card.body.append(
       presets.el,
@@ -581,7 +581,7 @@
         const routing = snap.routing;
         presets.set(routing.preset || 'all');
         const active = (snap.profiles || []).find((profile) => profile && profile.active);
-        const presetText = active ? `Сейчас включён профиль «${String(active.name || 'провайдера')}» — пресет не действует: `
+        const presetText = active ? `Сейчас включён профиль ${fmt.quote(String(active.name || 'провайдера'))} — пресет не действует: `
           + 'сайты идут по правилам профиля. Выключите профиль ниже, чтобы вернуть пресет.' : '';
         setText(presetNote, presetText);
         setHidden(presetNote, !presetText);

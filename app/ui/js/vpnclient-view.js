@@ -1,6 +1,6 @@
 'use strict';
 /*
- * Свой VPN: общие кусочки для страницы «VPN», карточки на главной и «Помощи» —
+ * Свой VPN: общие кусочки для страницы «Свой VPN», карточки на главной и «Помощи» —
  * флаг страны, задержка цветом, трафик и срок подписки.
  * Все строки из ядра идут только в текст.
  */
@@ -63,10 +63,23 @@
     return h('span', { class: ['vc-flag', 'vc-flag--emoji', options.cls], role: 'img', 'aria-label': name, title: name, text: flagEmoji(value) });
   }
 
-  /** Задержка: { tone: ok | warn | err | off, text, title }. */
+  /** Подсказка причины в три строки: почему, чья сторона, что сделать. */
+  function reasonTitle(why) {
+    return [`Почему: ${why.text}`, `Чья сторона: ${why.sideLabel}`, why.advice ? `Что сделать: ${why.advice}` : '']
+      .filter(Boolean).join('\n');
+  }
+
+  /**
+   * Задержка: { tone: ok | warn | err | off, text, title, why }. У «нет ответа» why — причина
+   * (texts.vpncReason): чья сторона и что сделать; сервер, который kill switch не дал проверить, — «не проверено».
+   */
   function latencyView(latency) {
     const source = latency || {};
-    if (source.error) return { tone: 'err', text: 'нет ответа', title: String(source.error) };
+    if (source.error) {
+      const why = texts.vpncReason(source.reason);
+      if (why && why.code === 'killswitch') return { tone: 'off', text: 'не проверено', title: reasonTitle(why), why };
+      return { tone: 'err', text: 'нет ответа', title: why ? reasonTitle(why) : String(source.error), why };
+    }
     const ms = Number(source.ms);
     if (source.ms == null || !Number.isFinite(ms) || ms <= 0) return { tone: 'off', text: '—', title: 'Задержку ещё не проверяли' };
     let tone = 'err';
@@ -79,6 +92,30 @@
   function latencyEl(latency, cls) {
     const view = latencyView(latency);
     return h('span', { class: ['vc-latency', `is-${view.tone}`, cls, 'num'], title: view.title, text: view.text });
+  }
+
+  /**
+   * Причина «нет ответа» строкой сервера: метка стороны («у интернет-провайдера») и коротко почему
+   * («режет UDP»); полный текст и что сделать — во всплывающей подсказке. Нет причины — null.
+   */
+  function reasonEl(latency, cls) {
+    const view = latencyView(latency);
+    if (!view.why) return null;
+    return h('span', { class: ['vc-why', `is-${view.why.side}`, cls], title: reasonTitle(view.why) },
+      h('span', { class: 'vc-why__side', text: view.why.sideLabel }),
+      h('span', { class: 'vc-why__text', text: view.why.short }));
+  }
+
+  /**
+   * Причина отказа списком «Почему», «Чья сторона», «Что сделать» (why — texts.vpncReason) — для «Помощи»;
+   * карточка «Подключение» строит такой же список сама и обновляет его на месте.
+   */
+  function reasonList(why) {
+    const row = (term, value) => h('div', { class: 'vc-scene__why-row' }, h('dt', { text: term }), h('dd', null, value));
+    return h('dl', { class: 'vc-scene__why', dataset: { side: why.side } },
+      row('Почему', why.text),
+      row('Чья сторона', h('span', { class: 'vc-why__side', text: why.sideLabel })),
+      why.advice ? row('Что сделать', why.advice) : null);
   }
 
   /** Скорость теста: «87,4 Мбит/с». */
@@ -169,6 +206,48 @@
       view.group ? h('span', { class: 'vc-selected__group', text: `· ${view.group}` }) : null);
   }
 
+  /*
+   * Сколько серверов ядро кладёт в конфиг подключения (manager.MAX_CONFIG_SERVERS): их адреса исключаются из
+   * перехвата обходом, а у него свой предел.
+   */
+  const MAX_CONFIG_SERVERS = 16;
+
+  /**
+   * id серверов работающего конфига. Ядро отдаёт их само (vpnclient.config_servers — из session.plan.servers): так
+   * верно и после переключения внутри подписки больше 16 серверов, и когда конфиг собран только из выбранного.
+   * Ядро прежней версии поля не знает — тогда по тому же правилу, что manager._selection: выбранный сервер (у
+   * «Самого быстрого» — поддерживаемые серверы группы по порядку списка, до 16), затем остальные поддерживаемые
+   * серверы той же подписки по порядку списка, всего не больше 16. null — ничего не выбрано.
+   */
+  function configServerIds(vc) {
+    if (vc && Array.isArray(vc.config_servers)) return new Set(vc.config_servers.map(String));
+    const selected = vc && vc.selected;
+    if (!selected || !selected.id) return null;
+    const id = String(selected.id);
+    const servers = Array.isArray(vc.servers) ? vc.servers : [];
+    const supported = servers.filter((server) => server.supported !== false);
+    const subOf = (item) => (item.sub == null ? null : String(item.sub));
+    let primary;
+    let sub;
+    if (id.startsWith('auto:')) {
+      const target = id.slice('auto:'.length);
+      const group = (Array.isArray(vc.groups) ? vc.groups : []).find((item) => String(item.id) === target);
+      const members = new Set(group
+        ? (Array.isArray(group.members) ? group.members : []).map(String)
+        : servers.filter((server) => subOf(server) === target).map((server) => String(server.id)));
+      primary = supported.filter((server) => members.has(String(server.id))).slice(0, MAX_CONFIG_SERVERS);
+      sub = group ? subOf(group) : target;
+    } else {
+      const first = servers.find((server) => String(server.id) === id);
+      if (!first) return null;
+      primary = [first];
+      sub = subOf(first);
+    }
+    const chosen = new Set(primary.map((server) => String(server.id)));
+    const rest = supported.filter((server) => subOf(server) === sub && !chosen.has(String(server.id)));
+    return new Set(primary.concat(rest).slice(0, MAX_CONFIG_SERVERS).map((server) => String(server.id)));
+  }
+
   /** Сумма трафика «↓ 393 МБ ↑ 17,9 МБ». */
   function trafficPair(down, up) {
     return `↓${fmt.NBSP}${fmt.bytes(down || 0)}  ↑${fmt.NBSP}${fmt.bytes(up || 0)}`;
@@ -179,11 +258,15 @@
     flag,
     latencyView,
     latencyEl,
+    reasonEl,
+    reasonTitle,
+    reasonList,
     speedText,
     mbps,
     usage,
     selectedView,
     selectedLine,
+    configServerIds,
     trafficPair,
   };
 })(window.Lz);

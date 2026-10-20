@@ -9,6 +9,14 @@
 
   const PORT_MAX = 65535;
   const SECRET_PATTERN = /^[0-9a-f]{32}$/i;
+  /* Ключ из карточки «Подключение» и из ссылки tg://proxy — с приставкой dd (или ee): в поле — без неё. */
+  const PREFIXED_SECRET = /^(?:dd|ee)([0-9a-f]{32})/i;
+  const SECRET_INPUT_MAX = 128;
+  /* Те же границы, что у ядра (tgproxy/manager.py): пул 0–32 соединений, буфер 4–4096 КБ. */
+  const POOL_MIN = 0;
+  const POOL_MAX = 32;
+  const BUF_MIN = 4;
+  const BUF_MAX = 4096;
   const DC_LINE_PATTERN = /^\d+:\S+$/;
   const DOMAIN_PATTERN = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
   const INTEGER_PATTERN = /^\d+$/;
@@ -68,8 +76,12 @@
     const badWorker = values.worker_enabled ? values.worker_domains.find((d) => !DOMAIN_PATTERN.test(d)) : null;
     if (badWorker) errors.worker_domains = `«${badWorker}» не похоже на домен`;
     if (values.worker_enabled && !values.worker_domains.length) errors.worker_domains = 'Укажите домен воркера, например name.workers.dev';
-    if (!Number.isInteger(values.pool_size) || values.pool_size < 1) errors.pool_size = 'Целое число больше нуля';
-    if (!Number.isInteger(values.buf_kb) || values.buf_kb < 1) errors.buf_kb = 'Целое число больше нуля';
+    if (!Number.isInteger(values.pool_size) || values.pool_size < POOL_MIN || values.pool_size > POOL_MAX) {
+      errors.pool_size = `Целое число от ${POOL_MIN} до ${POOL_MAX}`;
+    }
+    if (!Number.isInteger(values.buf_kb) || values.buf_kb < BUF_MIN || values.buf_kb > BUF_MAX) {
+      errors.buf_kb = `Целое число от ${BUF_MIN} до ${BUF_MAX}`;
+    }
     return errors;
   }
 
@@ -86,7 +98,16 @@
 
     function onTextInput(key, value) {
       if (!draft) return;
-      draft[key] = value;
+      let text = value;
+      if (key === 'secret') {
+        /* Вставили ключ из карточки или ссылки (dd + 32 символа) — оставляем сам ключ, а не обрезаем хвост. */
+        const match = PREFIXED_SECRET.exec(String(value).trim());
+        if (match) {
+          text = match[1];
+          inputs.secret.value = text;
+        }
+      }
+      draft[key] = text;
       fields[key].setError(null);
       refresh();
     }
@@ -147,7 +168,13 @@
     const connection = h('div', { class: 'form-grid form-grid--3' },
       textField('host', 'Адрес', { mono: true, placeholder: '127.0.0.1', hint: 'Обычно 127.0.0.1 — только этот компьютер.' }),
       textField('port', 'Порт', { mono: true, placeholder: '1443', inputMode: 'numeric', maxLength: 5 }),
-      textField('secret', 'Ключ (secret)', { mono: true, maxLength: 32, addon: secretToggle.el, cls: 'field--secret' }));
+      textField('secret', 'Ключ (secret)', {
+        mono: true,
+        maxLength: SECRET_INPUT_MAX,
+        addon: secretToggle.el,
+        cls: 'field--secret',
+        hint: '32 символа: цифры и буквы a–f. В Telegram он вводится с приставкой dd — вставленный с ней ключ Лазейка примет без неё.',
+      }));
     const regenRow = h('div', { class: 'regen' },
       icon('alert', { size: 16, cls: 'regen__icon' }),
       h('p', { class: 'regen__text', text: 'Новый ключ отключит Telegram от прокси до повторного подключения.' }),
@@ -178,8 +205,8 @@
 
     const advancedContent = h('div', { class: 'advanced' },
       h('div', { class: 'form-grid form-grid--2' },
-        textField('pool_size', 'Размер пула соединений', { mono: true, inputMode: 'numeric', maxLength: 3, hint: 'Сколько соединений держать заранее. По умолчанию 4.' }),
-        textField('buf_kb', 'Буфер, КБ', { mono: true, inputMode: 'numeric', maxLength: 5, hint: 'По умолчанию 256.' })),
+        textField('pool_size', 'Размер пула соединений', { mono: true, inputMode: 'numeric', maxLength: 2, hint: 'Сколько соединений держать заранее: от 0 до 32. По умолчанию 4.' }),
+        textField('buf_kb', 'Буфер, КБ', { mono: true, inputMode: 'numeric', maxLength: 4, hint: 'От 4 до 4096. По умолчанию 256.' })),
       flagRow('no_secure', 'Отключить защищённый режим', 'Только для отладки: прокси примет клиентов без проверки ключа.'),
       flagRow('verbose', 'Подробный журнал', 'Пишет в журнал каждую операцию — пригодится для отчёта об ошибке.'));
     const advanced = ui.disclosure({ title: 'Дополнительно', content: advancedContent });

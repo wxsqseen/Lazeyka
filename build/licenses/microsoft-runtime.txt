@@ -1,0 +1,5 @@
+Microsoft Visual C++ Runtime и Universal C Runtime (VCRUNTIME140.dll, VCRUNTIME140_1.dll, MSVCP140.dll,
+ucrtbase.dll, api-ms-win-*.dll) — распространяемый код Microsoft (Microsoft Distributable Code),
+© Microsoft Corporation. В exe лежат без изменений; распространяются на условиях Microsoft для
+распространяемого кода — они пересказаны в разделе «Additional Conditions for this Windows binary build»
+лицензии CPython (licenses/cpython/LICENSE.txt).

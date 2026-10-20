@@ -47,8 +47,10 @@ def _process_running(name: str) -> bool:
     return False
 
 
-def run_all(pack_dir: Path | None, zapret_running: bool, own=None) -> list[dict]:
-    """own — снимок своего VPN Лазейки (vpn.OwnVpn): его адаптер и прокси — не чужие."""
+def run_all(pack_dir: Path | None, zapret_running: bool, own=None, compat: bool | None = None,
+            overrides: dict | None = None) -> list[dict]:
+    """own — снимок своего VPN Лазейки (vpn.OwnVpn): его адаптер и прокси — не чужие. compat — включена ли
+    «Совместимость с VPN» (None — неизвестно), overrides — поправки человека к адаптерам."""
     items: list[dict] = []
     services = winutil.service_list()
     names = [(n, d, s) for n, d, s in services]
@@ -89,6 +91,11 @@ def run_all(pack_dir: Path | None, zapret_running: bool, own=None) -> list[dict]
     ts = netcfg.tcp_timestamps_enabled()
     if ts is True:
         items.append(_item("tcp_ts", "TCP timestamps", "ok", "Включены"))
+    elif ts is None:
+        # netsh не ответил или ответил непонятно — «выключены» было бы выдумкой.
+        items.append(_item("tcp_ts", "TCP timestamps", "info",
+                           "Не удалось узнать, включены ли они. Часть стратегий (fooling=ts) без них не работает — "
+                           "можно включить на всякий случай.", ("tcp_timestamps", "Включить")))
     else:
         items.append(_item("tcp_ts", "TCP timestamps", "warn",
                            "Выключены — часть стратегий (fooling=ts) без них не работает.",
@@ -116,7 +123,7 @@ def run_all(pack_dir: Path | None, zapret_running: bool, own=None) -> list[dict]
 
     # VPN — по адаптерам и системному прокси: по именам служб не угадать (Radmin VPN — не VPN в
     # интернет, а у Incy и Happ слова «VPN» в названии нет). Только сообщаем.
-    items.append(_vpn_item(own))
+    items.append(_vpn_item(own, compat, overrides))
 
     # Безопасный DNS
     if doh_configured():
@@ -177,27 +184,48 @@ def run_all(pack_dir: Path | None, zapret_running: bool, own=None) -> list[dict]
     return items
 
 
-def _vpn_item(own=None) -> dict:
+def _vpn_item(own=None, compat: bool | None = None, overrides: dict | None = None) -> dict:
     from .. import vpn
     try:
-        snap = vpn.scan(own=own)
+        snap = vpn.scan(overrides, own=own)
     except Exception:  # noqa: BLE001
         log.debug("VPN не проверен", exc_info=True)
         return _item("vpn", "VPN", "info", "Не удалось проверить сетевые адаптеры.")
+    return _item("vpn", "VPN", *vpn_verdict(snap, compat))
+
+
+def vpn_verdict(snap, compat: bool | None) -> tuple[str, str]:
+    """(уровень, текст) пункта «VPN»: что обход делает с ним при нынешней «Совместимости с VPN». Выключена —
+    обход перехватывает и туннели, и виртуальные сети (Radmin VPN), так что «не трогает» было бы неправдой."""
     if snap.foreign_active:
-        how = ("через системный прокси" if not snap.foreign_internet else
-               "весь трафик" if snap.full_tunnel else "часть трафика")
-        return _item("vpn", "VPN", "info",
-                     f"Работает {snap.foreign_label} ({how}). При включённой «Совместимости с VPN» обход его не "
-                     "трогает; что куда идёт — на странице «Обход».")
+        if compat is False:
+            effect = " «Совместимость с VPN» выключена — обход может мешать VPN."
+        elif not snap.foreign_internet:
+            effect = (" Соединение VPN с сервером обход не трогает." if compat and snap.foreign_servers else
+                      " Сервер VPN определить не удалось — обход может задевать соединение с ним." if compat else "")
+        else:
+            effect = (" «Совместимость с VPN» включена — обход не трогает его туннель." if compat else
+                      " При включённой «Совместимости с VPN» обход его туннель не трогает.")
+        if snap.foreign_internet:
+            how = "весь трафик" if snap.full_tunnel else "часть трафика"
+            head = f"Работает {snap.foreign_label} ({how})."
+        else:
+            head = (f"Работает {snap.foreign_label} через системный прокси: браузер и программы, которые его "
+                    "слушают, идут через VPN.")
+        return "info", head + effect + " Что куда идёт — на странице «Обход»."
     if snap.own_active:
-        return _item("vpn", "VPN", "ok", "Работает свой VPN Лазейки — обход не трогает ни его туннель, ни "
-                                         "соединение с сервером.")
+        return "ok", "Работает свой VPN Лазейки — обход не трогает ни его туннель, ни соединение с сервером."
     lan = [a.app or a.name for a in snap.tunnels if a.role == "lan"]
     if lan:
-        return _item("vpn", "VPN", "ok", f"VPN в интернет не работает. Виртуальные сети ({', '.join(lan[:3])}) "
-                                         "обход не трогает.")
-    return _item("vpn", "VPN", "ok", "VPN не обнаружен")
+        names = ", ".join(lan[:3])
+        if compat is False:
+            return "info", (f"VPN в интернет не работает. Виртуальные сети ({names}) обход перехватывает, пока "
+                            "«Совместимость с VPN» выключена.")
+        if compat:
+            return "ok", f"VPN в интернет не работает. Виртуальные сети ({names}) обход не трогает."
+        return "ok", (f"VPN в интернет не работает. Виртуальные сети ({names}) обход не трогает при включённой "
+                      "«Совместимости с VPN».")
+    return "ok", "VPN не обнаружен"
 
 
 def doh_configured() -> bool:

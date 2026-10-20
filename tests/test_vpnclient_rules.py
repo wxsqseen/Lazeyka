@@ -12,7 +12,8 @@ from pathlib import Path
 import pytest
 
 from app.vpnclient import rules as rules_mod
-from app.vpnclient.rules import RulesManager, git_blob_sha1, source_for
+from app.updates.github import git_blob_sha1
+from app.vpnclient.rules import RulesManager, source_for
 
 RU = "geosite-category-ru"
 REFILTER = "refilter-domains"
@@ -103,11 +104,6 @@ def test_git_blob_verified_and_installed(manager, net):
     assert manager.missing([RU, "geoip-ru"]) == ["geoip-ru"]
 
 
-def test_git_blob_sha1_matches_git():
-    assert git_blob_sha1(b"") == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"     # `git hash-object /dev/null`
-    assert git_blob_sha1(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
-
-
 def test_digest_verified(manager, net):
     data = srs(3, b"refilter")
     release_source(net, REFILTER, data)
@@ -135,7 +131,7 @@ def test_srs_header_and_version(manager, net, data, needle):
     assert not manager.path(RU).exists()
 
 
-def test_atomic_replace_keeps_previous(manager, net, monkeypatch):
+def test_atomic_replace(manager, net, monkeypatch):
     first, second = srs(1, b"first"), srs(1, b"second")
     blob_source(net, RU, first)
     manager.update([RU])
@@ -146,9 +142,7 @@ def test_atomic_replace_keeps_previous(manager, net, monkeypatch):
     assert manager.update([RU], force=True) == {RU: "updated"}
     assert (f"{RU}.srs.tmp", f"{RU}.srs") in calls
     assert manager.path(RU).read_bytes() == second
-    assert (manager.dir / f"{RU}.srs.prev").read_bytes() == first
-    assert not list(manager.dir.glob("*.tmp"))
-    assert manager.rollback(RU) is True and manager.path(RU).read_bytes() == first
+    assert sorted(p.name for p in manager.dir.iterdir()) == [f"{RU}.srs", "rules.json"], "ни .tmp, ни лишних копий"
 
 
 def test_unchanged_and_fresh(manager, net):

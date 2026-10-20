@@ -28,12 +28,35 @@
     }
   }
 
-  /* Включение — через те же окна, что и большие кнопки («Работает VPN», «Уже работает другой VPN»). */
+  /*
+   * Включение — через те же окна, что и большие кнопки («Работает VPN», «Уже работает другой VPN»), и под теми же
+   * ключами: кнопка плашки занята, пока идёт включение с любой кнопки, и второго окна не откроет.
+   */
   const GATED = {
-    zapret_start: () => Lz.actions.startZapret(),
-    tg_start: () => Lz.actions.startTelegram(),
-    vpnclient_start: () => Lz.vpnclientGate.start(),
+    zapret_start: { run: () => Lz.actions.startZapret(), key: () => Lz.actions.POWER_KEY.zapret },
+    tg_start: { run: () => Lz.actions.startTelegram(), key: () => Lz.actions.POWER_KEY.tg },
+    vpnclient_start: { run: () => Lz.vpnclientGate.start(), key: () => Lz.vpnclientGate.POWER_KEY },
+    /* «Найти и включить» сторожа — та же кнопка, что на главной: один подбор, одна занятая кнопка. */
+    zapret_fix: { run: () => Lz.fix.start(), key: () => Lz.fix.BUSY_KEYS },
+    vpnclient_stop: { run: () => Lz.vpnclientGate.stop(), key: () => Lz.vpnclientGate.POWER_KEY },
   };
+  /*
+   * Те же действия, что у кнопок страниц, — под их ключами: «Переподключить» в плашке и в шапке «Своего VPN»,
+   * «Перезапустить» в плашке и в карточке Лазейки — два нажатия дают один вызов.
+   */
+  const SHARED_KEY = {
+    vpnclient_restart: 'vpnclient_restart',
+    app_restart: 'app_restart',
+  };
+
+  function actionKey(notice) {
+    const method = String(notice.action.call);
+    return Object.prototype.hasOwnProperty.call(SHARED_KEY, method) ? SHARED_KEY[method] : `notice:${notice.id}`;
+  }
+
+  function gated(method) {
+    return Object.prototype.hasOwnProperty.call(GATED, method) ? GATED[method] : null;
+  }
 
   function runAction(notice) {
     const action = notice.action || {};
@@ -44,11 +67,12 @@
     }
     if (!action.call) return;
     const method = String(action.call);
-    if (Object.prototype.hasOwnProperty.call(GATED, method)) {
-      GATED[method]();
+    const gate = gated(method);
+    if (gate) {
+      gate.run();
       return;
     }
-    Lz.api.run({ method, args: Array.isArray(action.args) ? action.args : [], key: `notice:${notice.id}` });
+    Lz.api.run({ method, args: Array.isArray(action.args) ? action.args : [], key: actionKey(notice) });
   }
 
   /**
@@ -73,11 +97,12 @@
     function noticeEl(notice) {
       const tone = TONE[notice.level] || 'info';
       const persistent = notice.persistent === true;
+      const gate = notice.action && notice.action.call ? gated(String(notice.action.call)) : null;
       const action = notice.action && notice.action.label ? ui.button({
         label: String(notice.action.label),
         kind: 'secondary',
         size: 'sm',
-        busyKey: notice.action.call ? `notice:${notice.id}` : null,
+        busyKey: gate ? gate.key() : (notice.action.call ? actionKey(notice) : null),
         onClick: () => runAction(notice),
       }) : null;
       const close = notice.dismissible ? ui.button({

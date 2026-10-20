@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
-import sys
 import threading
 import time
 from ctypes import wintypes
@@ -101,6 +101,8 @@ kernel32.SetEvent.argtypes = [wintypes.HANDLE]
 kernel32.SetEvent.restype = wintypes.BOOL
 kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 kernel32.WaitForSingleObject.restype = wintypes.DWORD
+kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+kernel32.ReleaseMutex.restype = wintypes.BOOL
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.CloseHandle.restype = wintypes.BOOL
 kernel32.LocalFree.argtypes = [ctypes.c_void_p]
@@ -108,16 +110,44 @@ kernel32.LocalFree.restype = ctypes.c_void_p
 advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
     wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.ULONG)]
 advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+advapi32.GetSecurityInfo.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+                                     ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
+                                     ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
+advapi32.GetSecurityInfo.restype = wintypes.DWORD
+advapi32.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
 
 EVENT_MODIFY_STATE = 0x0002
 WAIT_OBJECT_0 = 0
+WAIT_ABANDONED = 0x80
+SE_KERNEL_OBJECT = 6
+OWNER_SECURITY_INFORMATION = 0x1
+LISTEN_TICK_MS = 200        # как быстро слушатель «покажи окно» замечает выход
+SID_ADMINS, SID_SYSTEM = "S-1-5-32-544", "S-1-5-18"
+
+
+def _with_sddl(sddl: str, create: Callable[[object], int]) -> tuple[int, int]:
+    """Создать объект ядра с дескриптором безопасности из строки SDDL (не разобрался — с умолчанием).
+    Возвращает (описатель, код ошибки сразу после создания: ERROR_ALREADY_EXISTS и т. п.)."""
+    sd = ctypes.c_void_p()
+    attrs = None
+    if advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(sd), None):
+        attrs = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), sd, False)
+    try:
+        handle = create(ctypes.byref(attrs) if attrs else None)
+        return handle, ctypes.get_last_error()
+    finally:
+        if sd:
+            kernel32.LocalFree(sd)
 
 
 class SingleInstance:
-    """Мьютекс «уже запущено» и событие «покажи окно».
+    """Мьютекс «уже запущено» (на сеанс Windows) и событие «покажи окно».
 
-    Событие создаётся с низкой меткой целостности: обычный процесс должен суметь
-    разбудить уже работающий экземпляр с правами администратора.
+    Событие создаётся сразу, как только мьютекс наш, — второй запуск во время долгого старта
+    показывает окно, а не теряется. На выходе событие закрывается: второй запуск видит, что прежний
+    экземпляр уходит, и ждёт его, а не молча завершается. Низкая метка целостности: обычный процесс
+    должен суметь разбудить уже работающий экземпляр с правами администратора.
     """
 
     def __init__(self, name: str):
@@ -126,6 +156,7 @@ class SingleInstance:
         self.already_running = False
         self._event = None
         self._stop = False
+        self._listening = False
         self._try_acquire()
 
     def _try_acquire(self) -> None:
@@ -134,9 +165,19 @@ class SingleInstance:
         self._mutex = kernel32.CreateMutexW(None, False, f"Local\\{self.name}.Instance")
         err = ctypes.get_last_error()
         self.already_running = (not self._mutex and err == ERROR_ACCESS_DENIED) or err == ERROR_ALREADY_EXISTS
+        if not self.already_running:
+            self._create_event()
+
+    def _create_event(self) -> None:
+        if self._event:
+            return
+        self._event, err = _with_sddl("D:(A;;0x1F0003;;;WD)S:(ML;;NW;;;LW)", lambda attrs: kernel32.CreateEventW(
+            attrs, False, False, f"Local\\{self.name}.Show"))
+        if not self._event:
+            log.warning("Событие показа окна не создано: WinError %d", err)
 
     def wait_for_previous(self, timeout: float) -> bool:
-        """Ждёт, пока прежний экземпляр завершится (перезапуск с правами администратора)."""
+        """Ждёт, пока прежний экземпляр завершится (перезапуск с правами, запуск сразу после «Выхода»)."""
         deadline = time.monotonic() + timeout
         while self.already_running and time.monotonic() < deadline:
             time.sleep(0.25)
@@ -144,6 +185,7 @@ class SingleInstance:
         return not self.already_running
 
     def signal_existing(self) -> bool:
+        """Показать окно работающего экземпляра. False — он уже закрывается (или ещё не открыл канал)."""
         handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, f"Local\\{self.name}.Show")
         if not handle:
             return False
@@ -153,31 +195,138 @@ class SingleInstance:
             kernel32.CloseHandle(handle)
 
     def listen(self, on_show: Callable[[], None]) -> None:
-        sd = ctypes.c_void_p()
-        sddl = "D:(A;;0x1F0003;;;WD)S:(ML;;NW;;;LW)"
-        attrs = None
-        if advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(sd), None):
-            attrs = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), sd, False)
-        self._event = kernel32.CreateEventW(ctypes.byref(attrs) if attrs else None, False, False,
-                                            f"Local\\{self.name}.Show")
-        if sd:
-            kernel32.LocalFree(sd)
-        if not self._event:
-            log.warning("Событие показа окна не создано: WinError %d", ctypes.get_last_error())
+        """Сигналы «покажи окно» → on_show. Пришедший до вызова не теряется: событие уже взведено."""
+        self._create_event()
+        if not self._event or self._listening:
             return
+        self._listening = True
+        event = self._event
 
         def loop() -> None:
-            while not self._stop:
-                if kernel32.WaitForSingleObject(self._event, 500) == WAIT_OBJECT_0 and not self._stop:
-                    try:
-                        on_show()
-                    except Exception:  # noqa: BLE001
-                        log.exception("Ошибка при показе окна по сигналу второго экземпляра")
+            try:
+                while not self._stop:
+                    if kernel32.WaitForSingleObject(event, LISTEN_TICK_MS) == WAIT_OBJECT_0 and not self._stop:
+                        try:
+                            on_show()
+                        except Exception:  # noqa: BLE001
+                            log.exception("Ошибка при показе окна по сигналу второго экземпляра")
+            finally:
+                self._close_event()
 
         threading.Thread(target=loop, name="instance-listener", daemon=True).start()
 
+    def _close_event(self) -> None:
+        event, self._event = self._event, None
+        if event:
+            kernel32.CloseHandle(event)
+
     def close(self) -> None:
+        """Выход: новых сигналов не принимаем — следующий запуск подождёт, пока этот процесс завершится."""
         self._stop = True
+        if not self._listening:
+            self._close_event()
+
+
+class DataLock:
+    """Межпроцессная блокировка папки данных для Лазейки с правами администратора — одна на
+    компьютер, во всех сеансах Windows: ProgramData общая, а защита и уборка папки, установка
+    компонентов, обход и прокси не должны идти из двух процессов сразу.
+
+    Мьютекс в Global\\ с доступом только для SYSTEM, администраторов и владельца (у процесса с правами
+    владелец — «Администраторы»). Подложить его заранее обычная программа может, но остановить Лазейку
+    так нельзя: чужой мьютекс (недоступный или с владельцем не из trusted_owners) пропускается с
+    заметкой в журнал. Держит его поток, вызвавший acquire, до release или выхода процесса."""
+
+    SDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)"
+
+    def __init__(self, data_root: os.PathLike | str, *,
+                 trusted_owners: tuple[str, ...] | None = (SID_ADMINS, SID_SYSTEM)):
+        digest = hashlib.sha1(os.path.normcase(os.path.abspath(str(data_root))).encode("utf-8")).hexdigest()[:16]
+        self.name = f"Global\\Lazeyka.Data.{digest}"
+        self.trusted_owners = trusted_owners
+        self.note: str | None = None
+        self._handle = None
+
+    def acquire(self, timeout: float) -> bool:
+        """True — блокировка наша (или подложенная чужая пропущена, см. note); False — папку держит
+        другая Лазейка дольше timeout секунд."""
+        handle, err = _with_sddl(self.SDDL, lambda attrs: kernel32.CreateMutexW(attrs, False, self.name))
+        if not handle:
+            self.note = f"блокировку папки данных создал чужой процесс (WinError {err}) — работаю без неё"
+            return True
+        if err == ERROR_ALREADY_EXISTS and self.trusted_owners is not None:
+            owner = _kernel_object_owner(handle)
+            if owner not in self.trusted_owners:
+                kernel32.CloseHandle(handle)
+                self.note = f"блокировку папки данных создал не администратор ({owner}) — работаю без неё"
+                return True
+        result = kernel32.WaitForSingleObject(handle, max(0, int(timeout * 1000)))
+        if result in (WAIT_OBJECT_0, WAIT_ABANDONED):   # ABANDONED — прежний владелец завершился аварийно
+            self._handle = handle
+            return True
+        kernel32.CloseHandle(handle)
+        return False
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle:
+            kernel32.ReleaseMutex(handle)
+            kernel32.CloseHandle(handle)
+
+
+def _kernel_object_owner(handle) -> str | None:
+    owner = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    if advapi32.GetSecurityInfo(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, ctypes.byref(owner),
+                                None, None, None, ctypes.byref(descriptor)) != 0:
+        return None
+    try:
+        text = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(text)):
+            return None
+        try:
+            return text.value
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+# ------------------------------------------------------------ сон компьютера
+
+kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+kernel32.QueryUnbiasedInterruptTime.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+kernel32.QueryUnbiasedInterruptTime.restype = wintypes.BOOL
+
+
+def sleep_clock() -> tuple[float, float]:
+    """(секунды с загрузки Windows, они же без времени сна и гибернации). Разница приращений двух
+    чисел — сколько компьютер спал; перевод часов и подвисший процесс её не меняют."""
+    unbiased = ctypes.c_ulonglong()
+    kernel32.QueryUnbiasedInterruptTime(ctypes.byref(unbiased))
+    return kernel32.GetTickCount64() / 1000.0, unbiased.value / 10_000_000.0
+
+
+# ------------------------------------------------------------ учётная запись
+
+def shell_user_sid() -> str | None:
+    """Учётная запись того, кто сидит за компьютером (владелец оболочки); None — не узнать.
+    Реализация — в vpnclient/sysproxy.py (ей пользуется системный прокси)."""
+    try:
+        from .vpnclient.sysproxy import shell_user_sid as find
+    except ImportError:
+        return None
+    return find()
+
+
+def other_account() -> bool:
+    """Лазейка запущена от имени другой учётной записи, чем рабочий стол (при запуске ввели пароль
+    администратора): HKCU, %APPDATA% и задание автозапуска — той, другой записи."""
+    try:
+        from .vpnclient.sysproxy import shell_user_matches
+    except ImportError:
+        return False
+    return shell_user_matches() is False
 
 
 # ------------------------------------------------- job: дочерние процессы
@@ -628,10 +777,15 @@ def message_box(text: str, title: str, error: bool = False) -> None:
 
 # ------------------------------------------------------------ DNS
 
+def system_dll(name: str) -> ctypes.WinDLL:
+    """DLL Windows по полному пути из System32: голое имя процесс с правами администратора сначала
+    искал бы в папке exe, куда может писать обычный пользователь (exe в «Загрузках»)."""
+    return ctypes.WinDLL(system32(name))
+
+
 def flush_dns() -> bool:
     try:
-        dnsapi = ctypes.WinDLL("dnsapi")
-        return bool(dnsapi.DnsFlushResolverCache())
+        return bool(system_dll("dnsapi.dll").DnsFlushResolverCache())
     except (OSError, AttributeError):
         return False
 
@@ -662,7 +816,6 @@ ERROR_SERVICE_DOES_NOT_EXIST = 1060
 ERROR_SERVICE_NOT_ACTIVE = 1062
 ERROR_SERVICE_ALREADY_RUNNING = 1056
 ERROR_SERVICE_MARKED_FOR_DELETE = 1072
-ERROR_INSUFFICIENT_BUFFER = 122
 ERROR_MORE_DATA = 234
 
 STATE_NAMES = {1: "stopped", 2: "start_pending", 3: "stop_pending", 4: "running",
@@ -749,16 +902,18 @@ class ServiceError(OSError):
     pass
 
 
-def _err(action: str, name: str) -> ServiceError:
+def _err(action: str, name: str | None = None) -> ServiceError:
+    """Ошибка WinAPI служб для человека: «Не открыта служба «winws»: Отказано в доступе (WinError 5)»."""
     code = ctypes.get_last_error()
-    return ServiceError(code, f"{action} «{name}»: {ctypes.FormatError(code).strip()} (WinError {code})")
+    what = f"{action} «{name}»" if name else action
+    return ServiceError(code, f"{what}: {ctypes.FormatError(code).strip()} (WinError {code})")
 
 
 class _Scm:
     def __init__(self, access: int):
         self.handle = advapi32.OpenSCManagerW(None, None, access)
         if not self.handle:
-            raise _err("Не открыт диспетчер служб для", "SCM")
+            raise _err("Не открыт диспетчер служб Windows")
 
     def __enter__(self):
         return self.handle
@@ -776,12 +931,12 @@ class ServiceInfo:
     start_type: int | None = None
 
 
-def _status(handle) -> SERVICE_STATUS_PROCESS:
+def _status(handle, name: str | None = None) -> SERVICE_STATUS_PROCESS:
     status = SERVICE_STATUS_PROCESS()
     needed = wintypes.DWORD()
     if not advapi32.QueryServiceStatusEx(handle, 0, ctypes.byref(status), ctypes.sizeof(status),
                                          ctypes.byref(needed)):
-        raise _err("Не получено состояние службы", "?")
+        raise _err("Не получено состояние службы", name)
     return status
 
 
@@ -796,7 +951,7 @@ def service_query(name: str, with_config: bool = False) -> ServiceInfo | None:
                     return None
                 raise _err("Не открыта служба", name)
             try:
-                st = _status(handle)
+                st = _status(handle, name)
                 info = ServiceInfo(name, STATE_NAMES.get(st.dwCurrentState, "unknown"), st.dwProcessId)
                 if with_config:
                     needed = wintypes.DWORD()
@@ -901,6 +1056,21 @@ def _set_description(handle, text: str) -> None:
     advapi32.ChangeServiceConfig2W(handle, 1, ctypes.byref(desc))
 
 
+def service_set_start(name: str, auto: bool) -> None:
+    """Запуск вместе с Windows (auto) или только по команде; остальные настройки службы не меняются."""
+    start = SERVICE_AUTO_START if auto else SERVICE_DEMAND_START
+    with _Scm(SC_MANAGER_CONNECT) as scm:
+        handle = advapi32.OpenServiceW(scm, name, SERVICE_CHANGE_CONFIG)
+        if not handle:
+            raise _err("Не открыта служба", name)
+        try:
+            if not advapi32.ChangeServiceConfigW(handle, SERVICE_NO_CHANGE, start, SERVICE_NO_CHANGE, None, None,
+                                                 None, None, None, None, None):
+                raise _err("Не изменён тип запуска службы", name)
+        finally:
+            advapi32.CloseServiceHandle(handle)
+
+
 def service_start(name: str) -> None:
     with _Scm(SC_MANAGER_CONNECT) as scm:
         handle = advapi32.OpenServiceW(scm, name, SERVICE_START | SERVICE_QUERY_STATUS)
@@ -933,10 +1103,10 @@ def service_stop(name: str, wait: float = 10.0) -> bool:
                     raise _err("Не остановлена служба", name)
             deadline = time.monotonic() + wait
             while time.monotonic() < deadline:
-                if _status(handle).dwCurrentState == 1:
+                if _status(handle, name).dwCurrentState == 1:
                     return True
                 time.sleep(0.2)
-            return _status(handle).dwCurrentState == 1
+            return _status(handle, name).dwCurrentState == 1
         finally:
             advapi32.CloseServiceHandle(handle)
 

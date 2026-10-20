@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import log as applog
 from app.vpnclient import engines as real_engines
 from app.vpnclient import manager as mgr
 from app.vpnclient.manager import ZapretView
@@ -83,10 +84,12 @@ def test_port_reserved_retries_with_other_ports(world):
 def test_non_port_failure_is_reported_with_kind(world):
     world.start_failures = ["FATAL[0000] start service: start inbound/tun[tun-in]: configure tun interface: "
                             "Access is denied."]
-    with pytest.raises(mgr.VpnClientError, match="права администратора"):
+    # Лазейка уже с правами (без них свой VPN не включается вовсе): отказ в доступе — не нехватка прав.
+    with pytest.raises(mgr.VpnClientError, match="Windows отказала в доступе к адаптеру VPN"):
         world.manager.start()
     snap = world.manager.snapshot()
-    assert snap["status"] == "error" and snap["error_kind"] == "admin"
+    assert snap["status"] == "error" and snap["error_kind"] == "conflict"
+    assert "права администратора у Лазейки есть" in snap["error"]
     assert world.manager.own() is None, "план без запуска не держит серверы в own()"
 
 
@@ -181,7 +184,7 @@ def test_crash_after_long_run_restarts(world):
     assert m.wait_idle(10)
     assert m.status == "running" and len(_main_processes(world)) == 2
     # Перезапуск после падения — плашка, пока он идёт (без уведомления); на «работает» она снята.
-    assert not any("перезапускаю" in text for _, text in world.notices)
+    assert not any("перезапускаем" in text for _, text in world.notices)
     assert "vpn-crash" not in world.alerts
 
 
@@ -362,13 +365,16 @@ def test_network_change_restarts_only_xray_helper(tmp_path):
 def test_exit_check_failure_explains_and_recovers(world):
     m = world.manager
     world.exit_ok = False
-    m.deps.tcp_reach = lambda *a: None
+    selected = world.store.server(world.store.selected())
+    world.tcp[world.resolver.address(selected.host)] = "timeout"
     m.start()
     snap = m.snapshot()
     assert snap["status"] == "running" and snap["verified"] is False and snap["error_kind"] == "timeout"
+    assert snap["diagnosis"]["code"] == "tcp_timeout" and snap["error"] == snap["diagnosis"]["text"]
     exit_alert = world.alerts["vpn-exit"]
     assert exit_alert["level"] == "warn" and exit_alert["page"] == "vpnclient"
     assert "ничего не открывается" in exit_alert["text"] and exit_alert["action"]["call"] == "vpnclient_restart"
+    assert "Чья сторона: не ясно" in exit_alert["text"]
     world.advance(16)
     m.tick()                                      # повтор проверки: плашка та же, уведомлений нет
     assert m.wait_idle(10)
@@ -378,7 +384,7 @@ def test_exit_check_failure_explains_and_recovers(world):
     m.tick()
     assert m.wait_idle(10)
     snap = m.snapshot()
-    assert snap["verified"] is True and snap["error"] is None
+    assert snap["verified"] is True and snap["error"] is None and snap["diagnosis"] is None
     assert "vpn-exit" not in world.alerts and world.notices == [], "заработало — плашка ушла сама, без уведомления"
 
 
@@ -471,6 +477,23 @@ def test_snapshot_keys_match_mock(world):
     assert _keys(snap["subscriptions"][0]) == _keys(mock["subscriptions"][0])
     assert _keys(snap["groups"][0]) == _keys(mock["groups"][0])
     json.dumps(snap)
+
+
+def test_snapshot_lists_servers_of_running_config(world):
+    """config_servers — серверы работающего конфига как они есть (session.plan.servers), а не правило
+    _selection, которое страница повторяла сама: сервер без адреса в конфиг не вошёл, после переключения
+    внутри подписки состав не меняется. Без сеанса — null."""
+    m = world.manager
+    assert m.snapshot()["config_servers"] is None
+    helsinki = next(s for s in world.store.servers() if s.name == "Helsinki")
+    world.resolver.fail.add(helsinki.host)                   # адрес не получен — в конфиг не войдёт
+    m.start()
+    expected = [s.id for s in m._session.plan.servers]
+    assert m.snapshot()["config_servers"] == expected and helsinki.id not in expected
+    m.select(expected[1])
+    assert m.wait_idle(5) and m.snapshot()["config_servers"] == expected, "переключение — без перезапуска"
+    m.stop()
+    assert m.snapshot()["config_servers"] is None
 
 
 def test_snapshot_has_no_secrets(world):
@@ -587,7 +610,7 @@ def test_missing_password_is_reported_at_its_own_field(world):
 
 def test_deeplink_request_hides_text(world):
     m = world.manager
-    m.deeplink_offer("https://sub.example.com/secret-token-123456")
+    m.deeplink_offer("lazeyka://import/https://sub.example.com/secret-token-123456")
     request = m.snapshot()["deeplink_request"]
     assert set(request) == {"token", "kind", "summary"}
     assert request["kind"] == "subscription" and "sub.example.com" in request["summary"]
@@ -723,7 +746,11 @@ def test_dns_wire_format_roundtrip():
     answer = bytes.fromhex("000081800001000200000000076578616d706c6503636f6d0000010001"
                            "c00c000100010000003c0004cb007105c00c000500010000003c0002c00c")
     assert mgr.parse_dns_answers(answer) == ["203.0.113.5"]
-    assert mgr.parse_dns_answers(bytes.fromhex("000081830001000000000000")) == []
+    assert mgr.parse_dns_answers(bytes.fromhex("000081800000000000000000")) == [], "NODATA: имя есть, адресов нет"
+    for flags, rcode in (("8183", 3), ("8182", 2), ("8185", 5)):     # NXDOMAIN, SERVFAIL, REFUSED
+        with pytest.raises(mgr.DnsRcodeError) as failure:
+            mgr.parse_dns_answers(bytes.fromhex(f"0000{flags}0001000000000000"))
+        assert failure.value.rcode == rcode
 
 
 def test_resolver_falls_back_in_order():
@@ -821,6 +848,21 @@ def test_import_retry_with_hwid_reuses_last_text(world):
     assert "TOKEN-777" not in json.dumps(m.snapshot())
 
 
+def test_first_failed_import_hides_subscription_address(world):
+    """Адрес новой подписки — секрет с первой попытки: ошибка загрузки, повторившая его, адрес не показывает."""
+    fake = _with_subscription(world)
+    url = "https://fresh.example.com/sub/Fr3shTok3n-2026"
+    fake.answers["Lazeyka/" + mgr.__version__ + " (Windows)"] = fake.SubscriptionError(
+        "network", f"Не удалось загрузить {url}: соединение сброшено")
+    m = world.manager
+    m.import_text(url)
+    assert wait_for(lambda: not m.snapshot()["import"]["running"])
+    error = m.snapshot()["import"]["error"]
+    stored = next(s for s in world.store.subscriptions() if s.url == url).error
+    assert error and applog.MASK in error and "Fr3shTok3n" not in error
+    assert applog.MASK in stored and "Fr3shTok3n" not in stored
+
+
 def test_sub_set_dns_and_mtu(world):
     m = world.manager
     bad = m.sub_set("s-1", {"dns": "ftp://x", "mtu": 100})
@@ -838,6 +880,25 @@ def test_sub_set_dns_and_mtu(world):
     m.start()
     plan = world.config.plans[-1]
     assert plan.dns.remote == "https://dns.example.com/dns-query" and plan.tun.mtu == 1400
+
+
+def test_sub_set_same_dns_mtu_routes_is_not_a_change(world):
+    """Окно свойств шлёт dns, mtu и маршруты провайдера и при переименовании: прежние значения — не изменение,
+    работающий VPN не перезапускается."""
+    m = world.manager
+    assert m.sub_set("s-1", {"dns": "google", "mtu": 1400}) == {}
+    m.start()
+    assert m.wait_idle(10)
+    starts = len(_main_processes(world))
+    sub = world.store.subscription("s-1")
+    assert m.sub_set("s-1", {"name": "Новое имя", "dns": "google", "mtu": 1400,
+                             "provider_routes": sub.provider_routes}) == {}
+    assert m.wait_idle(10)
+    assert world.store.subscription("s-1").name == "Новое имя"
+    assert len(_main_processes(world)) == starts, "переименование не перезапускает VPN"
+    assert m.sub_set("s-1", {"mtu": 1380}) == {}
+    assert m.wait_idle(10) and len(_main_processes(world)) > starts, "новый MTU — перезапуск"
+    m.shutdown()
 
 
 def test_kill_switch_stays_closed_after_crash_until_stop(tmp_path):
@@ -896,7 +957,7 @@ def test_pasted_xray_json_is_imported(world):
 def test_provider_stub_names_are_a_message(world):
     fake = _with_subscription(world)
     decoded = fake.real.Decoded(format="links", notices=["Подписка истекла — продлите на example.com"])
-    fake.decode = lambda body, headers=None, *, sub_id=None: decoded
+    fake.decode = lambda body, headers=None, *, sub_id=None, keep_local=False: decoded
     m = world.manager
     m.import_text("vless://x")
     assert wait_for(lambda: not m.snapshot()["import"]["running"])
@@ -1023,6 +1084,22 @@ def test_provider_routes_toggle_and_profile_are_one_switch(world):
     assert profile["active"] is True and profile["source"] == "subscription"
     m.profile_set("r-s-1", False)
     assert world.store.subscription("s-1").provider_routes is False
+
+
+def test_provider_profile_saved_by_1_2_does_not_reconnect_vpn(world):
+    """Выпуск 1.2 называл профиль «Маршруты «…»», 1.3 — «…: маршруты провайдера». Правила те же — первое
+    обновление подписки после перехода не переподключает работающий VPN, а имя обновляется молча."""
+    m = world.manager
+    sub = world.store.subscription("s-1")
+    sub.provider_routes = True
+    text = "happ://routing/onadd/eyJOYW1lIjoiUCJ9"
+    m._profiles.save([{"id": "r-s-1", "name": "Маршруты «Мой VPN»", "source": "subscription", "sub": "s-1",
+                       "active": True, "text": text, "routing": None}])
+    decoded = SimpleNamespace(meta=SimpleNamespace(routing=text), routing=None, route_lines=[])
+    assert m._store_provider_profile(sub, decoded) is False, "правила те же — переподключать незачем"
+    assert m._profiles.load()[0]["name"] == "Мой VPN: маршруты провайдера"
+    decoded.meta.routing = "happ://routing/onadd/eyJOYW1lIjoiUSJ9"
+    assert m._store_provider_profile(sub, decoded) is True, "правила другие — переподключение с ними"
 
 
 def test_backup_roundtrip_restores_what_fits(tmp_path):
@@ -1163,21 +1240,30 @@ def test_failed_list_download_is_an_alert_not_a_silent_success(world):
     assert alert["action"]["call"] == "vpnclient_rules_update"
 
 
-def test_ipv6_internet_needs_a_global_address_and_gateway_on_a_physical_adapter(monkeypatch):
+def test_ipv6_internet_needs_a_global_address_and_a_direct_default_route(monkeypatch):
+    """IPv6 есть, если он есть у прямого выхода в интернет (тот же выбор, что для привязки помощника Xray):
+    маршрут ::/0 через прямой адаптер и глобальный адрес. Свой TUN и Radmin не в счёт."""
     from app import vpn
 
-    def adapter(name="Ethernet", if_type=6, ipv6=("2a00:1450:4010::12",), gateways=("192.168.1.1", "fe80::1")):
-        return vpn.Adapter(index=1, guid="{g}", name=name, description="", if_type=if_type, up=True,
-                           ipv4=["192.168.1.5"], ipv6=list(ipv6), gateways=list(gateways))
+    def adapter(index=1, name="Ethernet", if_type=6, ipv6=("2a00:1450:4010::12",)):
+        return vpn.Adapter(index=index, guid="{%d}" % index, name=name, description=name, if_type=if_type, up=True,
+                           ipv4=["192.168.1.5"], ipv6=list(ipv6), gateways=["192.168.1.1", "fe80::1"])
 
-    for adapters, expected in (
-            ([adapter()], True),
-            ([adapter(ipv6=("fe80::5%12", "fd12::5"))], False),                 # link-local и ULA — не интернет
-            ([adapter(ipv6=("2001:0:53aa:64c::5",))], False),                     # Teredo
-            ([adapter(gateways=("192.168.1.1",))], False),                        # шлюза IPv6 нет
-            ([adapter(name=mgr.TUN_NAME, if_type=53)], False),                    # свой TUN не в счёт
-            ([adapter(ipv6=()), adapter(name="Wi-Fi", if_type=71)], True)):
+    drivers = {"{1}": (r"PCI\VEN_10EC", vpn.NCF_PHYSICAL), "{2}": (r"PCI\VEN_8086", vpn.NCF_PHYSICAL),
+               "{3}": ("wintun", vpn.NCF_VIRTUAL), "{4}": (r"{B06D84D1}\RvNetMP60", vpn.NCF_VIRTUAL)}
+    v4 = [("0.0.0.0", 0, "192.168.1.1", 1, 0)]
+    v6 = [("::", 0, "fe80::1", 1, 0)]
+    for adapters, table, expected in (
+            ([adapter()], v4 + v6, True),
+            ([adapter(ipv6=("fe80::5%12", "fd12::5"))], v4 + v6, False),          # link-local и ULA — не интернет
+            ([adapter(ipv6=("2001:0:53aa:64c::5",))], v4 + v6, False),              # Teredo
+            ([adapter()], v4, False),                                               # маршрута ::/0 нет
+            ([adapter(), adapter(3, mgr.TUN_NAME, 53)], v4 + [("::", 0, "", 3, 0)], False),  # ::/0 — в свой TUN
+            ([adapter(4, "Radmin VPN", ipv6=("2a00:1450:4010::12",))], [("::", 0, "fe80::1", 4, 0)], False),
+            ([adapter(ipv6=()), adapter(2, "Wi-Fi", 71)], v4 + [("::", 0, "fe80::1", 2, 0)], True)):
         monkeypatch.setattr(vpn, "list_adapters", lambda adapters=adapters: adapters)
+        monkeypatch.setattr(vpn, "_driver_info", lambda: drivers)
+        monkeypatch.setattr(vpn, "routes", lambda table=table: list(table))
         assert mgr.ipv6_internet() is expected, adapters
 
     def broken():

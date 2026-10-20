@@ -264,7 +264,7 @@
     const what = failing.join(' и ');
     const stopped = failing.length > 1 ? 'перестали открываться' : 'перестал открываться';
     if (state.settings.watchdog === 'auto') {
-      watchdogAlert(`${what} ${stopped} — подбираю рабочую стратегию.`, false);
+      watchdogAlert(`${what} ${stopped} — подбираем рабочую стратегию.`, false);
       watchdogFixing = `${what} ${stopped}`;
       api.zapret_fix();
       return;

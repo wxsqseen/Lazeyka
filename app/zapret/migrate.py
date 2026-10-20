@@ -108,7 +108,7 @@ def import_from(root: Path, settings: Settings, user_dir: Path) -> list[str]:
         entries = {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")}
         if entries <= {lists.PLACEHOLDER_DOMAIN, lists.NONE_MARKER}:
             continue  # в файле только заглушки из шаблона — переносить нечего
-        lists.save_user_list(user_dir, name, text)
+        lists.save_user_list(user_dir, name, text, check=False)   # с этими строками zapret уже работал
         done.append(f"список «{title}»")
     log.info("Перенесено из %s: %s", root, ", ".join(done))
     return done

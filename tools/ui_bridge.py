@@ -10,20 +10,25 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
+import logging
+import os
+import secrets
+import shutil
 import socket
 import sys
 import tempfile
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+TOKEN_HEADER = "X-Lazeyka-Bridge"
 SHIM_TEMPLATE = """(function () {
-  const call = (name) => (...args) => fetch('/api/' + name, {method: 'POST', body: JSON.stringify(args)})
-    .then(r => r.json());
+  const call = (name) => (...args) => fetch('/api/' + name, {method: 'POST', body: JSON.stringify(args),
+    headers: {'__HEADER__': __TOKEN__}}).then(r => r.json());
   // Как у pywebview: на объекте api — настоящие функции, по одной на публичный метод.
   const api = {};
   for (const name of __METHODS__) api[name] = call(name);
@@ -35,6 +40,40 @@ SHIM_TEMPLATE = """(function () {
 SHIM_TAG = b'<script src="/__bridge.js"></script>'
 
 
+def request_allowed(method: str, headers, port: int, token: str) -> bool:
+    """Стенд слушает 127.0.0.1, но браузер пускает к нему любую открытую страницу: POST с чужого сайта или
+    DNS rebinding (evil.example → 127.0.0.1) вызывали бы методы настоящего ядра. Пропускаем только своё:
+    Host — 127.0.0.1 или localhost с нашим портом, Origin (если есть) — тот же адрес, запрос не со стороннего
+    сайта (Sec-Fetch-Site: так чужая страница не подключит /__bridge.js с токеном), у POST — токен из shim
+    в своём заголовке (его не поставит ни форма, ни запрос без разрешения CORS)."""
+    hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    if (headers.get("Host") or "").strip().lower() not in hosts:
+        return False
+    origin = headers.get("Origin")
+    if origin is not None and origin.strip().lower() not in {f"http://{h}" for h in hosts}:
+        return False
+    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if site and site not in ("same-origin", "none"):
+        return False
+    if method == "POST":
+        return hmac.compare_digest((headers.get(TOKEN_HEADER) or "").encode(), token.encode())
+    return True
+
+
+def shim(methods: list[str], token: str) -> bytes:
+    return (SHIM_TEMPLATE.replace("__METHODS__", json.dumps(methods)).replace("__HEADER__", TOKEN_HEADER)
+            .replace("__TOKEN__", json.dumps(token)).encode("utf-8"))
+
+
+def _remove_own_data(path: str) -> None:
+    """Временная папка данных стенда — после выхода ядра; журнал закрываем первым, иначе Windows её не отдаст."""
+    logging.shutdown()
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        print(f"Временная папка стенда {path} удалена не целиком: {exc}", file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8765)
@@ -42,8 +81,11 @@ def main() -> None:
                         help="показать интерфейс так, будто права есть (кнопки запуска zapret всё равно не сработают)")
     args = parser.parse_args()
 
-    import os
-    os.environ.setdefault("LAZEYKA_DATA", tempfile.mkdtemp(prefix="lazeyka-bridge-"))
+    # Своя временная папка данных, если другую не задали явно; при выходе стенд её убирает.
+    own_data = None
+    if not os.environ.get("LAZEYKA_DATA"):
+        own_data = tempfile.mkdtemp(prefix="lazeyka-bridge-")
+        os.environ["LAZEYKA_DATA"] = own_data
     # Стенд не запускает ядро своего VPN и не трогает системный прокси (app/vpnclient/guard.py).
     os.environ["LAZEYKA_NO_CORE"] = "1"
     from app import paths, winutil
@@ -67,16 +109,25 @@ def main() -> None:
     core.startup()
     api = Api(core)
     ui = paths.ui_dir()
+    token = secrets.token_urlsafe(24)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # тише
             pass
 
+        def _refused(self) -> bool:
+            if request_allowed(self.command, self.headers, args.port, token):
+                return False
+            self.send_error(403)
+            return True
+
         def do_GET(self):
+            if self._refused():
+                return
             rel = self.path.split("?", 1)[0].lstrip("/") or "index.html"
             if rel == "__bridge.js":
                 methods = sorted(n for n in dir(api) if not n.startswith("_") and callable(getattr(api, n)))
-                body = SHIM_TEMPLATE.replace("__METHODS__", json.dumps(methods)).encode("utf-8")
+                body = shim(methods, token)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/javascript; charset=utf-8")
                 self.end_headers()
@@ -102,6 +153,8 @@ def main() -> None:
             self.wfile.write(data)
 
         def do_POST(self):
+            if self._refused():
+                return
             name = self.path.rsplit("/", 1)[-1]
             length = int(self.headers.get("Content-Length") or 0)
             try:
@@ -124,7 +177,11 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
-        core.shutdown()
+        try:
+            core.shutdown()
+        finally:
+            if own_data is not None:
+                _remove_own_data(own_data)
 
 
 if __name__ == "__main__":

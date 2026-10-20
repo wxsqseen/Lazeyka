@@ -88,7 +88,7 @@
     if (viaVpn.length && own) {
       const many = viaVpn.length > 1;
       texts.vpn = `${namesOf(viaVpn)} сейчас ${many ? 'идут' : 'идёт'} через ваш сервер. Чтобы ${many ? 'они шли' : 'он шёл'} `
-        + 'через обход (быстрее, без нагрузки на VPN), включите на странице «VPN» в «Маршрутах» '
+        + 'через обход (быстрее, без нагрузки на VPN), включите на странице «Свой VPN» в «Маршрутах» '
         + '«Discord и YouTube — через обход Лазейки».';
     } else if (viaVpn.length) {
       const many = viaVpn.length > 1;
@@ -162,16 +162,28 @@
     return names.map((name) => `«${name}»`).join(', ');
   }
 
-  /** «туннель «wwan99» и сервер VPN исключены» — что именно обход не трогает. */
+  /**
+   * «туннель «wwan99» и сервер VPN исключены» — что именно обход не трогает у чужого VPN; серверов несколько —
+   * «серверы». Свой адаптер (own) — не туннель чужого VPN.
+   */
   function excludedText(vpn) {
     const adapters = Array.isArray(vpn.adapters) ? vpn.adapters : [];
-    const tunnels = adapters.filter((a) => a.kind === 'tunnel' && a.role === 'internet').map((a) => String(a.name || a.id));
+    const tunnels = adapters.filter((a) => a.kind === 'tunnel' && a.role === 'internet' && !a.own).map((a) => String(a.name || a.id));
     const servers = Array.isArray(vpn.servers) ? vpn.servers : [];
     let what = 'туннель VPN';
     if (tunnels.length === 1) what = `туннель ${quoted(tunnels)}`;
     else if (tunnels.length > 1) what = `туннели ${quoted(tunnels)}`;
-    if (servers.length) return `${what} и сервер VPN исключены`;
+    if (servers.length) return `${what} и ${servers.length > 1 ? 'серверы' : 'сервер'} VPN исключены`;
     return `${what} ${tunnels.length > 1 ? 'исключены' : 'исключён'}`;
+  }
+
+  /**
+   * Имя чужого VPN для строки «VPN: …»: ядро называет его программой («Incy или Happ») или уже со словом
+   * «VPN» («VPN «wwan99»», «VPN через системный прокси») — тогда без повтора: не «VPN: VPN «wwan99»».
+   */
+  function vpnTitled(label) {
+    const text = String(label || 'VPN');
+    return /^VPN\b/.test(text) ? text : `VPN: ${text}`;
   }
 
   /** «Happ через системный прокси»; ядро без имени программы уже называет его «VPN через системный прокси». */
@@ -192,7 +204,7 @@
     if (!source.active && unseparable.length) {
       return {
         tone: 'warn',
-        text: `Запущен ${unseparable.join(' и ')}. Такие VPN умеют работать без отдельного адаптера `
+        text: `${unseparable.length > 1 ? 'Запущены' : 'Запущен'} ${unseparable.join(' и ')}. Такие VPN умеют работать без отдельного адаптера `
           + '(ExpressVPN — протокол Lightway Turbo, AdGuard VPN — режим без WinTun): тогда Лазейка не может '
           + 'отделить их трафик от прямого, и совместимость с VPN не поможет.',
       };
@@ -224,11 +236,11 @@
   function homeLine(vpn) {
     const source = vpn || {};
     if (!source.active) return null;
-    if (source.mode === 'proxy') return { tone: 'ok', text: `VPN: ${proxyName(source)} — обход ему не мешает` };
-    const label = source.label || 'VPN';
-    if (source.compat === false) return { tone: 'warn', text: `VPN: ${label} — совместимость выключена, обход может ему мешать` };
-    if (source.filter && source.filter.mode === 'error') return { tone: 'err', text: `VPN: ${label} — совместимость не включилась` };
-    return { tone: 'ok', text: `VPN: ${label} — обход его не трогает` };
+    if (source.mode === 'proxy') return { tone: 'ok', text: `${vpnTitled(proxyName(source))} — обход ему не мешает` };
+    const label = vpnTitled(source.label);
+    if (source.compat === false) return { tone: 'warn', text: `${label} — совместимость выключена, обход может ему мешать` };
+    if (source.filter && source.filter.mode === 'error') return { tone: 'err', text: `${label} — совместимость не включилась` };
+    return { tone: 'ok', text: `${label} — обход его не трогает` };
   }
 
   /** Показывать ли «что куда идёт»: работает чужой VPN или свой. */
@@ -236,5 +248,5 @@
     return Boolean(vpn && (vpn.active || ownActive(vpn)));
   }
 
-  Lz.vpn = { routeRow, routesData, renderRoutes, explanationTexts, compatStatus, homeLine, proxyName, routesRelevant, ownActive };
+  Lz.vpn = { routeRow, routesData, renderRoutes, explanationTexts, compatStatus, homeLine, proxyName, vpnTitled, routesRelevant, ownActive };
 })(window.Lz);

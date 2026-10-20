@@ -12,22 +12,46 @@
 from __future__ import annotations
 
 import getpass
-import hashlib
 import logging
 import os
 import shutil
 import subprocess
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
+from typing import Callable, ContextManager
 from xml.sax.saxutils import escape
 
 from . import APP_ID, __version__, paths, winutil
+from .settings import read_saved
 
 log = logging.getLogger("lazeyka.autostart")
 
 LEGACY_TASK_NAME = APP_ID
 AUTOSTART_ARG = "--autostart"
 VERSION_FILE = "version.txt"
+
+# Почему автозапуск не включается — текст для человека (ответ на нажатие и плашка при запуске).
+PORTABLE_REFUSAL = ("В переносном режиме автозапуск не работает: Windows запускала бы копию из Program Files, а "
+                    "она хранит настройки не в папке LazeykaData рядом с exe, а в ProgramData — после входа "
+                    "в Windows открылась бы «чистая» Лазейка. Запускайте Лазейку вручную или поставьте её "
+                    "в обычном режиме (без папки LazeykaData рядом с exe).")
+OTHER_ACCOUNT_REFUSAL = ("Лазейка запущена от имени другой учётной записи Windows (так бывает, когда при запуске "
+                         "вводят пароль администратора). Автозапуск сработал бы при входе той учётной записи, "
+                         "а не вашей, поэтому он не включён.")
+
+
+class AutostartError(RuntimeError):
+    pass
+
+
+def refusal() -> str | None:
+    """Почему автозапуск здесь включать нельзя; None — можно."""
+    if paths.is_portable():
+        return PORTABLE_REFUSAL
+    if winutil.other_account():
+        return OTHER_ACCOUNT_REFUSAL
+    return None
 
 
 def _current_user() -> str:
@@ -51,14 +75,6 @@ def installed_exe() -> Path:
     return Path(base) / APP_ID / f"{APP_ID}.exe"
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def installed_version() -> str | None:
     try:
         return (installed_exe().parent / VERSION_FILE).read_text(encoding="ascii").strip() or None
@@ -66,32 +82,87 @@ def installed_version() -> str | None:
         return None
 
 
-def install_copy() -> list[str]:
-    """Кладёт копию текущей сборки в Program Files и возвращает команду запуска.
+def write_version(version: str) -> None:
+    """version.txt рядом с копией: по нему старый exe из «Загрузок» не затрёт более новую копию."""
+    (installed_exe().parent / VERSION_FILE).write_text(version, encoding="ascii")
+
+
+def _same_path(a: Path | str, b: Path | str) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def staging_leftovers() -> list[Path]:
+    """Временные копии в Program Files, оставшиеся от прерванного копирования (выход Windows посреди него);
+    второе имя — у копий до 1.3.1. Убирает их уборка при запуске (updates.manager.settle_app_files)."""
+    folder = installed_exe().parent
+    try:
+        return [*folder.glob(f".{APP_ID}-*.new"), *folder.glob(f"{APP_ID}.*.new")]
+    except OSError as exc:
+        log.debug("Временные копии для автозапуска не найдены: %r", exc)
+        return []
+
+
+def _place(source: Path, target: Path, version: str, guard: Callable[[], ContextManager] = nullcontext) -> None:
+    """Копия рядом с целью и замена одним переименованием: задание не застанет exe наполовину. Имя
+    временной копии — как у самообновления, её подбирает та же уборка. guard — блок замены файлов
+    (UpdateManager.replacing): выход Лазейки дожидается конца копирования, иначе недописанные ~40 МБ
+    остались бы в Program Files."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(f".{target.stem}-{uuid.uuid4().hex[:8]}.new")
+    with guard():
+        try:
+            shutil.copyfile(source, staging)
+            os.replace(staging, target)
+        finally:
+            staging.unlink(missing_ok=True)
+        write_version(version)
+    log.info("Копия для автозапуска — версия %s: %s", version, target)
+
+
+def install_copy(guard: Callable[[], ContextManager] = nullcontext) -> list[str]:
+    """Кладёт копию текущей сборки в Program Files и возвращает команду запуска. guard — как у _place.
 
     Более новую копию старой не затираем: если пользователь запустил старый exe
     из «Загрузок», автозапуск продолжит запускать новую версию.
     """
     if not paths.IS_FROZEN:
         return paths.launch_command()  # запуск из исходников — для разработки
+    from .filehash import sha256_file
     from .zapret.pack import version_key
 
     source = paths.exe_path()
     target = installed_exe()
-    if source == target:
-        return [str(target)]
     have = installed_version()
+    if _same_path(source, target):
+        # Запущена сама копия (в том числе после самообновления): version.txt — о ней.
+        if have != __version__:
+            write_version(__version__)
+        return [str(target)]
     if target.exists() and have and version_key(have) > version_key(__version__):
         log.info("В Program Files лежит более новая Лазейка %s — оставляю её", have)
         return [str(target)]
-    if not target.exists() or _sha256(source) != _sha256(target):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging = target.with_name(f"{target.stem}.{uuid.uuid4().hex[:8]}.new")
-        shutil.copyfile(source, staging)
-        os.replace(staging, target)
-        (target.parent / VERSION_FILE).write_text(__version__, encoding="ascii")
-        log.info("Копия для автозапуска обновлена до %s: %s", __version__, target)
+    if not target.exists() or sha256_file(source) != sha256_file(target):
+        _place(source, target, __version__, guard)
+    elif have != __version__:
+        write_version(__version__)
     return [str(target)]
+
+
+def update_copy(source: Path, version: str, *, downgrade: bool = False) -> bool:
+    """Самообновление и откат: копия для автозапуска получает тот же (уже проверенный) exe, иначе при
+    входе в Windows запускалась бы прежняя версия. Копии нет — нечего обновлять. Более новую копию
+    без downgrade (откат) не трогаем. Возвращает, обновлена ли копия. Вызывается уже внутри блока
+    замены файлов (UpdateManager.replacing): выход дожидается и этой копии."""
+    from .zapret.pack import version_key
+    target = installed_exe()
+    if not target.exists():
+        return False
+    have = installed_version()
+    if have and not downgrade and version_key(have) > version_key(version):
+        log.info("В Program Files лежит более новая Лазейка %s — оставляю её", have)
+        return False
+    _place(Path(source), target, version)
+    return True
 
 
 def _task_xml(command: list[str]) -> str:
@@ -177,8 +248,12 @@ def registered_command() -> str | None:
     return res.out[start + 9:end].strip() if start >= 0 and end > start else None
 
 
-def enable() -> Path:
-    command = install_copy()
+def enable(guard: Callable[[], ContextManager] = nullcontext) -> Path:
+    """Копия в Program Files (guard — как у _place) и задание на неё. Возвращает, что запускает задание."""
+    problem = refusal()
+    if problem:
+        raise AutostartError(problem)
+    command = install_copy(guard)
     xml = _task_xml(command)
     # XML кладём в защищённую папку данных: из %TEMP% его можно было бы подменить
     # между записью и чтением планировщиком.
@@ -206,10 +281,37 @@ def disable() -> None:
     log.info("Автозапуск выключен")
 
 
-def sync() -> None:
-    """При запуске: копия в Program Files соответствует текущей сборке, задание — копии."""
-    if not paths.IS_FROZEN:
+def stray_launch() -> bool:
+    """Задание автозапуска запустило копию из Program Files, а в её папке данных (ProgramData) автозапуск не
+    включали. Так бывает после 1.2: в переносном режиме она ставила задание на эту копию, и после входа в
+    Windows открывалась «чужая» Лазейка с данными ProgramData, а переносная, запущенная следом, лишь
+    показывала её окно. Снимать задание из переносной Лазейки нельзя: его могла поставить и обычная
+    установка этого же пользователя. Поэтому решает сама копия, по своим настройкам: автозапуск в них
+    выключен (или настроек нет вовсе) — задание не её. Настройки не прочитались — не решаем ничего."""
+    if not paths.IS_FROZEN or paths.is_portable() or not _same_path(paths.exe_path(), installed_exe()):
+        return False
+    saved = read_saved(paths.SETTINGS_FILE)
+    return saved is not None and not saved["startup"]["autostart"]
+
+
+def retire_stray_task() -> None:
+    """Снять задание, которое запустило копию зря (stray_launch). Копия после этого выходит: переносная
+    Лазейка запустится, как прежде, а её плашка о переносном режиме предложит выключить автозапуск и там."""
+    try:
+        disable()
+    except RuntimeError as exc:
+        log.warning("Задание автозапуска, запустившее Лазейку зря, не снято: %s", exc)
         return
-    command = install_copy()
+    log.info("Задание автозапуска запустило копию из Program Files, а в её настройках автозапуск выключен — "
+             "задание снято, копия закрывается")
+
+
+def sync(guard: Callable[[], ContextManager] = nullcontext) -> None:
+    """При запуске: копия в Program Files соответствует текущей сборке, задание — копии. В переносном
+    режиме и под чужой учёткой не делает ничего (почему — refusal(), Core покажет плашку). guard — как
+    у _place."""
+    if not paths.IS_FROZEN or refusal():
+        return
+    command = install_copy(guard)
     if (registered_command() or "").lower() != command[0].lower() or _legacy_task_is_mine():
-        enable()
+        enable(guard)

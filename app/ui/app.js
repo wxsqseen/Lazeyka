@@ -38,11 +38,12 @@
     h('span', { class: 'spinner', 'aria-hidden': 'true' }), h('span', { class: 'banner__text' }));
   bannerRoot.append(offlineBanner, busyBanner);
 
-  const bootScreen = h('div', { class: 'boot' },
-    h('div', { class: 'boot__inner' },
-      Lz.brand.mark(36),
-      h('p', { class: 'boot__text' }, h('span', { class: 'spinner spinner--inline', 'aria-hidden': 'true' }), 'Подключаемся к ядру…'),
-      h('p', { class: 'boot__hint', hidden: true })));
+  const BOOT_TEXT = 'Подключаемся к ядру…';
+  const bootSpinner = h('span', { class: 'spinner spinner--inline', 'aria-hidden': 'true' });
+  const bootText = h('span', { text: BOOT_TEXT });
+  const bootLine = h('p', { class: 'boot__text', 'aria-live': 'polite' }, bootSpinner, bootText);
+  const bootHint = h('p', { class: 'boot__hint', hidden: true });
+  const bootScreen = h('div', { class: 'boot' }, h('div', { class: 'boot__inner' }, Lz.brand.mark(36), bootLine, bootHint));
 
   const versionText = h('span', { class: 'sidebar__version num' });
   const roleText = h('span', { class: 'role__text' });
@@ -150,6 +151,8 @@
       else nav.btn.removeAttribute('aria-current');
     }
     if (Lz.store.state) updatePage(entry, Lz.store.state);
+    /* До первого снимка страницам нечего показать — их закрывает экран загрузки; журналу снимок не нужен. */
+    if (!started) setHidden(bootScreen, Boolean(Lz.pages[name].stateless));
     if (switching) entry.host.scrollTop = scrollPositions.get(name) || 0;
     if (entry.instance.show) entry.instance.show(opts || {});
   }
@@ -227,19 +230,42 @@
     Lz.onboarding.sync(state);
   }
 
-  function onConnection({ online, error }) {
-    setText(offlineBanner.querySelector('.banner__text'),
-      online ? '' : `Нет связи с ядром Лазейки — пробуем снова. ${error ? `(${error})` : ''}`.trim());
+  /*
+   * refused — ядро на связи, но не отдаёт состояние: это не «нет связи». После первого снимка на экране — последний
+   * удачный, о чём и говорит плашка. До первого снимка показывать нечего: о беде говорит экран загрузки вместо
+   * вечного «Подключаемся к ядру…», а плашка его не повторяет.
+   */
+  function onConnection({ online, error, refused }) {
+    if (!started) {
+      showBootProblem(online ? null : { error, refused });
+      return;
+    }
+    const lead = refused ? 'Ядро Лазейки отвечает ошибкой, на экране — последнее известное состояние. Пробуем снова.'
+      : 'Нет связи с ядром Лазейки — пробуем снова.';
+    setText(offlineBanner.querySelector('.banner__text'), online ? '' : `${lead} ${error ? `(${error})` : ''}`.trim());
     setHidden(offlineBanner, online);
   }
 
   /* ---------- Запуск ---------- */
 
   function showBootHint(text) {
-    const hint = bootScreen.querySelector('.boot__hint');
-    if (!hint || started) return;
-    setText(hint, text || 'Ядро не отвечает. Если страница открыта в обычном браузере, добавьте к адресу ?mock — запустится имитация ядра.');
-    setHidden(hint, false);
+    if (started) return;
+    setText(bootHint, text || 'Ядро не отвечает. Если страница открыта в обычном браузере, добавьте к адресу ?mock — запустится имитация ядра.');
+    setHidden(bootHint, false);
+  }
+
+  /** Первого снимка ещё не было, а ядро отказывает или молчит: что случилось и почему — на экране загрузки. */
+  function showBootProblem(problem) {
+    bootLine.classList.toggle('is-error', Boolean(problem));
+    setHidden(bootSpinner, Boolean(problem));
+    if (!problem) {
+      setText(bootText, BOOT_TEXT);
+      setHidden(bootHint, true);
+      return;
+    }
+    setText(bootText, problem.refused ? 'Ядро Лазейки отвечает ошибкой и не отдаёт состояние' : 'Нет связи с ядром Лазейки');
+    setText(bootHint, problem.error ? `Пробуем снова. Причина: ${Lz.fmt.sentence(problem.error)}` : 'Пробуем снова.');
+    setHidden(bootHint, false);
   }
 
   function loadMockIfNoBackend() {

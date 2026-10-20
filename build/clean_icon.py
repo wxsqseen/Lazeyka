@@ -1,3 +1,9 @@
+"""Черновик значка (icon-v2.png в папке черновиков) → assets/icon-master.png: без белого фона, в цветах плитки.
+
+    clean_icon.py <папка-черновиков> <результат.png>
+
+Как получен черновик — docs/art/icon.md.
+"""
 import sys
 from PIL import Image, ImageDraw, ImageFilter
 art, out = sys.argv[1], sys.argv[2]

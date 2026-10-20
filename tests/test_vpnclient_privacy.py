@@ -2,6 +2,7 @@
 на обработчиках (файл и кольцевой буфер), поэтому ловит и notify(), и _guard, и log.exception."""
 import json
 import logging
+import urllib.parse
 
 import pytest
 
@@ -56,6 +57,39 @@ def test_scrub_variants(secrets):
     assert applog.scrub(f"ключ {UUID}") == f"ключ {applog.MASK}"
     assert SUB_TOKEN not in applog.scrub(f"GET /api/sub/{SUB_TOKEN} → 403")       # токен из пути подписки
     assert "subscribe" in applog.scrub("subscribe")                             # слово — не токен
+
+
+# Каждый вариант секрета — своей строкой журнала, в которой есть только он: иначе его маскирует сосед.
+
+def test_scrub_percent_encoded_secret():
+    secret = "p@ss/wörd+42&x"
+    applog.add_secrets([secret])
+    encoded = urllib.parse.quote(secret, safe="")
+    assert applog.scrub(f"запрос ?password={encoded}") == f"запрос ?password={applog.MASK}"
+
+
+def test_scrub_path_and_query_of_address():
+    applog.add_secrets(["https://panel.example.com/private-area/sub?id=5"])
+    assert applog.scrub("GET /private-area/sub?id=5 → 403") == f"GET {applog.MASK} → 403"   # путь с запросом
+
+
+def test_scrub_query_of_address():
+    applog.add_secrets(["https://panel.example.com/sub?token=Qw3rTy9uIo"])
+    assert applog.scrub("параметры token=Qw3rTy9uIo отклонены") == f"параметры {applog.MASK} отклонены"
+
+
+def test_scrub_token_from_address_path():
+    applog.add_secrets([SUB])
+    assert applog.scrub(f"зеркало https://mirror.example.net/s/{SUB_TOKEN}") == \
+        f"зеркало https://mirror.example.net/s/{applog.MASK}"                    # тот же токен, другой адрес
+
+
+@pytest.mark.parametrize("field", ["msg", "exc_text", "stack_info"])
+def test_secret_filter_cleans_every_text_of_record(secrets, field):
+    record = logging.LogRecord("lazeyka.vpnclient", logging.ERROR, __file__, 1, "сообщение", (), None)
+    setattr(record, field, f"{field}: ключ {UUID}")
+    assert applog.secret_filter.filter(record) is True
+    assert getattr(record, field) == f"{field}: ключ {applog.MASK}"
 
 
 def test_remove_secrets_is_refcounted():
@@ -121,6 +155,7 @@ def test_repr_and_public_of_server_have_no_secrets():
 def test_report_has_no_secrets_and_no_server_addresses(secrets):
     vc = mock_state()
     vc["error_kind"] = "tls"
+    vc["diagnosis"] = {"side": "provider", "code": "keys_outdated", "text": "…", "advice": "…"}
     state = {
         "app": {"admin": True}, "zapret": {"status": "running"}, "tg": {"status": "running"},
         "vpn": {"active": False, "compat": True, "servers": [], "adapters": [],
@@ -137,6 +172,8 @@ def test_report_has_no_secrets_and_no_server_addresses(secrets):
     text = helpdesk.build_report(state, tail)
     assert "Свой VPN: running" in text and "серверов 5" in text and "vless/tcp/reality" in text
     assert "Ошибка своего VPN: tls" in text
+    assert "Причина: keys_outdated (provider)" in text and "Нет ответа: udp_blocked (isp) ×1" in text, \
+        "причины — кодами, без имён серверов"
     assert _clean(text)
     for leaked in ("nl1.example.net", "203.0.113.9", "198.51.100.7", "203.0.113.5", "Амстердам", "panel.example.com"):
         assert leaked not in text, leaked

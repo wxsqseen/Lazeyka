@@ -12,15 +12,18 @@
   const LOG_POLL_MS = 1000;
   const LOG_TIMEOUT_MS = 8000;
   const MAX_LINES = 2000;
+  /* Ядро кладёт в буфер обмена не больше 100 000 символов (core.copy_text) — копируем самые свежие строки. */
+  const COPY_LIMIT = 100000;
   const STICK_THRESHOLD_PX = 40;
+  /* Подпись фильтра и метка строки — одно имя: строки «Лазейка» показывает фильтр «Лазейка». */
   const SOURCES = [
     { value: 'all', label: 'Все' },
-    { value: 'app', label: 'Приложение' },
-    { value: 'zapret', label: 'zapret' },
-    { value: 'tg', label: 'Telegram' },
-    { value: 'vpn', label: 'VPN', title: 'Свой VPN: ядра, подписки, маршруты' },
+    { value: 'app', label: 'Лазейка', title: 'Сама Лазейка: запуск, настройки, проверки' },
+    { value: 'zapret', label: 'zapret', title: 'Обход блокировок' },
+    { value: 'tg', label: 'Telegram', title: 'Telegram-прокси' },
+    { value: 'vpn', label: 'Свой VPN', title: 'Свой VPN: ядра, подписки, маршруты' },
   ];
-  const SOURCE_TAG = { app: 'Лазейка', zapret: 'zapret', tg: 'Telegram', vpn: 'VPN' };
+  const SOURCE_TAG = { app: 'Лазейка', zapret: 'zapret', tg: 'Telegram', vpn: 'Свой VPN' };
   const LEVEL_WORD = { debug: 'отладка', info: 'инфо', warn: 'внимание', error: 'ошибка' };
 
   function create() {
@@ -33,6 +36,8 @@
     let generation = 0;
     let stick = true;
     let unseen = 0;
+    /* get_logs отказал или молчит: пустой экран — не «пока пусто», о причине говорит плашка над ним. */
+    let failing = false;
 
     const viewport = h('div', {
       class: 'log',
@@ -86,7 +91,7 @@
     }
 
     function updateEmpty() {
-      setHidden(emptyNote, viewport.childElementCount > 0);
+      setHidden(emptyNote, failing || viewport.childElementCount > 0);
     }
 
     function lineEl(line) {
@@ -132,16 +137,20 @@
       refetchQueued = false;
       const requestGeneration = generation;
       try {
-        const result = await Lz.api.callWithTimeout('get_logs', LOG_TIMEOUT_MS, lastId, source);
+        /* Отказ ядра — ошибка в плашке, а не «новых строк нет». */
+        const result = await Lz.api.query('get_logs', LOG_TIMEOUT_MS, lastId, source);
         if (requestGeneration !== generation) return;
         const lines = result && Array.isArray(result.lines) ? result.lines : [];
         if (lines.length) append(lines);
         const nextId = Number(result && result.last_id);
         if (Number.isFinite(nextId)) lastId = nextId;
+        failing = false;
         errorBox.update(null);
       } catch (err) {
+        failing = true;
         errorBox.update(`Журнал не обновляется: ${Lz.api.describeError(err)}`);
       } finally {
+        updateEmpty();
         fetching = false;
         schedule(refetchQueued || requestGeneration !== generation ? 0 : LOG_POLL_MS);
       }
@@ -166,19 +175,36 @@
       updateEmpty();
     }
 
+    /**
+     * Строки экрана от старых к новым; не помещаются в буфер целиком — берём самые свежие (хвост),
+     * а в тосте — сколько строк скопировано на самом деле.
+     */
     function copyVisible() {
-      const text = [...viewport.children].map((row) => {
+      const rows = [...viewport.children].map((row) => {
         const time = row.querySelector('.log__time').textContent;
         const src = row.querySelector('.log__src').textContent;
         const msg = row.querySelector('.log__msg').textContent;
         const level = (row.className.match(/is-(\w+)/) || [])[1] || 'info';
         return `${time} [${src}] ${level.toUpperCase()} ${msg}`;
-      }).join('\n');
-      if (!text) {
+      });
+      if (!rows.length) {
         ui.toast({ kind: 'info', text: 'На экране нет строк — копировать нечего.' });
         return;
       }
-      Lz.actions.copyText(text, `${fmt.count(viewport.childElementCount, 'строка', 'строки', 'строк')} журнала`);
+      const tail = [];
+      let size = 0;
+      for (let i = rows.length - 1; i >= 0; i -= 1) {
+        const added = rows[i].length + (tail.length ? 1 : 0);
+        if (size + added > COPY_LIMIT) break;
+        tail.unshift(rows[i]);
+        size += added;
+      }
+      if (!tail.length) tail.push(rows[rows.length - 1].slice(-COPY_LIMIT));
+      const lines = fmt.count(tail.length, 'строка', 'строки', 'строк');
+      const what = tail.length < rows.length
+        ? `${fmt.plural(tail.length, 'последняя', 'последние', 'последние')} ${lines} журнала (все в буфер не помещаются)`
+        : `${lines} журнала`;
+      Lz.actions.copyText(tail.join('\n'), what);
     }
 
     viewport.addEventListener('scroll', () => {
@@ -212,5 +238,6 @@
     };
   }
 
-  Lz.pages.logs = { title: 'Журнал', icon: 'list', create, layout: 'fill' };
+  /* stateless — журнал живёт своим опросом get_logs и снимка состояния не ждёт (app.js: экран загрузки). */
+  Lz.pages.logs = { title: 'Журнал', icon: 'list', create, layout: 'fill', stateless: true };
 })(window.Lz);

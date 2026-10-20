@@ -1,10 +1,6 @@
 """Контракт страницы и ядра: ключи state()["vpnclient"] — как в эталоне app/ui/mock-vpnclient-state.json
 (его же грузит имитация интерфейса). Проверяются заглушка «недоступно», передача снимка менеджера
-и — если модуль уже есть — снимок настоящего VpnClientManager."""
-import importlib.util
-
-import pytest
-
+и снимок настоящего VpnClientManager."""
 from app.core import vpnclient_placeholder
 from app.settings import Settings
 
@@ -57,8 +53,6 @@ def test_state_survives_broken_snapshot(tmp_path):
     assert got["available"] is False and "не ответил" in got["unavailable_reason"]
 
 
-@pytest.mark.skipif(importlib.util.find_spec("app.vpnclient.manager") is None,
-                    reason="app/vpnclient/manager.py ещё не написан")
 def test_real_manager_snapshot_matches_mock(tmp_path):
     from app.vpnclient.manager import VpnClientManager
     core = make_core(tmp_path, None)

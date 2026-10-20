@@ -32,8 +32,18 @@
     { value: 'reconnect', label: 'Переподключить' },
     { value: 'disconnect', label: 'Выключить VPN' },
   ];
-  const FINGERPRINTS = ['chrome', 'firefox', 'edge', 'safari', 'ios', 'android', 'random', 'randomized'];
-  const FINGERPRINT_LABEL = { random: 'случайный', randomized: 'случайный на каждое соединение' };
+  /*
+   * Все значения manager.FINGERPRINTS: пустое — «как в ссылке» (своего отпечатка Лазейка не добавляет). Значения
+   * нет в списке — <select> показал бы пустоту, поэтому список полный.
+   */
+  const FINGERPRINTS = ['', 'chrome', 'firefox', 'edge', 'safari', '360', 'qq', 'ios', 'android', 'random', 'randomized'];
+  const FINGERPRINT_LABEL = {
+    '': 'Как в ссылке',
+    360: '360 Browser',
+    qq: 'QQ Browser',
+    random: 'случайный',
+    randomized: 'случайный на каждое соединение',
+  };
   const CORE_UPDATE_ID = { 'sing-box': 'vpncore', xray: 'vpnxray' };
   const CORE_STATE_TEXT = { downloading: 'скачиваем с GitHub', verifying: 'проверяем SHA-256', installing: 'ставим', error: 'не скачалось' };
 
@@ -265,14 +275,14 @@
       exclude_nets: linesControl('exclude_nets', 'Исключённые подсети', 'Эти сети идут мимо VPN: домашняя сеть, принтеры, Radmin. По одной на строку.'),
       proxy_override: linesControl('proxy_override', 'Исключения системного прокси', 'К этим адресам Windows ходит без прокси. <local> — все адреса без точки. По одному на строку.'),
       kill_switch: flagControl('Kill switch',
-        'Пока VPN включён, интернет идёт только через сервер: упало ядро — сайты не откроются, пока VPN не переподключится. Обход Лазейки и локальная сеть работают. Закрыли Лазейку — запрет снимается сам.'),
+        'Только в режиме «Весь трафик (TUN)». Пока VPN включён, интернет идёт только через сервер: упало ядро — сайты не откроются, пока VPN не переподключится. Обход Лазейки и локальная сеть работают. Закрыли Лазейку — запрет снимается сам.'),
       on_sleep: choiceControl('После сна', 'Что делать, когда компьютер проснулся.', SLEEP_OPTIONS),
       tls_fragment: flagControl('Фрагментация ClientHello', 'Режет первое сообщение TLS на части — помогает, если провайдер узнаёт и режет соединение с сервером.'),
       mux: flagControl('Мультиплексирование (mux)', 'Несколько соединений в одном: быстрее открываются страницы. С XTLS Vision не работает — таким серверам Лазейка его не включит.'),
       noises: flagControl('UDP-шумы', 'Перед соединением отправляет случайные пакеты — против блокировок QUIC и Hysteria. Сервер подключается через помощник Xray.'),
       fingerprint: selectControl('fingerprint', 'TLS-отпечаток', FINGERPRINTS.map((value) => ({ value, label: FINGERPRINT_LABEL[value] || value })),
-        'Каким браузером притворяться при рукопожатии. Если у сервера в подписке свой отпечаток, берётся он.'),
-      latency_on_update: flagControl('Проверять задержку при запуске и после обновления подписки', 'Список серверов сразу покажет, какие отвечают быстрее.'),
+        'Каким браузером притворяться при рукопожатии, если в ссылке сервера отпечаток не указан. Указан — берётся он.'),
+      latency_on_update: flagControl('Проверять задержку после обновления подписки', 'Список серверов сразу покажет, какие отвечают быстрее.'),
       sub_update_hours: textControl('sub_update_hours', 'Обновлять подписки каждые, ч', { inputMode: 'numeric', maxLength: 2, hint: 'Если провайдер не прислал свой интервал.' }),
       verbose: flagControl('Подробный журнал ядра', 'Внимание: в журнал попадут адреса сайтов, которые вы открываете. Включайте только на время поиска ошибки и не отправляйте журнал посторонним.'),
       deeplink: flagControl('Открывать ссылки lazeyka://',
@@ -494,7 +504,7 @@
     }
     if (core.state === 'error') {
       const reason = core.message ? String(core.message) : CORE_STATE_TEXT.error;
-      return core.retry_at ? `${reason} Повторю в ${hhmm(core.retry_at)}.` : reason;
+      return core.retry_at ? `${reason} Повторим в ${hhmm(core.retry_at)}.` : reason;
     }
     if (!core.installed) {
       if (name === 'xray' && core.needed === false) return `не установлен · скачается с GitHub при запуске Лазейки (${fmt.bytes(info.size)}), пока не нужен ни одному серверу`;

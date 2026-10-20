@@ -168,18 +168,26 @@ def _cleanup(folder: Path, pattern: str, limit: int, keep: Path) -> None:
             pass
 
 
-def guard_servers(servers: list[str], targets: set[str]) -> list[str]:
+def guard_servers(servers: list[str], targets: set[str], keep: list[str] | tuple[str, ...] = ()) -> list[str]:
     """Сервер VPN не исключаем, если по этому же адресу сейчас отвечают Discord или YouTube
     (VPN через CDN): иначе вместе с VPN обход перестал бы трогать и сам сайт. Соседний адрес
-    той же сети не помеха — исключается ровно адрес сервера."""
+    той же сети не помеха — исключается ровно адрес сервера. keep — свои серверы Лазейки: их
+    исключаем всегда, иначе обход менял бы транспорт своего VPN."""
+    mandatory = set()
+    for raw in keep:
+        try:
+            mandatory.add(str(ipaddress.ip_address(raw)))
+        except ValueError:
+            continue
     out = []
     for raw in servers:
         try:
             ip = str(ipaddress.ip_address(raw))
         except ValueError:
             continue
-        if ip in targets:
+        if ip in targets and ip not in mandatory:
             log.info("Сервер VPN отвечает по тому же адресу, что Discord или YouTube, — не исключаю его")
             continue
-        out.append(ip)
+        if ip not in out:
+            out.append(ip)
     return out

@@ -171,12 +171,14 @@ def test_own_servers_are_excluded_always(tmp_path, world):
     core = _core(tmp_path, world, compat=True)
     core.vpnclient.snapshot_own = _own_proxy()
     # Совместимость включена, туннелей нет, свой VPN — системный прокси: план есть ради своего сервера.
-    assert core._vpn_plan() == {"interfaces": [ETH], "servers": [SERVER]}
+    # own_servers — исключаются всегда, даже совпав с адресом Discord; strict — без фильтра обход не запускается.
+    assert core._vpn_plan() == {"interfaces": [ETH], "servers": [SERVER], "own_servers": [SERVER], "strict": True}
     core.settings.update(lambda d: d["vpn"].__setitem__("compat", False))
     world.own_tun = True
     core.vpnclient.snapshot_own = _own_tun()
     plan = core._vpn_plan()
-    assert plan == {"interfaces": [ETH], "servers": [SERVER], "mode": "own"}   # всё, кроме своего TUN
+    assert plan == {"interfaces": [ETH], "servers": [SERVER], "mode": "own",   # всё, кроме своего TUN
+                    "own_servers": [SERVER], "strict": True}
     core.vpnclient.snapshot_own, world.own_tun = None, False
     assert core._vpn_plan() is None            # своего VPN нет — обычный перехват
 
@@ -361,6 +363,8 @@ def test_announce_is_silent_about_own(tmp_path, world):
     assert core.notices_sent == []
     world.incy, world.apps = True, ["Incy"]
     core._vpn_watch(announce=True)
+    assert core.notices_sent == [], "VPN объявляется, только если его видно два осмотра подряд"
+    core._vpn_watch(announce=True)
     assert len(core.notices_sent) == 1 and "Incy" in core.notices_sent[0][1]
 
 
@@ -376,6 +380,33 @@ def test_vpnclient_preflight_conflicts(tmp_path, world):
     world.incy, world.apps, world.proxy = False, ["Happ"], "http://127.0.0.1:10808"
     reply = core.vpnclient_preflight()
     assert reply["conflict"]["kind"] == "proxy" and "вернёт" in reply["conflict"]["text"]
+
+
+def test_vpnclient_preflight_tunnel_and_other_uac_user_both_reported(tmp_path, world):
+    """Чужой туннель и Лазейка под чужой учётной записью UAC: в прокси уйти нельзя — ядро так и говорит
+    (proxy_denied), не советует «включите как системный прокси»; менеджер спрошен всё равно — его прежний
+    отказ uac_user не должен остаться висеть."""
+    core = _core(tmp_path, world)
+    asked = []
+    core.vpnclient.proxy_unavailable = lambda: "Режим «Системный прокси» недоступен: другая учётная запись"
+    core.vpnclient.preflight = lambda: asked.append(1) or {"ok": True, "ask": False, "conflict": None}
+    world.incy, world.apps = True, ["Incy"]
+    conflict = core.vpnclient_preflight()["conflict"]
+    assert conflict["kind"] == "tunnel" and conflict["proxy_denied"].startswith("Режим «Системный прокси» недоступен")
+    assert "системный прокси" not in conflict["text"] and "выключите Incy" in conflict["text"]
+    assert asked == [1], "менеджер спрошен и при туннельном конфликте"
+    assert core._own_conflict(core.vpn_snapshot)["proxy_denied"], "плашка страницы видит тот же факт"
+    core.vpnclient.proxy_unavailable = lambda: None
+    assert "proxy_denied" not in core.vpnclient_preflight()["conflict"]
+
+
+def test_vpnclient_preflight_uac_user_beats_foreign_proxy(tmp_path, world):
+    core = _core(tmp_path, world)
+    uac = {"kind": "uac_user", "label": "Лазейка", "text": "Режим «Системный прокси» недоступен"}
+    core.vpnclient.preflight = lambda: {"ok": True, "ask": True, "conflict": uac}
+    core.settings.update(lambda d: d["vpnclient"].__setitem__("mode", "proxy"))
+    world.apps, world.proxy = ["Happ"], "http://127.0.0.1:10808"
+    assert core.vpnclient_preflight()["conflict"]["kind"] == "uac_user", "прокси под чужой учётной записью не включится вовсе"
 
 
 # ------------------------------------------------------------ трей

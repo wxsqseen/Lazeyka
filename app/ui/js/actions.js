@@ -5,19 +5,41 @@
  */
 (function (Lz) {
   const RUNNING_LIKE = new Set(['running', 'starting']);
+  /*
+   * Ключи включения: заняты всё время от нажатия до ответа ядра — и пока идёт vpn_preflight, и пока открыто
+   * окно «Работает VPN». Повторное нажатие (двойной щелчок, кнопка плашки) второго окна и старта не даст.
+   */
+  const POWER_KEY = { zapret: 'zapret_power', tg: 'tg_power' };
+  /* Идущее включение по ключу: второй вызов во время него получает тот же Promise, а не null «уже идёт». */
+  const starting = new Map();
 
-  /** Включить обход. null — человек отказался в окне про VPN. */
-  async function startZapret() {
-    const gate = await Lz.vpnGate.confirmStart('zapret');
-    if (!gate.proceed) return null;
-    return Lz.api.run({ method: 'zapret_start', args: gate.asked ? [true] : [], key: 'zapret_power' });
+  /**
+   * Одно включение на ключ. Кто позвал во время идущего (кнопка питания, затем «Подключить Telegram»), дождётся
+   * его итога. Ключ занят чем-то другим (выключение, «Найти и включить») — null, как прежде.
+   */
+  function startOnce(key, flow) {
+    if (starting.has(key)) return starting.get(key);
+    const promise = Lz.api.hold(key, flow).finally(() => starting.delete(key));
+    starting.set(key, promise);
+    return promise;
   }
 
-  /** Включить Telegram-прокси. null — человек отказался в окне про VPN. */
-  async function startTelegram() {
-    const gate = await Lz.vpnGate.confirmStart('tg');
-    if (!gate.proceed) return null;
-    return Lz.api.run({ method: 'tg_start', key: 'tg_power' });
+  /** Включить обход. null — человек отказался в окне про VPN или ключ занят другим действием. */
+  function startZapret() {
+    return startOnce(POWER_KEY.zapret, async () => {
+      const gate = await Lz.vpnGate.confirmStart('zapret');
+      if (!gate.proceed) return null;
+      return Lz.api.run({ method: 'zapret_start', args: gate.asked ? [true] : [], key: 'zapret_start' });
+    });
+  }
+
+  /** Включить Telegram-прокси. null — человек отказался в окне про VPN или ключ занят другим действием. */
+  function startTelegram() {
+    return startOnce(POWER_KEY.tg, async () => {
+      const gate = await Lz.vpnGate.confirmStart('tg');
+      if (!gate.proceed) return null;
+      return Lz.api.run({ method: 'tg_start', key: 'tg_start' });
+    });
   }
 
   function toggleZapret(status) {
@@ -50,8 +72,9 @@
   }
 
   /**
-   * «Подключить Telegram»: если прокси выключен — сначала включаем его,
-   * иначе Telegram получит ссылку на неработающий адрес.
+   * «Подключить Telegram»: если прокси выключен — сначала включаем его (или ждём уже начатое включение),
+   * иначе Telegram получит ссылку на неработающий адрес. null от включения — человек отказался в окне
+   * (или прокси как раз выключают): открывать Telegram не к чему.
    */
   async function connectTelegram(buttonCtl) {
     if (buttonCtl) buttonCtl.setBusy(true);
@@ -96,6 +119,7 @@
   }
 
   Lz.actions = {
+    POWER_KEY,
     startZapret,
     startTelegram,
     toggleZapret,

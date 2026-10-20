@@ -1,9 +1,8 @@
-# Картинки состояний «Своего VPN»: генерация в Codex
+# Картинки состояний «Своего VPN»: промпты и обработка
 
 Карточка «Подключение» на странице «VPN», пока VPN не подключён, показывает вместо пустых нулей скорости
-и плоского графика картинку состояния и одну фразу о том, что дальше. Картинки нарисованы встроенным
-генератором изображений Codex (CLI из расширения VS Code) — той же семьёй, что и `vpn-empty.png`
-(`codex-vpn-empty.md`): серые линии #7D818A, один синий акцент #5B8DEF, ноутбук — стена с проёмом — сервер.
+и плоского графика картинку состояния и одну фразу о том, что дальше. Черновики — по три варианта на
+состояние по промптам ниже, той же семьёй, что и `vpn-empty.png` (`vpn-empty.md`): серые линии #7D818A, один синий акцент #5B8DEF, ноутбук — стена с проёмом — сервер.
 
 | Состояние | Файл | Выбран | Что на картинке |
 |---|---|---|---|
@@ -34,21 +33,20 @@
 
 ## Очистка
 
-`build/clean_codex_art.py` убирает белый фон и сводит цвета к двум из палитры, как для `vpn-empty.png`.
+`build/clean_art.py` убирает белый фон и сводит цвета к двум из палитры, как для `vpn-empty.png`.
 Для этой семьи добавлен ключ `--box`: вырезается одна и та же область черновика, а не поля по рисунку, —
 у трёх картинок сцены (выключено, подключаемся, не подключилось) одинаковые размеры 640×258 и масштаб,
 ноутбук и стена при смене состояния стоят на месте. Без `--box` скрипт работает как раньше: прогон на
 `vpn-empty-v3.png` даёт `vpn-empty.png` байт в байт.
 
-Команды (из папки черновиков; рядом `reference-icon.png` — значок Лазейки и `reference-family.png` —
-черновик `vpn-empty-v3.png`, по которому подбирались линии):
+К промптам прикладывались `reference-icon.png` — значок Лазейки и `reference-family.png` — черновик
+`vpn-empty-v3.png`, по которому подбирались линии. Обработка выбранных черновиков:
 
 ```
-codex exec -s workspace-write --skip-git-repo-check -i reference-icon.png -i reference-family.png -o result.md - < prompt.md
-.venv\Scripts\python.exe build\clean_codex_art.py <черновики>\off-v1.png app\ui\img\vpn-off.png --box 78,312,1318,812
-.venv\Scripts\python.exe build\clean_codex_art.py <черновики>\connect-v1.png app\ui\img\vpn-connect.png --box 78,312,1318,812
-.venv\Scripts\python.exe build\clean_codex_art.py <черновики>\error-v1.png app\ui\img\vpn-error.png --box 78,312,1318,812
-.venv\Scripts\python.exe build\clean_codex_art.py <черновики>\core-v3.png app\ui\img\vpn-core.png --box 103,298,1343,798
+.venv\Scripts\python.exe build\clean_art.py <черновики>\off-v1.png app\ui\img\vpn-off.png --box 78,312,1318,812
+.venv\Scripts\python.exe build\clean_art.py <черновики>\connect-v1.png app\ui\img\vpn-connect.png --box 78,312,1318,812
+.venv\Scripts\python.exe build\clean_art.py <черновики>\error-v1.png app\ui\img\vpn-error.png --box 78,312,1318,812
+.venv\Scripts\python.exe build\clean_art.py <черновики>\core-v3.png app\ui\img\vpn-core.png --box 103,298,1343,798
 ```
 
 Области `--box` подобраны по рисункам: у трёх картинок сцены они занимают x 138–1256, y 340–783 черновика
@@ -147,7 +145,7 @@ Make 3 variants with different concepts and save them as core-v1.png, core-v2.pn
 Then reply with one short sentence per file describing it.
 ```
 
-## Ответ Codex
+## Черновики
 
 - `off-v1.png` — серый пунктирный маршрут и синий символ питания на экране ноутбука (выбран).
 - `off-v2.png` — серый пунктирный маршрут и синий символ питания над ноутбуком.

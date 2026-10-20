@@ -295,6 +295,33 @@ def test_add_servers_and_filters(store):
     assert store.server(a.id).name == "A"                                     # наружу — копии
 
 
+def test_pasting_link_again_updates_its_parameters(store, path):
+    """В key() нет ключа REALITY: повторная вставка ссылки с новым pbk обновляет сервер, своё имя остаётся."""
+    base = (f"vless://{U1}@srv.example.com:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&sid=ab"
+            "&flow=xtls-rprx-vision&pbk=")
+    old = parse_link(base + "Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw#a")
+    new = parse_link(base + "AAAJ2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw#a")
+    assert old.key() == new.key()
+    store.add_servers([old])
+    store.rename_server(old.key(), "Мой")
+    report = store.add_servers([new])
+    assert report.updated == [old.key()] and report.added == [] and report.kept == []
+    kept = store.server(old.key())
+    assert kept.tls["pbk"].startswith("AAA") and kept.custom_name == "Мой"
+    assert ProfileStore(path).server(old.key()).tls["pbk"].startswith("AAA"), "записано на диск"
+    assert store.add_servers([new]).kept == [old.key()], "та же ссылка — без изменений"
+
+
+def test_pasted_link_does_not_rewrite_subscription_server(store):
+    """Сервер подписки ведёт провайдер: вставленная отдельно ссылка его не меняет."""
+    sub = _sub(store)
+    a = _server("A")
+    store.apply_decoded(sub.id, _decoded([a]))
+    changed = parse_link(a.raw.replace("#A", "#Другое"))
+    report = store.add_servers([changed])
+    assert report.kept == [a.id] and not report.updated and store.server(a.id).name == "A"
+
+
 def test_remove_server_and_subscription(store):
     sub = _sub(store)
     a, b = _server("A"), _server("B", host="b.example.com")

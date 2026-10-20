@@ -12,8 +12,12 @@
  *   admin=0|1      — права администратора (по умолчанию 1)
  *   theme=system|dark|light
  *   demo=test|install|diag|check — сразу запустить долгую операцию (ещё значения — в дополнениях)
- *   demo=update|downloading|verifying|installing|done|error|uptodate — застывшее состояние
+ *   demo=update|downloading|verifying|installing|done|error|uptodate|apprestart — застывшее состояние
  *     страницы «Обновления» для скриншотов и ручной проверки UI (таймеры не меняют его)
+ *   demo=refuse — ядро отказывает в get_state, get_logs, lists_get и fakes_get ({ok: false, error}), как
+ *     api._guard при исключении: страница не должна принять отказ за данные
+ *   portable=1 — переносной режим: автозапуск не включается (отказ, как autostart.refusal); с autostart=1 —
+ *     он был включён раньше, висит плашка autostart
  */
 (function () {
   const params = new URLSearchParams(window.location.search);
@@ -159,6 +163,10 @@
 
   const startedAt = nowSec();
   const admin = flag('admin', true);
+  /* Как autostart.refusal ядра: в переносном режиме автозапуск не работает. */
+  const AUTOSTART_REFUSAL = flag('portable', false)
+    ? 'В переносном режиме автозапуск не работает: Windows запускала бы копию из Program Files, а она хранит настройки не в папке LazeykaData рядом с exe, а в ProgramData — после входа в Windows открылась бы «чистая» Лазейка. Запускайте Лазейку вручную или поставьте её в обычном режиме (без папки LazeykaData рядом с exe).'
+    : null;
   const theme = ['system', 'dark', 'light'].includes(params.get('theme')) ? params.get('theme') : 'system';
   const secret = 'a3f1c29e7b5d40e8916c2d7f0b4e8a61';
 
@@ -191,7 +199,7 @@
       ],
       /* Проверку доступности ведёт mock-zapret.js: что открывается, зависит от стратегии. */
       check: { running: false, at: null, results: [] },
-      test: { running: false, kind: 'standard', total: 0, done: 0, current: null, best: null, error: null, finished_at: null, results: [] },
+      test: { running: false, kind: 'standard', total: 0, done: 0, current: null, best: null, error: null, cancelled: false, finished_at: null, results: [] },
     },
     tg: {
       status: 'running',
@@ -212,18 +220,29 @@
       last_check: startedAt - 86400 * 1.3,
       error: null,
       count: 0,
+      /* Заголовки — как TITLES в app/updates/manager.py. */
       items: [
         {
           id: 'zapret', title: 'Стратегии zapret', subtitle: 'Flowseal/zapret-discord-youtube',
           current: '1.10.3', latest: '1.10.3', available: false, skipped: false,
           published_at: '2026-09-20T13:46:00Z', notes: '', url: 'https://github.com/Flowseal/zapret-discord-youtube/releases',
           state: 'idle', progress: null, message: null, can_rollback: false,
+          checked: false, check_error: null, restart: false,
         },
         {
-          id: 'tgws', title: 'Прокси для Telegram', subtitle: 'Flowseal/tg-ws-proxy',
+          id: 'tgws', title: 'Ядро Telegram-прокси', subtitle: 'Flowseal/tg-ws-proxy',
           current: '1.11.2', latest: '1.11.2', available: false, skipped: false,
           published_at: '2026-09-28T09:10:00Z', notes: '', url: 'https://github.com/Flowseal/tg-ws-proxy/releases',
           state: 'idle', progress: null, message: null, can_rollback: false,
+          checked: false, check_error: null, restart: false,
+        },
+        /* Сама Лазейка — третий компонент той же формы (контракт, «самообновление Лазейки»). */
+        {
+          id: 'app', title: 'Лазейка', subtitle: 'wxsqseen/Lazeyka',
+          current: '1.0.0', latest: '1.0.0', available: false, skipped: false,
+          published_at: '2026-10-18T10:00:00Z', notes: '', url: 'https://github.com/wxsqseen/Lazeyka/releases',
+          state: 'idle', progress: null, message: null, can_rollback: false,
+          checked: false, check_error: null, restart: false,
         },
       ],
     },
@@ -250,6 +269,9 @@
 
   const fakes = { discord: 'quic_initial_www_google_com', game: 'quic_initial_5ka_ru' };
   let hostsUpToDate = false;
+  /* Что «чинит» диагностика стенда: TCP timestamps выключены, драйвер WinDivert остался от zapret. */
+  let tcpTimestamps = false;
+  let windivertStale = true;
   const previousVersions = {};
   let testTimer = null;
 
@@ -441,12 +463,13 @@
       }
     }
     const pingOk = clamp(Math.round(PING_TOTAL * quality + random(-0.6, 0.6)), 0, PING_TOTAL);
+    /* Как tester.summarize ядра: доля удачных среди учтённых проверок; «не поддерживается» не считается. */
     const checked = okCount + failCount;
-    const score = checked ? 0.85 * (okCount / checked) + 0.15 * (pingOk / PING_TOTAL) : 0;
+    const score = checked ? okCount / checked : 0;
     return {
       id, label, ok: okCount, fail: failCount, unsup: unsupCount,
       ping_ok: kind === 'dpi' ? 0 : pingOk, ping_total: kind === 'dpi' ? 0 : PING_TOTAL,
-      score: Math.round(score * 100) / 100, started: true, targets,
+      score: Math.round(score * 1000) / 1000, started: true, targets,
     };
   }
 
@@ -463,6 +486,7 @@
     test.running = false;
     test.current = null;
     test.finished_at = nowSec();
+    test.cancelled = Boolean(cancelled);
     test.best = bestResult(test.results);
     log('zapret', 'info', cancelled
       ? `Подбор остановлен на ${test.done} из ${test.total}`
@@ -490,7 +514,7 @@
   }
 
   function recount() {
-    state.updates.count = state.updates.items.filter((item) => item.available && !item.skipped && item.state !== 'done').length;
+    state.updates.count = state.updates.items.filter((item) => item.available && !item.skipped && !item.restart).length;
   }
 
   function setNotice(notice) {
@@ -509,6 +533,7 @@
     later(UPDATE_CHECK_MS, () => {
       updates.checking = false;
       updates.last_check = nowSec();
+      updates.items.forEach((entry) => { entry.checked = true; entry.check_error = null; });
       const item = updateItem('zapret');
       if (item.current !== '1.10.4') {
         Object.assign(item, {
@@ -524,6 +549,32 @@
       }
       recount();
       log('app', 'info', `Проверка обновлений: доступно ${updates.count}`);
+    });
+  }
+
+  const INSTALL_TEXT = {
+    zapret: 'Устанавливаем и перезапускаем обход…',
+    tgws: 'Устанавливаем и перезапускаем прокси…',
+    app: 'Ставим новый Lazeyka.exe рядом с работающим…',
+  };
+
+  /*
+   * Как ядро после установки или отката Лазейки (updates.manager: _app_restart): новый exe на диске, нужен
+   * перезапуск — restart и плашка app-restart. Откат к версии, которая и работает, перезапуска не требует.
+   */
+  function markAppRestart(item, rolledBack) {
+    if (rolledBack && item.current === state.app.version) {
+      item.restart = false;
+      dropNotice('app-restart');
+      return;
+    }
+    Object.assign(item, { restart: true, available: false });
+    setNotice({
+      id: 'app-restart', level: 'info', persistent: true, dismissible: true, page: null,
+      text: rolledBack
+        ? `Лазейка ${item.current} возвращена — перезапустите её, чтобы она заработала.`
+        : `Лазейка ${item.current} установлена — перезапустите её, чтобы заработала новая версия.`,
+      action: { label: 'Перезапустить', call: 'app_restart', args: [] },
     });
   }
 
@@ -546,7 +597,7 @@
       item.message = 'Проверяем целостность файла…';
       later(900, () => {
         item.state = 'installing';
-        item.message = 'Устанавливаем и перезапускаем обход…';
+        item.message = INSTALL_TEXT[item.id] || 'Устанавливаем обновление…';
         later(1300, () => {
           previousVersions[item.id] = item.current;
           item.current = item.latest;
@@ -555,6 +606,7 @@
           item.can_rollback = true;
           item.message = `Готово: установлена версия ${item.latest}. Предыдущую мы сохранили — её можно вернуть кнопкой «Откатить».`;
           if (item.id === 'zapret') state.zapret.pack.version = item.latest;
+          if (item.id === 'app') markAppRestart(item);
           dropNotice('update-available');
           recount();
           log('app', 'info', `Установлено обновление ${item.title} ${item.latest}`);
@@ -586,31 +638,32 @@
 
   /* ---------- Диагностика ---------- */
 
+  /*
+   * Как zapret/diagnostics.run_all: те же id, заголовки и исправления (tcp_timestamps, windivert_cleanup,
+   * remove_service:<служба>). Пункты о найденных программах ядро ставит, только когда они найдены.
+   */
   function diagItems() {
     const zapret = state.zapret;
     const hasConflict = zapret.conflicts.some((conflict) => conflict.id === 'service:GoodbyeDPI');
     return [
       { id: 'bfe', title: 'Base Filtering Engine', status: 'ok', text: 'Служба работает', fix: null },
-      {
-        id: 'admin', title: 'Права администратора', status: admin ? 'ok' : 'error',
-        text: admin ? 'Лазейка запущена от имени администратора' : 'Без прав администратора обход не запустится',
-        fix: admin ? null : { id: 'relaunch', label: 'Перезапустить' },
-      },
-      { id: 'tcp_ts', title: 'TCP timestamps', status: 'ok', text: 'Включены', fix: null },
-      hasConflict
-        ? { id: 'goodbyedpi', title: 'Другие обходы', status: 'error', text: 'Запущена служба GoodbyeDPI — она перехватывает тот же трафик, что и zapret.', fix: { id: 'goodbyedpi', label: 'Удалить службу' } }
-        : { id: 'goodbyedpi', title: 'Другие обходы', status: 'ok', text: 'Не найдено', fix: null },
-      { id: 'adguard', title: 'AdGuard', status: 'warn', text: 'AdGuard запущен и может мешать Discord. Добавьте Discord в исключения или выключите фильтрацию HTTPS.', fix: null },
-      { id: 'vpn', title: 'VPN', status: 'warn', text: 'Найдена служба NordVPN. Пока работает обход, VPN лучше выключить.', fix: null },
+      { id: 'proxy', title: 'Системный прокси', status: 'ok', text: 'Не используется', fix: null },
+      tcpTimestamps
+        ? { id: 'tcp_ts', title: 'TCP timestamps', status: 'ok', text: 'Включены', fix: null }
+        : { id: 'tcp_ts', title: 'TCP timestamps', status: 'warn', text: 'Выключены — часть стратегий (fooling=ts) без них не работает.', fix: { id: 'tcp_timestamps', label: 'Включить' } },
+      { id: 'adguard', title: 'Adguard', status: 'error', text: 'Запущен Adguard — он мешает Discord при работающем zapret.', fix: null },
+      { id: 'vpn', title: 'VPN', status: 'ok', text: 'VPN не обнаружен', fix: null },
+      { id: 'doh', title: 'Безопасный DNS', status: 'info', text: 'Включите «безопасный DNS» в браузере или в параметрах Windows 11 — иначе провайдер может подменять адреса сайтов.', fix: null },
       hostsUpToDate
-        ? { id: 'hosts', title: 'Файл hosts', status: 'ok', text: 'Лишних записей нет', fix: null }
-        : { id: 'hosts', title: 'Файл hosts', status: 'warn', text: 'В hosts есть записи для youtube.com — YouTube может не открываться.', fix: { id: 'hosts', label: 'Убрать записи' } },
-      { id: 'killer', title: 'Killer Network Service', status: 'ok', text: 'Не найдено', fix: null },
-      { id: 'intel', title: 'Intel Connectivity Network Service', status: 'ok', text: 'Не найдено', fix: null },
-      { id: 'smartbyte', title: 'SmartByte', status: 'ok', text: 'Не найдено', fix: null },
-      { id: 'windivert', title: 'Драйвер WinDivert', status: 'ok', text: 'Установлен и не занят другими программами', fix: null },
-      { id: 'doh', title: 'Защищённый DNS', status: 'info', text: 'Windows не использует DNS-over-HTTPS. Если сайты всё равно не открываются, включите его в параметрах сети.', fix: null },
-    ];
+        ? null
+        : { id: 'hosts_yt', title: 'Файл hosts', status: 'warn', text: 'В hosts есть записи для youtube.com или youtu.be — они могут ломать YouTube.', fix: null },
+      windivertStale
+        ? { id: 'windivert_stale', title: 'WinDivert', status: 'warn', text: 'Драйвер WinDivert остался загруженным от zapret (C:\\ProgramData\\Lazeyka\\zapret), хотя winws не работает. Если обход не запускается — выгрузите его.', fix: { id: 'windivert_cleanup', label: 'Выгрузить драйвер' } }
+        : { id: 'windivert', title: 'WinDivert', status: 'ok', text: 'Конфликтов драйвера нет', fix: null },
+      hasConflict
+        ? { id: 'service_GoodbyeDPI', title: 'Служба GoodbyeDPI', status: 'error', text: 'Служба GoodbyeDPI — другой обход блокировок, конфликтует с zapret.', fix: { id: 'remove_service:GoodbyeDPI', label: 'Удалить службу' } }
+        : { id: 'conflicts', title: 'Другие обходы', status: 'ok', text: 'Конфликтующих служб нет', fix: null },
+    ].filter(Boolean);
   }
 
   /* ---------- Проверки Telegram ---------- */
@@ -634,13 +687,14 @@
     if (!Number.isInteger(values.port) || values.port < 1 || values.port > PORT_MAX) errors.port = 'Порт должен быть числом 1–65535';
     if (!/^[0-9a-f]{32}$/.test(String(values.secret || ''))) errors.secret = 'Ключ — 32 шестнадцатеричных символа';
     if (!Array.isArray(values.dc_ip) || values.dc_ip.some((line) => !/^\d+:\S+$/.test(line))) errors.dc_ip = 'Формат строки: номер:адрес';
-    if (!Number.isInteger(values.pool_size) || values.pool_size < 1 || values.pool_size > 64) errors.pool_size = 'От 1 до 64';
+    if (!Number.isInteger(values.pool_size) || values.pool_size < 0 || values.pool_size > 32) errors.pool_size = 'От 0 до 32';
     if (!Number.isInteger(values.buf_kb) || values.buf_kb < 4 || values.buf_kb > 4096) errors.buf_kb = 'От 4 до 4096 КБ';
     return errors;
   }
 
   function restartTelegram() {
     state.tg.status = 'starting';
+    state.tg.error = null;
     later(800, () => {
       state.tg.status = 'running';
       state.tg.started_at = nowSec();
@@ -659,12 +713,13 @@
       return reply({ lines: matched.slice(-LOG_RESPONSE_LIMIT), last_id: logId }, STATE_DELAY_MS);
     },
 
+    /* Как core.finish_onboarding: приветствие закрыто в любом случае, отказ автозапуска — ответом. */
     finish_onboarding(opts) {
       state.app.first_run = false;
       state.settings.check_updates = Boolean(opts && opts.check_updates);
-      state.settings.autostart = Boolean(opts && opts.autostart);
       state.updates.auto_check = state.settings.check_updates;
       log('app', 'info', 'Приветствие пройдено');
+      if (opts && opts.autostart) return api.save_settings({ autostart: true });
       return ok();
     },
 
@@ -673,6 +728,9 @@
       const unknown = Object.keys(partial).filter((key) => !(key in state.settings));
       if (unknown.length) return fail(`Неизвестные настройки: ${unknown.join(', ')}`);
       if ('theme' in partial && !['system', 'dark', 'light'].includes(partial.theme)) return fail('Нет такой темы');
+      if (partial.autostart === true && AUTOSTART_REFUSAL) return fail(`Автозапуск не изменён: ${AUTOSTART_REFUSAL}`);
+      /* Как ядро: выключили автозапуск — плашке autostart («включён, но не работает») говорить не о чем. */
+      if (partial.autostart === false) dropNotice('autostart');
       Object.assign(state.settings, partial);
       if ('check_updates' in partial) state.updates.auto_check = Boolean(partial.check_updates);
       return ok();
@@ -712,6 +770,10 @@
 
     hide_window: () => ok(),
     quit_app: () => ok(),
+    app_restart() {
+      log('app', 'info', 'Стенд: перезапуск Лазейки (exe с --replace)');
+      return ok();
+    },
 
     zapret_start() {
       const denied = requireZapret();
@@ -789,7 +851,7 @@
       const queue = Array.isArray(ids) && ids.length ? ids.filter((id) => STRATEGY_IDS.includes(id)) : STRATEGY_IDS.slice();
       Object.assign(test, {
         running: true, kind: kind === 'dpi' ? 'dpi' : 'standard', total: queue.length, done: 0,
-        current: queue[0], best: null, error: null, finished_at: null, results: [],
+        current: queue[0], best: null, error: null, cancelled: false, finished_at: null, results: [],
       });
       log('zapret', 'info', `Подбор стратегий: ${queue.length}, проверка ${test.kind}`);
       testTimer = later(TEST_STEP_MS, () => runTestStep(queue, test.kind));
@@ -815,8 +877,17 @@
       const list = LISTS.find((item) => item.id === id);
       if (!list) return fail(`Списка «${id}» нет`);
       if (!list.editable) return fail('Встроенные списки менять нельзя');
-      const bad = String(text).split(/\r?\n/).map((line) => line.trim()).find((line) => line && /\s/.test(line));
-      if (bad) return fail(`Строка «${bad}» содержит пробел — по одному домену или адресу на строку`);
+      if (state.zapret.test.running) return fail('Идёт подбор стратегии — дождитесь окончания или остановите его');
+      /* Как lists.clean_list ядра: непонятные строки — отказ с их номерами (не больше трёх), ничего не записано. */
+      const domains = id !== 'ipset-exclude-user';
+      const valid = domains ? /^(\*\.)?[a-z0-9а-яё-]+(\.[a-z0-9а-яё-]+)+$/i : /^[\d.:/a-f-]+$/i;
+      const bad = String(text).split(/\r?\n/).map((line, index) => [index + 1, line.trim()])
+        .filter(([, line]) => line && !line.startsWith('#') && !valid.test(line));
+      if (bad.length) {
+        const shown = bad.slice(0, 3).map(([number, line]) => `строка ${number}: «${line.slice(0, 60)}»`).join('; ');
+        const more = bad.length > 3 ? ` и ещё ${bad.length - 3}` : '';
+        return fail(`Не похоже на ${domains ? 'домен' : 'IP-адрес, подсеть или диапазон'} — ${shown}${more}`);
+      }
       list.text = String(text);
       if (state.zapret.status === 'running') startZapret('список изменён');
       return ok();
@@ -828,21 +899,28 @@
       if (!(slot in fakes)) return fail(`Неизвестный слот: ${slot}`);
       if (!FAKE_FILES.includes(name)) return fail(`Файла ${name}.bin нет в папке bin`);
       fakes[slot] = name;
+      /* Как zapret.manager._apply_if_running: работающий обход перезапускается с новым фейком. */
+      if (state.zapret.status === 'running') startZapret('фейк заменён');
       return ok();
     },
 
     hosts_check() {
       return ok(hostsUpToDate
-        ? { up_to_date: true, text: 'Файл hosts в порядке — все записи на месте.' }
-        : { up_to_date: false, text: 'В hosts не хватает 6 записей для голосовых серверов Discord.' }, 900);
+        ? { up_to_date: true, missing: 0, conflicts: 0, total: 6, text: 'Файл hosts в порядке: все 6 записей на месте.' }
+        : { up_to_date: false, missing: 6, conflicts: 1, total: 6, text: 'Файл hosts нужно обновить — не хватает записей: 6, старых конфликтующих строк: 1.' }, 900);
     },
 
+    /* Как hosts.apply: {added, disabled, backup} — сколько добавлено, сколько своих строк закомментировано, где копия. */
     hosts_apply() {
+      const added = hostsUpToDate ? 0 : 6;
+      const disabled = hostsUpToDate ? 0 : 1;
       hostsUpToDate = true;
-      return ok(null, 900);
+      return ok({ added, disabled, backup: 'C:\\ProgramData\\Lazeyka\\backups\\hosts-20261020-101500.bak' }, 900);
     },
 
+    /* Как Core.tg_start: человек включает сам — плашка tg-down снимается, неудачу покажет ответ. */
     tg_start() {
+      dropNotice('tg-down');
       restartTelegram();
       return ok();
     },
@@ -859,9 +937,22 @@
       return ok();
     },
 
+    /* Как ядро: прокси как раз включается — ждём включения; не работает — отказ с причиной, ссылка не открывается. */
     tg_open_in_telegram() {
-      log('app', 'info', 'Открываем ссылку tg://proxy в Telegram Desktop');
-      return ok();
+      const tg = state.tg;
+      const answer = () => {
+        if (tg.status !== 'running') {
+          const reason = tg.status === 'error' && tg.error ? ` (${tg.error})` : '';
+          return fail(`Прокси не работает${reason} — Telegram через него не подключится. Включите прокси и нажмите «Подключить Telegram» снова.`);
+        }
+        log('app', 'info', 'Открываем ссылку tg://proxy в Telegram Desktop');
+        return ok();
+      };
+      if (tg.status !== 'starting') return answer();
+      return new Promise((resolve) => {
+        const waitStart = () => (tg.status === 'starting' ? later(100, waitStart) : resolve(answer()));
+        waitStart();
+      });
     },
 
     tg_copy_link: () => ok(),
@@ -906,17 +997,38 @@
       return ok();
     },
 
+    /* Как core.diag_fix (diagnostics.apply_fix): исправить, сразу запустить проверку заново и ответить, что сделано. */
     diag_fix(id) {
-      later(900, () => {
-        if (id === 'goodbyedpi') state.zapret.conflicts = state.zapret.conflicts.filter((c) => c.id !== 'service:GoodbyeDPI');
-        if (id === 'hosts') hostsUpToDate = true;
-        state.diag.items = state.diag.items.map((item) => (item.fix && item.fix.id === id
-          ? { ...item, status: 'ok', text: 'Исправлено', fix: null } : item));
-      });
-      return ok(null, 600);
+      const denied = requireZapret();
+      if (denied) return denied;
+      let message;
+      if (id === 'tcp_timestamps') {
+        tcpTimestamps = true;
+        message = 'TCP timestamps включены';
+      } else if (id === 'windivert_cleanup') {
+        message = windivertStale ? 'Драйвер WinDivert выгружен' : 'WinDivert не найден';
+        windivertStale = false;
+      } else if (id === 'remove_service:GoodbyeDPI') {
+        state.zapret.conflicts = state.zapret.conflicts.filter((c) => c.id !== 'service:GoodbyeDPI');
+        message = 'Служба GoodbyeDPI удалена';
+      } else {
+        return fail(String(id).startsWith('remove_service:') ? 'Неизвестная служба' : 'Неизвестное исправление');
+      }
+      api.diag_run();
+      return ok({ message }, 600);
     },
 
-    discord_clear_cache: () => ok(null, 1200),
+    /*
+     * Как diagnostics.clear_discord_cache: отчёт через «; ». В адресе discord=0 — «Discord не найден», discord=nocache —
+     * папок кэша нет (пустой отчёт), discord=locked — Discord закрыт, но один кэш не удалился.
+     */
+    discord_clear_cache: () => ok({
+      message: {
+        0: 'Discord не найден',
+        nocache: '',
+        locked: 'Discord закрыт; Discord: не удалось удалить «Cache»; Discord: очищен «Code Cache»; Discord: очищен «GPUCache»',
+      }[params.get('discord')] ?? 'Discord закрыт; Discord: очищен «Cache»; Discord: очищен «Code Cache»; Discord: очищен «GPUCache»',
+    }, 1200),
 
     updates_check() {
       checkForUpdates();
@@ -944,16 +1056,22 @@
     updates_rollback(id) {
       const item = updateItem(id);
       if (!item || !item.can_rollback) return fail('Откатывать нечего');
-      item.state = 'installing';
+      item.state = 'rolling_back';
       item.message = 'Возвращаем предыдущую версию…';
       later(1300, () => {
         item.current = previousVersions[item.id] || item.current;
         item.available = item.latest !== item.current;
         item.skipped = false;
         item.can_rollback = false;
-        item.state = 'idle';
-        item.message = null;
+        item.state = 'rolled_back';
+        item.message = `Возвращена версия ${item.current}`;
         if (item.id === 'zapret') state.zapret.pack.version = item.current;
+        if (item.id === 'app') {
+          markAppRestart(item, true);
+          item.message = item.restart
+            ? `Лазейка ${item.current} возвращена. Перезапустите Лазейку.`
+            : `Вернулась версия ${item.current} — она и работает сейчас.`;
+        }
         recount();
       });
       return ok();
@@ -961,6 +1079,14 @@
   };
 
   /* ---------- Запуск имитации ---------- */
+
+  if (AUTOSTART_REFUSAL && flag('autostart', false)) {
+    state.settings.autostart = true;
+    setNotice({
+      id: 'autostart', level: 'warn', text: AUTOSTART_REFUSAL, persistent: true, dismissible: true, page: null,
+      action: { label: 'Выключить автозапуск', call: 'save_settings', args: [{ autostart: false }] },
+    });
+  }
 
   const autoCheckTimer = state.settings.check_updates
     ? later(AUTO_UPDATE_CHECK_DELAY_MS, checkForUpdates) : null;
@@ -975,30 +1101,48 @@
     downloading: () => freezeZapretUpdate({ state: 'downloading', progress: 0.42, message: 'Скачиваем: 1,5 из 3,6 МБ' }),
     verifying: () => freezeZapretUpdate({ state: 'verifying', message: 'Проверяем целостность файла…' }),
     installing: () => freezeZapretUpdate({ state: 'installing', message: 'Устанавливаем и перезапускаем обход…' }),
-    done: () => freezeZapretUpdate({
-      state: 'done', available: false, current: '1.10.4', can_rollback: true,
-      message: 'Готово: установлена версия 1.10.4. Предыдущую мы сохранили — её можно вернуть кнопкой «Откатить».',
-    }),
+    /* Прежняя версия — та, что стояла до установки: откат вернёт её, а не ту же 1.10.4. */
+    done: () => {
+      previousVersions.zapret = updateItem('zapret').current;
+      freezeZapretUpdate({
+        state: 'done', available: false, current: '1.10.4', can_rollback: true,
+        message: 'Готово: установлена версия 1.10.4. Предыдущую мы сохранили — её можно вернуть кнопкой «Откатить».',
+      });
+    },
     error: () => freezeZapretUpdate({
       state: 'error',
       message: 'Не удалось проверить архив: SHA-256 не совпал с релизом на GitHub. Файл мог скачаться с ошибкой — попробуйте ещё раз.',
     }),
+    /* Лазейка обновилась и ждёт перезапуска: «Перезапустить» в карточке и плашка app-restart. */
+    apprestart: () => {
+      if (autoCheckTimer) clearTimeout(autoCheckTimer);
+      const item = updateItem('app');
+      previousVersions.app = item.current;
+      Object.assign(item, { current: '1.0.1', latest: '1.0.1', state: 'done', can_rollback: true, checked: true,
+        message: 'Готово: установлена версия 1.0.1. Перезапустите Лазейку, чтобы запустить новую версию.' });
+      markAppRestart(item);
+      state.updates.last_check = nowSec();
+      recount();
+    },
     uptodate: () => {
       if (autoCheckTimer) clearTimeout(autoCheckTimer);
       state.updates.last_check = nowSec();
       recount();
     },
-    /* Постоянные плашки (persistent: true): на главной — все, на странице из page — ещё и под заголовком. */
+    /*
+     * Постоянные плашки (persistent: true): на главной — все, на странице из page — ещё и под заголовком.
+     * Состояние — то, о чём плашки говорят: сводка не пишет «Всё работает» над плашкой о поломке.
+     */
     alerts: () => {
       const alert = (id, level, text, page, action) => setNotice({
         id, level, text, page, action: action || null, persistent: true, dismissible: true,
       });
+      Object.assign(state.tg, { status: 'error', started_at: null, error: 'Порт 1443 занят другой программой.' });
       alert('tg-down', 'error', 'Telegram-прокси не включился при запуске Лазейки: порт 1443 занят другой программой.',
         null, { label: 'Включить снова', call: 'tg_start', args: [] });
-      alert('watchdog', 'warn', 'Discord перестал открываться. Найти рабочую стратегию?', 'zapret',
-        { label: 'Найти и включить', call: 'zapret_fix', args: [] });
-      alert('vpn-exit', 'warn', 'Ядро включено, но через сервер ничего не открывается: сервер не ответил за 8 секунд.',
-        'vpnclient', { label: 'Переподключить', call: 'vpnclient_restart', args: [] });
+      /* Сторож (mock-zapret.js) и «нет выхода» своего VPN (mock-vpnclient.js) ставят свои плашки вместе с состоянием. */
+      if (DEMOS.watchdog) DEMOS.watchdog();
+      if (DEMOS['vpnc-noexit']) DEMOS['vpnc-noexit']();
       alert('vpn-sub:s-3f9a1c', 'warn', 'Подписка «Мой VPN» не обновилась: сервер подписки не отвечает.', 'vpnclient',
         { label: 'Обновить', call: 'vpnclient_sub_update', args: ['s-3f9a1c'] });
       alert('vpn-rules', 'info', 'Списки для маршрутов ещё не скачаны — пока эти сайты идут по умолчанию. Лазейка скачивает их.',
@@ -1007,9 +1151,18 @@
   };
   const DEMO_DELAY_MS = 300;
 
+  /* Как api._guard: исключение в ядре — ответ {ok: false, error} вместо данных. */
+  function refuseQueries() {
+    const refusal = () => reply({ ok: false, error: 'Внутренняя ошибка: RuntimeError(\'снимок не собран\')' }, STATE_DELAY_MS);
+    for (const name of ['get_state', 'get_logs', 'lists_get', 'fakes_get']) api[name] = refusal;
+  }
+  DEMOS.refuse = refuseQueries;
+
   function publish() {
     const demo = DEMOS[params.get('demo')];
-    if (demo) later(DEMO_DELAY_MS, demo);
+    /* Отказ — после первого удачного снимка: страница уже нарисована и должна показать плашку, а не «всё выключено». */
+    if (params.get('demo') === 'refuse') later(1500, refuseQueries);
+    else if (demo) later(DEMO_DELAY_MS, demo);
     window.pywebview = { api };
     window.dispatchEvent(new Event('pywebviewready'));
   }

@@ -135,6 +135,9 @@
   z-index: 70;
   min-width: 220px;
   max-width: 340px;
+  /* Высота окна внутри CSS zoom уже умножена на масштаб — делим обратно (см. app.css, «Основа»). */
+  max-height: calc(100vh / var(--ui-zoom, 1) - 16px);
+  overflow-y: auto;
   padding: 4px;
   border: 1px solid var(--border-strong);
   border-radius: 10px;
@@ -257,16 +260,20 @@
 }
 
 /*
- * Режим в узком окне или при крупном масштабе не вылезает за карточку: переносится только самая
- * длинная подпись — «Только локальный прокси», она последняя; остальные остаются в одну строку.
+ * Режим в узком окне или при крупном масштабе не вылезает за карточку: подписи переносятся, только
+ * когда места не хватает (при 150 % в окне 920 px не помещались и первые две); сначала — самая
+ * длинная, «Только локальный прокси», она последняя.
  */
 .vc-conn__block .seg__opt {
+  flex: 0 1 auto;
+  min-width: min-content;
   justify-content: center;
   height: auto;
   min-height: 26px;
   padding-block: 4px;
   line-height: 1.25;
   text-align: center;
+  white-space: normal;
 }
 
 .vc-conn__block .seg__opt:last-child {
@@ -370,6 +377,57 @@
   max-width: 46ch;
   color: var(--text-2);
   font-size: 13px;
+}
+
+/* Причина отказа рядом с картинкой ошибки: «Почему», «Чья сторона», «Что сделать». */
+.vc-scene__why {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 14px;
+  max-width: 54ch;
+  margin: 0;
+  font-size: 13px;
+}
+
+.vc-scene__why[hidden] {
+  display: none;
+}
+
+.vc-scene__why-row {
+  display: contents;
+}
+
+.vc-scene__why-row[hidden] {
+  display: none;
+}
+
+.vc-scene__why dt {
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.vc-scene__why dd {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.vc-scene__why .vc-why__side {
+  vertical-align: 1px;
+}
+
+/* Чья сторона — меткой: в строке сервера и в карточке «Подключение» одинаково. */
+.vc-why__side {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /*
@@ -721,6 +779,39 @@
   white-space: normal;
 }
 
+/* «Самый быстрый»: пояснение — целая фраза («Сейчас — Амстердам. Переключится сам…»), её не обрезаем. */
+.vc-server--auto .vc-server__meta {
+  white-space: normal;
+}
+
+/* Что ядро проигнорирует в ссылке сервера (servers[].warnings): первое целиком (в узкой строке — переносом), весь список — в подсказке. */
+.vc-server__warn {
+  color: var(--warn-text);
+  font-size: 12px;
+}
+
+/* «Нет ответа»: чья сторона и коротко почему; полный текст и что сделать — в подсказке. */
+.vc-why {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.vc-why__text {
+  overflow: hidden;
+  color: var(--err-text);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Наша сторона — не молчание сервера (kill switch не дал проверить, Лазейка не умеет): без красного. */
+.vc-why.is-lazeyka .vc-why__text {
+  color: var(--text-2);
+}
+
 .vc-server__speed {
   flex: none;
   color: var(--text-2);
@@ -810,6 +901,21 @@
   display: none;
 }
 
+/* Крестик «Скрыть» — в правом верхнем углу итога, текст и кнопки предложения его не касаются. */
+.vc-import__note {
+  position: relative;
+}
+
+.vc-import__note > .callout {
+  padding-right: 44px;
+}
+
+.vc-import__note > .btn {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+}
+
 /* У предложений ядра бывает до трёх кнопок — они встают строкой под текстом, а не теснят его справа. */
 .vc-import__result .callout {
   flex-wrap: wrap;
@@ -820,6 +926,93 @@
   flex-wrap: wrap;
   justify-content: flex-start;
   margin-left: 30px;
+}
+
+/* Значок и кнопки внутри поля — только у строки; в большой карточке поле обычное. */
+.vc-add__icon,
+.vc-add__actions {
+  display: none;
+}
+
+/*
+ * Строка добавления (серверы уже есть): без заголовка и рамки секции, само поле — панель
+ * со значком ссылки, «Добавить» и «⋯» внутри. Итог импорта и ошибка — сразу под ней.
+ */
+.vc-add--bar .card__head,
+.vc-add--bar .field__hint,
+.vc-add--bar .vc-import__buttons {
+  display: none;
+}
+
+.vc-add--bar .card__body {
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.vc-add--bar .vc-add__box {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 6px 6px 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--input);
+  box-shadow: var(--shadow-panel);
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+
+/* Рамка фокуса — у всей панели, пока печатают в поле; у кнопок внутри — своя. */
+.vc-add--bar .vc-add__box:has(> .textarea:focus) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.vc-add--bar .field.has-error .vc-add__box {
+  border-color: var(--err);
+}
+
+.vc-add--bar .field.has-error .vc-add__box:has(> .textarea:focus) {
+  box-shadow: 0 0 0 1px var(--err);
+}
+
+.vc-add--bar .vc-add__icon {
+  display: block;
+  flex: none;
+  align-self: flex-start;
+  margin: 8px 6px 0 0;
+  color: var(--text-3);
+}
+
+.vc-add--bar .vc-add__actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+/*
+ * Одна строка, пока ссылка одна; вставили несколько или длинную — растёт до шести строк, дальше прокрутка.
+ * Высота строки в пикселях: подсказка крупнее текста и иначе сделала бы пустое поле выше кнопок.
+ */
+.vc-add--bar .field .vc-add__box > .textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  max-height: 134px;
+  padding: 7px 0;
+  line-height: 20px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  resize: none;
+  field-sizing: content;
+}
+
+.vc-add--bar .vc-add__box > .textarea::placeholder {
+  font-family: var(--font);
+  font-size: 13.5px;
 }
 
 /* ===================== Маршруты ===================== */

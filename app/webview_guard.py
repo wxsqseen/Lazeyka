@@ -36,6 +36,27 @@ def _open_outside(uri: str) -> None:
         winutil.open_unelevated(uri)
 
 
+ALLOW = "allow"          # пропустить
+REFUSE = "refuse"        # отменить
+OUTSIDE = "outside"      # отменить и открыть в обычном браузере пользователя
+
+
+def navigation_decision(uri: str, allowed: str | None) -> tuple[str, str | None]:
+    """Что делать с навигацией окна — и адрес интерфейса, закреплённый после неё.
+
+    Первая навигация закрепляет встроенный сервер 127.0.0.1, другой адрес — отказ. Дальше разрешены только
+    этот адрес и пути под ним, посторонний отменяется и уходит в браузер. about:blank pywebview открывает
+    сам — пропускаем, ничего не закрепляя."""
+    if uri == "about:blank":
+        return ALLOW, allowed
+    if allowed is None:
+        origin = _origin(uri)
+        return (REFUSE, None) if origin is None else (ALLOW, origin)
+    if uri == allowed or uri.startswith(allowed + "/"):
+        return ALLOW, allowed
+    return OUTSIDE, allowed
+
+
 def install() -> None:
     """Подменяет обработчики EdgeChrome до создания окна."""
     global _installed
@@ -49,22 +70,16 @@ def install() -> None:
 
     def on_navigation_start(self, sender, args):
         uri = str(args.Uri)
-        allowed = getattr(self, "_lazeyka_origin", None)
-        if uri == "about:blank":
+        decision, self._lazeyka_origin = navigation_decision(uri, getattr(self, "_lazeyka_origin", None))
+        if decision == ALLOW:
             return original_nav(self, sender, args)
-        if allowed is None:
-            origin = _origin(uri)
-            if origin is None:
-                log.error("Первая навигация окна не на встроенный сервер: %s — отменена", uri[:200])
-                args.Cancel = True
-                return None
-            self._lazeyka_origin = origin
-        elif not (uri == allowed or uri.startswith(allowed + "/")):
-            args.Cancel = True
+        args.Cancel = True
+        if decision == REFUSE:
+            log.error("Первая навигация окна не на встроенный сервер: %s — отменена", uri[:200])
+        else:
             log.warning("Окно пыталось открыть посторонний адрес — отменено: %s", uri[:200])
             _open_outside(uri)
-            return None
-        return original_nav(self, sender, args)
+        return None
 
     def on_new_window_request(self, sender, args):
         args.Handled = True

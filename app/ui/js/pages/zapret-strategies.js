@@ -9,7 +9,11 @@
   const GOOD_SCORE = 0.9;
   const FAIR_SCORE = 0.6;
   const DIRECT_SENTENCE = 'Проверено напрямую, мимо VPN.';
-  const CHECK_CLASS = { ok: 'ok', fail: 'fail', unsup: 'unsup', ssl: 'ssl' };
+  /* Ядро при «Остановить» пишет error «Подбор остановлен» (zapret/tester.py); флаг cancelled — если ядро его пришлёт. */
+  const CANCELLED_ERROR = /^Подбор остановлен/;
+  const MANAGED_TITLE = 'Идёт подбор стратегии — дождитесь окончания или остановите его';
+  /* dns — адрес сайта не нашёлся: для оценки это тоже неудача (zapret/tester.py), цветом — как «не открывается». */
+  const CHECK_CLASS = { ok: 'ok', fail: 'fail', dns: 'fail', unsup: 'unsup', ssl: 'ssl' };
   const CHECK_PARTS = [['HTTP', 'http'], ['TLS 1.2', 'tls12'], ['TLS 1.3', 'tls13']];
   const KIND_HINT = {
     standard: 'Проверяем HTTP и TLS до Discord, YouTube, Google и Cloudflare с каждой стратегией. Пара минут; на это время обход будет переключаться.',
@@ -35,19 +39,20 @@
     const isActive = item.id === data.active;
     const isPending = item.id === data.pending;
     const label = item.label || item.id;
+    const inactive = Boolean(data.locked || data.managed);
     const btn = h('button', {
       type: 'button',
       class: ['strategy', isActive && 'is-active', isPending && 'is-pending'],
       'aria-pressed': String(isActive),
-      'aria-disabled': String(Boolean(data.locked)),
-      title: label !== item.id ? item.id : null,
+      'aria-disabled': String(inactive),
+      title: data.managed ? MANAGED_TITLE : (label !== item.id ? item.id : null),
       dataset: { fk: `strategy:${item.id}` },
     },
     h('span', { class: 'strategy__mark', 'aria-hidden': 'true' }, isPending ? h('span', { class: 'spinner' }) : null),
     h('span', { class: 'strategy__label', text: label }),
     ratingTag(data.ratings[item.id]));
     btn.addEventListener('click', () => {
-      if (!isActive && !data.locked) onPick(item.id);
+      if (!isActive && !inactive) onPick(item.id);
     });
     return btn;
   }
@@ -97,7 +102,7 @@
 
     const card = ui.card({
       title: 'Стратегия',
-      subtitle: 'Набор приёмов, которым zapret обходит замедление. Не открывается что-то — выберите другую или запустите подбор.',
+      subtitle: 'Набор приёмов, которым zapret обходит блокировки и замедление. Не открывается что-то — выберите другую или запустите подбор.',
       actions: searchBox,
     });
     card.body.append(grid.el);
@@ -114,6 +119,8 @@
         ratings,
         pending: pendingId,
         locked: zapret.available === false,
+        /* Подбор и «Найти и включить» сами переключают стратегии — выбор ждёт их окончания. */
+        managed: Boolean((zapret.test && zapret.test.running) || (zapret.fix && zapret.fix.running)),
         query,
       });
     }
@@ -153,14 +160,21 @@
     return h('td', { class: 'results__rank', text: String(index + 1) });
   }
 
+  /**
+   * Оценка ядра — ok / (ok + fail) (zapret/tester.py): «не поддерживается» в неё не входит, поэтому и в «из» его нет —
+   * иначе рядом с «100 %» стояло бы «30 из 36». Сколько проверок не поддержано — во всплывающей подсказке.
+   */
   function scoreCell(result) {
     const score = Math.max(0, Math.min(1, Number(result.score) || 0));
-    const total = (Number(result.ok) || 0) + (Number(result.fail) || 0) + (Number(result.unsup) || 0);
+    const ok = Number(result.ok) || 0;
+    const checked = ok + (Number(result.fail) || 0);
+    const unsup = Number(result.unsup) || 0;
+    const title = unsup ? `Ещё ${fmt.count(unsup, 'проверка', 'проверки', 'проверок')} — «не поддерживается»: в оценку не входят` : null;
     return h('td', { class: 'results__score' },
       h('div', { class: `score score--${scoreTone(score)}` },
         h('div', { class: 'score__bar' }, h('div', { class: 'score__fill', style: `width: ${(score * 100).toFixed(1)}%` })),
         h('span', { class: 'score__value num', text: fmt.percent(score) })),
-      total ? h('span', { class: 'results__counts num', text: `${result.ok || 0} из ${total}` }) : null);
+      checked ? h('span', { class: 'results__counts num', title, text: `${ok} из ${checked}` }) : null);
   }
 
   function actionCell(result, data) {
@@ -180,7 +194,7 @@
       },
     });
     btn.el.dataset.fk = `use:${result.id}`;
-    btn.setDisabled(data.running || data.locked || result.started === false);
+    btn.setDisabled(data.running || data.managed || data.locked || result.started === false);
     return h('td', { class: 'results__action' }, btn.el);
   }
 
@@ -238,9 +252,39 @@
     ];
   }
 
+  /** Лучшая из проверенных: «Включить ALT2» или «Работает», если она уже включена. */
+  function bestAction(data, bestLabel) {
+    if (data.best === data.active && data.zapretOn) return h('span', { class: 'tag tag--ok', text: 'Работает' });
+    return ui.button({
+      label: data.best === data.active ? 'Включить обход' : `Включить ${bestLabel}`,
+      kind: 'primary',
+      size: 'sm',
+      busyKey: 'zapret_power',
+      onClick: () => Lz.actions.useStrategy(data.best),
+    }).el;
+  }
+
+  /** Человек нажал «Остановить» — это не ошибка, а итог: сколько проверено и что лучшее из проверенного. */
+  function renderCancelled(data) {
+    const finishedText = data.finishedAgo ? ` Закончили ${data.finishedAgo}.` : '';
+    const directText = data.direct ? ` ${DIRECT_SENTENCE}` : '';
+    if (!data.results.length) {
+      return ui.callout({ tone: 'info', text: `Подбор остановлен до того, как проверилась первая стратегия.${finishedText}` });
+    }
+    const bestResult = data.best ? data.results.find((result) => result.id === data.best) : null;
+    const bestLabel = bestResult ? bestResult.label || bestResult.id : data.best;
+    const bestText = bestResult ? ` Лучшая из проверенных — ${bestLabel}: ${fmt.percent(bestResult.score)} проверок прошли успешно.` : '';
+    return ui.callout({
+      tone: 'info',
+      text: `Подбор остановлен: проверено ${data.done} из ${data.total}.${bestText}${finishedText}${directText}`,
+      actions: bestResult ? bestAction(data, bestLabel) : null,
+    });
+  }
+
   function renderSummary(data) {
-    if (data.error) return ui.callout({ tone: 'err', title: 'Подбор прервался', text: data.error });
     if (data.running) return null;
+    if (data.cancelled) return renderCancelled(data);
+    if (data.error) return ui.callout({ tone: 'err', title: 'Подбор прервался', text: data.error });
     if (!data.results.length) {
       return ui.emptyState({
         icon: 'sparkle',
@@ -248,11 +292,8 @@
         text: 'Нажмите «Начать подбор» — Лазейка сама найдёт стратегию, с которой у вас всё открывается.',
       });
     }
-    const finishedText = data.finishedAgo ? ` Закончили ${data.finishedAgo}.` : '';
     const directText = data.direct ? ` ${DIRECT_SENTENCE}` : '';
-    if (data.done < data.total) {
-      return ui.callout({ tone: 'info', text: `Подбор остановлен: проверено ${data.done} из ${data.total}.${finishedText}${directText}` });
-    }
+    if (data.done < data.total) return renderCancelled(data);
     if (!data.best) {
       return ui.callout({ tone: 'warn', title: 'Ни одна стратегия не справилась', text: `Попробуйте проверку DPI или включите IP-список в фильтрах ниже.${directText}` });
     }
@@ -263,19 +304,7 @@
       data.finishedAgo ? `Закончили ${data.finishedAgo}.` : null,
       data.direct ? DIRECT_SENTENCE : null,
     ].filter(Boolean).join(' ');
-    let action = null;
-    if (data.best === data.active && data.zapretOn) {
-      action = h('span', { class: 'tag tag--ok', text: 'Работает' });
-    } else {
-      action = ui.button({
-        label: data.best === data.active ? 'Включить обход' : `Включить ${bestLabel}`,
-        kind: 'primary',
-        size: 'sm',
-        busyKey: 'zapret_power',
-        onClick: () => Lz.actions.useStrategy(data.best),
-      }).el;
-    }
-    return ui.callout({ tone: 'ok', title: `Лучшая стратегия — ${bestLabel}`, text, actions: action });
+    return ui.callout({ tone: 'ok', title: `Лучшая стратегия — ${bestLabel}`, text, actions: bestAction(data, bestLabel) });
   }
 
   function createTestSection() {
@@ -328,7 +357,7 @@
       setHidden(controls, running);
       setHidden(kindHint, running);
       setHidden(progressBox, !running);
-      startBtn.setDisabled(locked);
+      startBtn.setDisabled(locked || Boolean(zapret.fix && zapret.fix.running));
       kindSeg.setDisabled(locked);
       if (running) {
         progress.set(total ? done / total : null);
@@ -341,19 +370,22 @@
       const best = test.best || null;
       const active = zapret.strategy || null;
       const zapretOn = zapret.status === 'running' || zapret.status === 'starting';
+      const error = test.error ? String(test.error) : null;
       summary.update({
         running,
         results,
         best,
         active,
         zapretOn,
-        error: test.error || null,
+        cancelled: !running && (test.cancelled === true || Boolean(error && CANCELLED_ERROR.test(error))),
+        error,
         done,
         total,
         finishedAgo: fmt.relative(test.finished_at),
         direct: Boolean(test.direct),
       });
-      resultsView.update({ running, results, best, active, locked, zapretOn });
+      const managed = Boolean(zapret.fix && zapret.fix.running);
+      resultsView.update({ running, managed, results, best, active, locked, zapretOn });
     }
 
     return { el: card.el, update };

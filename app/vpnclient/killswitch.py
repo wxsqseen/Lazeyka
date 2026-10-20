@@ -10,6 +10,7 @@ import uuid
 from ctypes import wintypes
 from typing import Any
 
+from .. import winutil
 from ..errors import UserError
 from . import guard
 
@@ -143,7 +144,9 @@ _LAYERS = ((FWPM_LAYER_ALE_AUTH_CONNECT_V4, 4), (FWPM_LAYER_ALE_AUTH_CONNECT_V6,
 
 
 def _load_backend() -> Any:
-    dll = ctypes.WinDLL("fwpuclnt.dll", use_last_error=True)
+    # По полному пути: голое имя в процессе с правами сначала ищется в папке exe, а fwpuclnt.dll — не из
+    # KnownDLLs, подложенную рядом библиотеку Windows подхватила бы.
+    dll = ctypes.WinDLL(winutil.system32("fwpuclnt.dll"), use_last_error=True)
     handle, pointer, dword = wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD
     definitions = {
         "FwpmEngineOpen0": [wintypes.LPCWSTR, dword, pointer, ctypes.POINTER(FWPM_SESSION0),
@@ -192,6 +195,31 @@ def _condition(key: GUID, kind: int, value: Any, *, match: int = FWP_MATCH_EQUAL
     return result
 
 
+def _remote_net(net: ipaddress.IPv4Network | ipaddress.IPv6Network) -> FWPM_FILTER_CONDITION0:
+    """Условие «удалённый адрес в этой подсети»."""
+    if net.version == 4:
+        mask = FWP_V4_ADDR_AND_MASK(int(net.network_address), int(net.netmask))
+        return _condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, FWP_V4_ADDR_MASK, ctypes.pointer(mask))
+    mask6 = FWP_V6_ADDR_AND_MASK((ctypes.c_uint8 * 16)(*net.network_address.packed), net.prefixlen)
+    return _condition(FWPM_CONDITION_IP_REMOTE_ADDRESS, FWP_V6_ADDR_MASK, ctypes.pointer(mask6))
+
+
+def _lan_networks(items) -> list[tuple[int, list]]:
+    """Проверенные (LUID, сети) для allow_lan; неверное — KillSwitchError с тем, что пришло."""
+    out = []
+    for item in items or ():
+        try:
+            luid, nets = item
+            parsed = list(dict.fromkeys(ipaddress.ip_network(net, strict=False) for net in nets))
+        except (ValueError, TypeError) as exc:
+            raise KillSwitchError(f"Kill switch: неверная локальная сеть {item!r}") from exc
+        if type(luid) is not int or not 0 < luid < 2**64:
+            raise KillSwitchError(f"Kill switch: неверный LUID адаптера локальной сети ({luid!r})")
+        if parsed:
+            out.append((luid, parsed))
+    return out
+
+
 class KillSwitch:
     """backend — объект с Fwpm* API; в тестах он копирует структуры и возвращает коды."""
 
@@ -207,15 +235,23 @@ class KillSwitch:
         with self._lock:
             return bool(self._handle.value and self._filter_ids)
 
-    def enable(self, *, tun_luid: int | None, allow_apps: list[str], allow_nets: list[str]) -> None:
+    def enable(self, *, tun_luid: int, allow_apps: list[str], allow_nets: list[str],
+               allow_lan: list[tuple[int, list[str]]] | tuple = ()) -> None:
+        """allow_lan — (LUID, сети) виртуальных локальных сетей (Radmin VPN, Hamachi…): их сети разрешены
+        только через их же адаптер, так что интернет через них мимо TUN не пройдёт."""
         if self._real:
             guard.ensure_allowed("kill switch")
-        if tun_luid is not None and (type(tun_luid) is not int or not 0 < tun_luid < 2**64):
+        if tun_luid is None:
+            # Без разрешения своего TUN фильтры закрыли бы интернет и самому VPN: «Подключено», а не
+            # открывается ничего. Прежние фильтры (если были) остаются как есть — решает вызывающий.
+            raise KillSwitchError("Kill switch: адаптер своего VPN не найден — включать запрет без него нельзя")
+        if type(tun_luid) is not int or not 0 < tun_luid < 2**64:
             raise KillSwitchError("Kill switch: неверный LUID интерфейса TUN")
         try:
             nets = list(dict.fromkeys(ipaddress.ip_network(net, strict=False) for net in allow_nets))
         except (ValueError, TypeError) as exc:
             raise KillSwitchError("Kill switch: неверный адрес разрешённой подсети") from exc
+        lan = _lan_networks(allow_lan)
         apps = list(dict.fromkeys(allow_apps))
         if any(not isinstance(app, str) or not ntpath.isabs(app) or "\x00" in app for app in apps):
             raise KillSwitchError("Kill switch: нужен полный путь к разрешённой программе")
@@ -223,11 +259,11 @@ class KillSwitch:
             try:
                 if self._backend is None:
                     self._backend = _load_backend()
-                self._enable(tun_luid, apps, nets)
+                self._enable(tun_luid, apps, nets, lan)
             except OSError as exc:
                 raise KillSwitchError("Kill switch: не удалось обратиться к фильтрации Windows") from exc
 
-    def _enable(self, tun_luid: int | None, apps: list[str], nets: list) -> None:
+    def _enable(self, tun_luid: int, apps: list[str], nets: list, lan: list | tuple = ()) -> None:
         api = self._backend
         fresh = not self._handle.value
         transaction = False
@@ -276,20 +312,17 @@ class KillSwitch:
             for layer, version in _LAYERS:
                 add(layer, "loopback", [_condition(FWPM_CONDITION_FLAGS, FWP_UINT32,
                     FWP_CONDITION_FLAG_IS_LOOPBACK, match=FWP_MATCH_FLAGS_ALL_SET)])
-                if tun_luid is not None:
-                    add(layer, "интерфейс TUN", [_condition(FWPM_CONDITION_IP_LOCAL_INTERFACE,
-                        FWP_UINT64, ctypes.pointer(ctypes.c_uint64(tun_luid)))])
+                add(layer, "интерфейс TUN", [_condition(FWPM_CONDITION_IP_LOCAL_INTERFACE,
+                    FWP_UINT64, ctypes.pointer(ctypes.c_uint64(tun_luid)))])
                 for net in nets:
-                    if net.version != version:
-                        continue
-                    if version == 4:
-                        mask = FWP_V4_ADDR_AND_MASK(int(net.network_address), int(net.netmask))
-                        kind = FWP_V4_ADDR_MASK
-                    else:
-                        mask = FWP_V6_ADDR_AND_MASK((ctypes.c_uint8 * 16)(*net.network_address.packed), net.prefixlen)
-                        kind = FWP_V6_ADDR_MASK
-                    add(layer, "разрешённая подсеть", [_condition(FWPM_CONDITION_IP_REMOTE_ADDRESS,
-                        kind, ctypes.pointer(mask))])
+                    if net.version == version:
+                        add(layer, "разрешённая подсеть", [_remote_net(net)])
+                for luid, lan_nets in lan:
+                    for net in lan_nets:
+                        if net.version == version:
+                            add(layer, "локальная сеть", [_condition(FWPM_CONDITION_IP_LOCAL_INTERFACE, FWP_UINT64,
+                                                                     ctypes.pointer(ctypes.c_uint64(luid))),
+                                                          _remote_net(net)])
                 for blob in blobs:
                     add(layer, "разрешённая программа", [_condition(FWPM_CONDITION_ALE_APP_ID,
                         FWP_BYTE_BLOB_TYPE, blob)])

@@ -126,9 +126,9 @@ def test_watchdog_auto_shows_progress_then_result(watchdog_core):
     core._watchdog_check("auto")
     assert fixes == [1]
     alert = _alert(core, "watchdog")
-    assert alert["text"] == "Discord перестал открываться — подбираю рабочую стратегию." and alert["action"] is None
+    assert alert["text"] == "Discord перестал открываться — подбираем рабочую стратегию." and alert["action"] is None
     assert _transient(core) == []
-    # Подбор не нашёл стратегию — «подбираю…» меняется на итог с кнопкой.
+    # Подбор не нашёл стратегию — «подбираем…» меняется на итог с кнопкой.
     core.tester.fix_state = {"finished_at": time.time(), "stage": "failed",
                              "message": "Среди лучших стратегий подходящей не нашлось."}
     core._reconcile_alerts()
@@ -296,7 +296,6 @@ def test_user_actions_clear_down_alerts(tmp_path):
     vc = FakeManager()
     core = make_core(tmp_path, vc)
     core.zapret.start = core.zapret.stop = lambda *a, **k: None
-    core._arm_connectivity_guard = lambda: None
     core._vpn_note_on_start = lambda: None
     core.tg.start = core.tg.stop = lambda *a, **k: None
     core.set_alert("zapret-down", "error", "Обход остановился")
@@ -566,3 +565,77 @@ def test_broken_route_profile_is_alert(world):
     m._profiles.save([])
     m.start()
     assert "vpn-profile" not in world.alerts, "профиля нет — и плашки"
+
+
+# ------------------------------------------------------------ страховка связи: связка с Core
+
+def _guard_core(tmp_path, monkeypatch, online_after_stop: bool):
+    """Core с настоящей страховкой (zapret/guard.py) и подделкой обхода: связь есть только без обхода."""
+    from app.zapret.guard import ConnectivityGuard
+    core = make_core(tmp_path, None)
+    core.zapret.mode, core.zapret.status, core.zapret.paused_for_test = "app", "running", False
+    core.settings.update(lambda d: d["zapret"].__setitem__("was_running", True))
+    calls = []
+
+    def stop(remember=True, hold=None):
+        calls.append("stop")
+        core.zapret.status = "stopped"
+
+    def start(*a, **k):
+        calls.append("start")
+        core.zapret.status = "running"
+    core.zapret.stop, core.zapret.start = stop, start
+    monkeypatch.setattr("app.zapret.tester.control_ok",
+                        lambda *a, **k: online_after_stop and core.zapret.status == "stopped")
+    guard = ConnectivityGuard(core.zapret, online=core._online, alert=core.alert, busy=core._tester_busy,
+                              hint=lambda: core._vpn_conflict_hint().strip(), pause=0)
+    # Ожидание связи после «нет и без обхода» — в tests/test_zapret_guard.py; здесь его поток пережил бы тест.
+    monkeypatch.setattr(guard, "_await_link", lambda gen, delay: None)
+    return core, guard, calls
+
+
+def test_internet_lost_after_enabling_turns_bypass_off(tmp_path, monkeypatch):
+    """Жалоба: «с обходом полностью вырубается интернет». Без связи человек не должен разбираться сам:
+    обход выключается, а плашка говорит почему и предлагает включить снова."""
+    core, guard, calls = _guard_core(tmp_path, monkeypatch, online_after_stop=True)
+    guard.run(guard._gen)
+    assert calls == ["stop", "start", "stop"] and core.zapret.status == "stopped"
+    notice = next(n for n in core.notices() if n["id"] == "zapret-guard-off")
+    assert "с ним пропадал интернет" in notice["text"] and notice["action"]["call"] == "zapret_start"
+    assert "стратегия не подходит" in notice["text"], "совет — по тому, что известно о VPN"
+    assert _transient(core) == []
+    core._reconcile_alerts()
+    assert core.has_alert("zapret-guard-off"), "обход выключен сам — плашка висит, пока не включат"
+    core.zapret.status = "running"
+    core._reconcile_alerts()
+    assert not core.has_alert("zapret-guard-off")
+
+
+def test_internet_lost_not_because_of_bypass_turns_it_back_on(tmp_path, monkeypatch):
+    core, guard, calls = _guard_core(tmp_path, monkeypatch, online_after_stop=False)
+    guard.run(guard._gen)
+    assert calls == ["stop", "start"] and core.zapret.status == "running"
+    assert core.has_alert("zapret-guard") and not core.has_alert("zapret-guard-off")
+
+
+def test_guard_quiet_when_internet_works(tmp_path, monkeypatch):
+    core, guard, calls = _guard_core(tmp_path, monkeypatch, online_after_stop=False)
+    monkeypatch.setattr("app.zapret.tester.control_ok", lambda *a, **k: True)
+    guard.run(guard._gen)
+    assert calls == [] and not core.has_alert("zapret-guard") and not core.has_alert("zapret-guard-off")
+
+
+def test_online_counts_vpn_kill_switch_as_connected(tmp_path, monkeypatch):
+    """Прямой путь мёртв, а через VPN сайт открывается — это защита от утечек в VPN, а не «пропал интернет»."""
+    from app.zapret.tester import NoDirectPath
+    core = make_core(tmp_path, None)
+    binds = []
+    monkeypatch.setattr("app.zapret.tester.control_ok", lambda *a, bind=None, **k: binds.append(bind) or bind is None)
+    core._direct_source = lambda: "192.0.2.10"
+    assert core._online() is True and binds == ["192.0.2.10", None]
+
+    def no_direct():
+        raise NoDirectPath()
+    core._direct_source = no_direct
+    binds.clear()
+    assert core._online() is True and binds == [None], "пути мимо VPN нет — проверка через него"

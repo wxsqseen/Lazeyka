@@ -220,11 +220,14 @@ def test_real_wininet_read_only_smoke():
     conns = backend.connections()
     assert conns[0] is None and all(isinstance(c, str) for c in conns[1:])
     lan = backend.query(None)
-    assert isinstance(lan.flags, int) and lan.flags & PROXY_TYPE_DIRECT | lan.flags & PROXY_TYPE_PROXY >= 0
+    known = PROXY_TYPE_DIRECT | PROXY_TYPE_PROXY | PROXY_TYPE_AUTO_PROXY_URL | PROXY_TYPE_AUTO_DETECT
+    assert isinstance(lan.flags, int) and not lan.flags & ~known, f"флаги WinINet не разобраны: {lan.flags:#x}"
     assert isinstance(lan.server, str) and isinstance(lan.bypass, str)
 
 
 def test_user_sids_are_readable():
     sid = sysproxy.process_user_sid()
     assert sid and sid.startswith("S-1-5-")
-    assert sysproxy.shell_user_matches() in (True, False, None)
+    shell = sysproxy.shell_user_sid()                  # None — нет рабочего стола (служба, сеанс без оболочки)
+    assert shell is None or shell.startswith("S-1-5-")
+    assert sysproxy.shell_user_matches() is (None if shell is None else shell == sid)

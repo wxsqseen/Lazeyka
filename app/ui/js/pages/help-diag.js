@@ -33,7 +33,8 @@
       icon: 'wrench',
       size: 'sm',
       kind: view.tone === 'err' ? 'primary' : 'secondary',
-      success: 'Готово. Запустите проверку ещё раз, чтобы убедиться.',
+      /* Ядро после исправления само запускает проверку заново (core.diag_fix) — итог появится в списке. */
+      success: (result) => `${result.message ? String(result.message).replace(/\.$/, '') : 'Исправлено'}. Проверяем компьютер заново.`,
     }) : null;
     if (fix) fix.el.dataset.fk = `fix:${item.fix.id}`;
     return h('li', { class: `issue issue--${view.tone}` },

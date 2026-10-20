@@ -5,7 +5,6 @@
 страж conftest (фикстура core_static) пропускает только статические команды. Любой вывод `check`
 (даже WARN при коде 0) — провал: значит, генератору нужна миграция (план 5.3).
 """
-import hashlib
 import json
 import os
 import shutil
@@ -15,14 +14,17 @@ from pathlib import Path
 import pytest
 
 from app import archive
+from app.filehash import sha256_file
 from app.vpnclient import config, routeprofile, routing
-from app.vpnclient.model import DnsChoice, TunOptions, engine_for
+from app.vpnclient.model import DnsChoice, Secrets, TunOptions, engine_for
 from app.zapret import lists, strategies
 from tests.test_vpnclient_config import (CASES, MLKEM, _xray_plan, full_plan, make_plan, server,
                                          supported_servers)
 
-pytestmark = pytest.mark.skipif(os.environ.get("LAZEYKA_CORE_CHECK") != "1",
-                                reason="статическая проверка ядрами — только с LAZEYKA_CORE_CHECK=1")
+pytestmark = pytest.mark.core_check
+
+LAN_SECRETS = Secrets(clash="clash-secret-1", internal_user="int-user", internal_pass="int-pass",
+                      helper_user="help-user", helper_pass="help-pass", local_user="lan-user", local_pass="lan-pass")
 
 ROOT = Path(__file__).resolve().parent.parent
 CORES_SRC = Path(os.environ.get("LAZEYKA_CORES_DIR") or ROOT / "vendor" / "cores")
@@ -35,21 +37,13 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _COMPILED: dict[str, Path] = {}
 
 
-def sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 @pytest.fixture(scope="module")
 def cores(tmp_path_factory) -> dict[str, Path]:
     out = {}
     for name, (zip_name, digest, exe) in CORES.items():
         src = CORES_SRC / zip_name
         assert src.is_file(), f"нет {src}: положите официальный zip ядра в vendor/cores (README, «Сборка из исходников»)"
-        assert sha256(src) == digest, f"{zip_name}: SHA-256 не совпал с закреплённым"
+        assert sha256_file(src) == digest, f"{zip_name}: SHA-256 не совпал с закреплённым"
         target = tmp_path_factory.mktemp(name)
         archive.extract(src, target, max_unpacked=128 * 1024 * 1024, skip=lambda p: p.suffix == ".dat")
         out[name] = target / exe
@@ -139,10 +133,11 @@ def test_full_configs_from_real_pack_pass_check(core_static, cores, rule_files, 
                                            out_dir=out_dir)
         for mode in ("tun", "proxy", "local"):
             for preset in ("all", "except_ru", "blocked"):
+                # Раздача в сеть — только с логином и паролем (manager._local_auth): ядро проверит и их.
                 plan = full_plan(mode, preset, bypass=res.profiles, voice_ports=res.voice_ports,
                                  rules_files=dict(rule_files), profile_rules=profile_rules, mux=True,
                                  tls_fragment=True, noises=True, fingerprint="firefox", proxy_listen="0.0.0.0",
-                                 socks_udp=False, log_level="warning",
+                                 secrets=LAN_SECRETS, socks_udp=False, log_level="warning",
                                  tun=TunOptions(address4="172.31.255.253/30", address6="fdfe:dcba:9876::1/126",
                                                 mtu=1400, exclude=["10.0.0.0/8", "224.0.0.0/4", "fe80::/10"]))
                 name = f"{strategy_id}-{mode}-{preset}".replace(" ", "_")

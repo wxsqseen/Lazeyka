@@ -97,15 +97,18 @@
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
-  /** «только что», «2 мин назад», «3 ч назад», «вчера», «4 дня назад», дальше — дата. */
+  /**
+   * «только что», «2 мин назад», «3 ч назад», «вчера», «4 дня назад», дальше — дата. Целые единицы —
+   * с округлением вниз: иначе 59,5 минуты стали бы «60 мин назад», а 23,5 часа — «24 ч назад».
+   */
   function relative(value) {
     const date = parseTime(value);
     if (!date) return '';
     const diff = Math.max(0, (Date.now() - date.getTime()) / 1000);
     if (diff < JUST_NOW_SEC) return 'только что';
-    if (diff < HOUR) return `${Math.max(1, Math.round(diff / MINUTE))}${NBSP}мин назад`;
-    if (diff < DAY) return `${Math.round(diff / HOUR)}${NBSP}ч назад`;
-    const days = Math.round(diff / DAY);
+    if (diff < HOUR) return `${Math.max(1, Math.floor(diff / MINUTE))}${NBSP}мин назад`;
+    if (diff < DAY) return `${Math.floor(diff / HOUR)}${NBSP}ч назад`;
+    const days = Math.floor(diff / DAY);
     if (days === 1) return 'вчера';
     if (days < WEEK_DAYS) return `${days}${NBSP}${plural(days, 'день', 'дня', 'дней')} назад`;
     return dateFormat.format(date);
@@ -121,5 +124,20 @@
     return parsed ? clockFormat.format(parsed) : '';
   }
 
-  Lz.fmt = { NBSP, plural, integer, count, bytes, rate, percent, duration, since, relative, date, clock, nowSeconds };
+  /**
+   * Название в ёлочках: «Мой VPN». Если в нём уже есть ёлочки (имя из ядра или от провайдера), внутренние
+   * становятся „лапками“ — «Маршруты „Мой VPN“», а не «Маршруты «Мой VPN»».
+   */
+  function quote(text) {
+    return `«${String(text == null ? '' : text).replace(/«/g, '„').replace(/»/g, '“')}»`;
+  }
+
+  /** Текст из ядра — законченным предложением: ядро ставит точку в конце не всегда. Пустой — ''. */
+  function sentence(text) {
+    const value = String(text == null ? '' : text).trim();
+    if (!value) return '';
+    return /[.!?…]$/.test(value) ? value : `${value}.`;
+  }
+
+  Lz.fmt = { NBSP, plural, integer, count, bytes, rate, percent, duration, since, relative, date, clock, nowSeconds, quote, sentence };
 })(window.Lz);

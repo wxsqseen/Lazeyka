@@ -6,9 +6,9 @@
 
   const STEP_COUNT = 3;
   const FEATURES = [
-    { icon: 'route', title: 'Discord и YouTube', text: 'Обход замедления на базе zapret — включается одной кнопкой.' },
+    { icon: 'route', title: 'Discord и YouTube', text: 'Обход блокировок на базе zapret — включается одной кнопкой.' },
     { icon: 'send', title: 'Telegram', text: 'Локальный прокси, который ускоряет Telegram Desktop без VPN.' },
-    { icon: 'download', title: 'Обновления — по вашей команде', text: 'Сообщаем о новых версиях, а ставим только когда вы нажмёте.' },
+    { icon: 'download', title: 'Обновления — по вашей команде', text: 'Сообщаем о новых версиях, а ставим только когда вы нажмёте. Исключение — ядра своего VPN: их Лазейка скачивает и обновляет сама.' },
   ];
 
   let modal = null;
@@ -31,7 +31,7 @@
   function choicesStep(choices) {
     const updates = ui.switchRow({
       title: 'Сообщать об обновлениях',
-      description: 'Только уведомление — без вас ничего не скачивается и не устанавливается.',
+      description: 'Только уведомление: обновления Лазейки, стратегий и прокси ставятся лишь по вашей кнопке. Ядра своего VPN Лазейка скачивает и обновляет сама.',
       checked: choices.check_updates,
       onChange: (value) => {
         choices.check_updates = value;
@@ -167,12 +167,23 @@
       }
     }
 
+    /*
+     * Автозапуск здесь может не работать (переносной режим, чужая учётная запись): ядро тогда закончило
+     * приветствие, а отказом ответило только про автозапуск («Автозапуск не изменён: …») — это не повод
+     * держать окно открытым.
+     */
     async function finish(opts) {
       const result = await Lz.api.run({
         method: 'finish_onboarding',
         args: [{ check_updates: choices.check_updates, autostart: choices.autostart }],
+        silent: true,
       });
-      if (!result || !result.ok) return;
+      if (!result) return;
+      if (!result.ok) {
+        const onlyAutostart = choices.autostart && /^Автозапуск/.test(String(result.error || ''));
+        ui.toast({ kind: onlyAutostart ? 'warn' : 'error', text: onlyAutostart ? `${result.error} Остальные настройки сохранены.` : result.error });
+        if (!onlyAutostart) return;
+      }
       finishedLocally = true;
       close();
       if (opts && opts.then) opts.then();

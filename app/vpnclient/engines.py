@@ -11,7 +11,6 @@ SHA-256: архива — до распаковки, exe — после неё �
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -27,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .. import archive, paths, winutil
+from ..filehash import sha256_file
 from ..errors import UserError
 from . import guard
 
@@ -34,6 +34,7 @@ log = logging.getLogger("lazeyka.vpnclient.engines")
 
 CORE_MAX_UNPACKED = 128 * 1024 * 1024   # sing-box распаковывается почти в 92 МБ, Xray — в 66 МБ
 MARKER = "lazeyka-core.json"            # что и откуда поставлено, хеш exe
+OLD_MARK = ".old-"                      # <версия>.old-<случайное>: прежняя установка на время замены
 GPL_FILE = "gpl-3.0.txt"                 # LICENSE в zip sing-box — только уведомление, текст GPL кладём сами
 VERSION_TIMEOUT = 15.0
 CHECK_TIMEOUT = 30.0
@@ -73,6 +74,11 @@ class CoreSpec:
     license: str              # SPDX
     skip: tuple[str, ...] = ()        # файлы zip, которые не распаковываем
     gpl_text: bool = False            # положить рядом полный текст GPL-3.0
+    neuter: bool = False              # «Ядро VPN» — средний род, «Помощник Xray» — мужской
+
+    def agree(self, masculine: str) -> str:
+        """Глагол в роде названия: agree("установлен") — «Ядро VPN … установлено», «Помощник Xray … установлен»."""
+        return masculine + "о" if self.neuter else masculine
 
     @property
     def tag(self) -> str:
@@ -96,7 +102,7 @@ CORES: dict[str, CoreSpec] = {
         asset="sing-box-1.14.3-windows-amd64.zip", zip_size=32_853_953,
         zip_sha256="d8b86ef58936dba9230ec6a57ffa4243933f3c14ef4809828b6c553440ed1518",
         exe="sing-box.exe", exe_sha256="5c19bb3f8c12d4e85b3d47fe63123a7624b314b58dd7a8e32f51004f1c4d2faf",
-        disk_size=91_552_885, license="GPL-3.0-or-later", gpl_text=True),
+        disk_size=91_552_885, license="GPL-3.0-or-later", gpl_text=True, neuter=True),
     "xray": CoreSpec(
         name="xray", title="Помощник Xray", version="26.3.27", repo="XTLS/Xray-core",
         asset="Xray-windows-64.zip", zip_size=20_913_304,
@@ -145,9 +151,6 @@ def version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
-_version_key = version_key
-
-
 # ------------------------------------------------------------ где лежит
 
 def core_root(name: str) -> Path:
@@ -193,33 +196,28 @@ def versions(name: str) -> list[str]:
     root = core_root(name)
     if not root.is_dir():
         return []
+    _recover_interrupted(name)
     found = [p.name for p in root.iterdir() if p.is_dir() and _present(name, p.name)]
-    return sorted(found, key=_version_key, reverse=True)
+    return sorted(found, key=version_key, reverse=True)
 
 
 def installed(name: str, version: str | None = None) -> str | None:
     """Версия, которая стоит на диске: заданная или самая новая."""
     if version:
+        if not _present(name, version):
+            _recover_interrupted(name)
         return version if _present(name, version) else None
     return next(iter(versions(name)), None)
 
 
 # ------------------------------------------------------------ сверка и запуск статических команд
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def verify(name: str, version: str | None = None) -> Path:
     """Путь к exe установленного ядра после сверки SHA-256 — перед каждым запуском."""
     s = spec(name)
     ver = installed(name, version)
     if ver is None:
-        raise EngineError(f"{s.title} {version or ''} не установлено".replace("  ", " "))
+        raise EngineError(f"{s.title} {version or ''} {s.agree('не установлен')}".replace("  ", " "))
     marker = _marker(name, ver) or {}
     # Для закреплённой версии эталон — код, а не метка на диске.
     expected = s.exe_sha256 if ver == s.version else str(marker.get("exe_sha256", ""))
@@ -255,7 +253,7 @@ def version(name: str, exe: Path | None = None) -> str:
     match = _VERSION_OUTPUT[s.name].search(res.out + "\n" + res.err)
     if res.code != 0 or not match:
         detail = (res.err or res.out).strip().splitlines()[-1:] or [f"код {res.code}"]
-        raise EngineError(f"{s.title} не сообщил версию: {detail[0][:200]}")
+        raise EngineError(f"{s.title} {s.agree('не сообщил')} версию: {detail[0][:200]}")
     return match.group(1).lstrip("v")
 
 
@@ -271,7 +269,7 @@ def check(name: str, config_path: Path, *, version: str | None = None) -> list[s
     res = _run([str(exe), *args], CHECK_TIMEOUT, cwd=config_path.parent)
     lines = [ln.strip() for ln in (res.err + "\n" + res.out).splitlines() if ln.strip()]
     if res.code != 0:
-        raise EngineError(f"{s.title} не принял конфигурацию: {_check_error(s.name, lines, res.code)}")
+        raise EngineError(f"{s.title} {s.agree('не принял')} конфигурацию: {_check_error(s.name, lines, res.code)}")
     return _check_warnings(s.name, lines)
 
 
@@ -325,7 +323,7 @@ def newest(releases: list[dict]) -> dict | None:
     """Самый новый стабильный релиз из списка GitHub: без пре-релизов и меток вида 1.15.0-beta.1."""
     stable = [r for r in releases if isinstance(r, dict) and not r.get("prerelease")
               and _VERSION.match(str(r.get("version") or ""))]
-    return max(stable, key=lambda r: _version_key(r["version"]), default=None)
+    return max(stable, key=lambda r: version_key(r["version"]), default=None)
 
 
 def release_for(name: str, rel: dict) -> Release:
@@ -369,6 +367,10 @@ def _github_download(url: str, dest: Path, sha256: str, *, cancel: threading.Eve
 # ------------------------------------------------------------ установка
 
 _install_locks = {name: threading.Lock() for name in CORES}
+# Переименования папок версий одного ядра — замена при установке (_finish) и возврат прерванной
+# (_recover_interrupted) — по одному: уборка не должна вернуть «прежнюю» папку посреди замены. Держится
+# миллисекунды, поэтому уборка её ждёт; установке целиком — своя блокировка выше.
+_layout_locks = {name: threading.Lock() for name in CORES}
 
 
 def install(name: str, *, progress: Progress | None = None, source: Release | None = None,
@@ -452,28 +454,71 @@ def _finish(s: CoreSpec, release: Release, staging: Path, exe_sha: str, origin: 
               "zip_sha256": release.zip_sha256.lower(), "source": origin, "installed_at": time.time()}
     (staging / MARKER).write_text(json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
     final = version_dir(s.name, release.version)
-    old = None
-    if final.exists():
-        old = final.with_name(f"{release.version}.old-{uuid.uuid4().hex[:8]}")
-        try:
-            os.rename(final, old)
-        except OSError as exc:
-            raise EngineError(f"{s.title} {release.version} сейчас запущено — выключите VPN и повторите") from exc
-    os.rename(staging, final)
+    with _layout_locks[s.name]:
+        old = _swap_in(s, release, staging, final)
     if old is not None:
         shutil.rmtree(old, ignore_errors=True)
 
 
+def _swap_in(s: CoreSpec, release: Release, staging: Path, final: Path) -> Path | None:
+    """Прежняя установка этой версии — в сторону, новая — на её место. Ответ — куда ушла прежняя (удалить)."""
+    old = None
+    if final.exists():
+        old = final.with_name(f"{release.version}{OLD_MARK}{uuid.uuid4().hex[:8]}")
+        try:
+            os.rename(final, old)
+        except OSError as exc:
+            raise EngineError(f"{s.title} {release.version} сейчас {s.agree('запущен')} — выключите VPN и "
+                              "повторите") from exc
+    try:
+        os.rename(staging, final)
+    except OSError:
+        if old is not None:
+            # Прежняя установка этой версии — на место: иначе installed() её бы больше не видел.
+            try:
+                os.rename(old, final)
+            except OSError as exc:
+                log.error("%s %s: прежняя установка не вернулась на место (%s) — вернётся при следующей "
+                          "проверке установленных версий", s.title, release.version, exc)
+        raise
+    return old
+
+
+def _recover_interrupted(name: str) -> None:
+    """Установка прервалась между двумя переименованиями (_finish): папки версии нет, а прежняя лежит
+    рядом как <версия>.old-* — вернуть её на место. Идущей установке не мешаем: её переименования — под той
+    же блокировкой, а саму установку уборка не держит (иначе install() ответил бы «уже устанавливается»)."""
+    root = core_root(name)
+    if not root.is_dir():
+        return
+    with _layout_locks[spec(name).name]:
+        try:
+            for entry in sorted(root.iterdir(), key=lambda p: p.name):
+                version, mark, _ = entry.name.partition(OLD_MARK)
+                if not mark or not entry.is_dir() or not _VERSION.match(version) or (root / version).exists():
+                    continue
+                try:
+                    os.rename(entry, root / version)
+                    log.warning("%s %s: прерванная установка — прежняя версия возвращена на место", name, version)
+                except OSError as exc:
+                    log.warning("%s %s: прежняя версия после прерванной установки не вернулась: %s", name, version,
+                                exc)
+        except OSError as exc:
+            log.warning("Папка ядра %s не прочитана: %s", name, exc)
+
+
 def prune(name: str, keep: set[str]) -> list[str]:
-    """Удаляет версии, кроме keep (активная и прежняя — для отката), и брошенные папки установки."""
+    """Удаляет версии, кроме keep (активная и прежняя — для отката), и брошенные папки установки (прежнюю
+    версию из прерванной установки сначала возвращает на место)."""
     root = core_root(name)
     removed: list[str] = []
     if not root.is_dir():
         return removed
+    _recover_interrupted(name)
     for entry in root.iterdir():
         if not entry.is_dir() or entry.name in keep:
             continue
-        leftover = ".staging" in entry.name or ".old-" in entry.name
+        leftover = ".staging" in entry.name or OLD_MARK in entry.name
         if leftover or _VERSION.match(entry.name):
             shutil.rmtree(entry, ignore_errors=True)
             removed.append(entry.name)

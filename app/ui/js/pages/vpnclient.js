@@ -1,9 +1,11 @@
 'use strict';
 /*
  * Страница «Свой VPN»: шапка, плашки, карточка «Подключение» (кнопка питания, сервер, режим,
- * скорость, трафик, память ядер; пока VPN не подключён — картинка состояния вместо нулей)
+ * скорость, трафик, память ядер; пока VPN не подключён — картинка состояния вместо нулей, при отказе —
+ * почему, чья сторона и что сделать)
  * и разделы из vpnclient-servers.js, vpnclient-add.js,
- * vpnclient-routing.js и vpnclient-more.js. Пока серверов нет, первой идёт карточка «Добавить».
+ * vpnclient-routing.js и vpnclient-more.js. «Добавить» всегда первым, сразу под шапкой: пока серверов
+ * нет — большая карточка, когда есть — строка над «Подключением» (вторая подписка без прокрутки).
  */
 (function (Lz) {
   const { h, setText, setHidden } = Lz.dom;
@@ -15,7 +17,7 @@
 
   const MODE_ORDER = ['tun', 'proxy', 'local'];
   const MEMORY_LABEL = { 'sing-box': 'sing-box', xray: 'Xray' };
-  /* Картинка состояния вместо нулей скорости, пока VPN не подключён (docs/art/codex-vpn-states.md). */
+  /* Картинка состояния вместо нулей скорости, пока VPN не подключён (docs/art/vpn-states.md). */
   const SCENE_ART = {
     off: 'img/vpn-off.png',
     connect: 'img/vpn-connect.png',
@@ -29,15 +31,31 @@
   /* ---------- Подключение ---------- */
 
   /**
+   * Через что пойдёт трафик — с родовым словом снаружи кавычек: «через сервер «Амстердам»» для сервера
+   * (и сервера, который выбрала группа), «через группу «Умная локация»» — пока группа ещё не выбрала сервер.
+   * { via, viaIt } — «через …» и «через него / через неё»; пусто — сервер не выбран.
+   */
+  function routeVia(target) {
+    if (!target) return { via: '', viaIt: '' };
+    const name = Lz.fmt.quote(target.name);
+    if (target.auto && !target.group) return { via: `через группу ${name}`, viaIt: 'через неё', group: true };
+    return { via: `через сервер ${name}`, viaIt: 'через него', group: false };
+  }
+
+  /**
    * Что показать вместо скорости и трафика: { kind, text }; null — VPN работает и выход через
    * сервер проверен, тогда видна статистика. Строка состояния и подпись под кнопкой уже называют
    * состояние, поэтому текст сцены не повторяет его, а говорит, что дальше.
    */
   function sceneFor(vc, cores, pillStatus) {
-    const target = view.selectedView(vc);
-    const via = target ? `«${target.name}»` : '';
-    /* Обновление уже стоящего ядра идёт фоном и сцену не занимает — только первая подкачка. */
-    if (Object.values(cores).some((core) => core && !core.installed && texts.VPNC_CORE_ACTIVE.has(core.state))) {
+    /* Подключено и выход проверен — только цифры: подкачка ядра рядом их не заменяет. */
+    if (pillStatus === 'running') return null;
+    const route = routeVia(view.selectedView(vc));
+    /* Не подключилось или через сервер ничего не открывается — почему, чья сторона и что сделать. */
+    const why = vc.error && (pillStatus === 'error' || pillStatus === 'verifying') ? texts.vpncReason(vc.diagnosis) : null;
+    if (why) return { kind: 'error', why };
+    /* Обновление уже стоящего ядра и подкачка ненужного помощника (needed: false) идут фоном — только первая нужная. */
+    if (texts.vpncCoreFirstInstall(cores)) {
       return {
         kind: 'core',
         text: 'Готовим ядро VPN — это нужно один раз. Лазейка скачивает официальную сборку с GitHub и сверяет её SHA-256, дальше VPN включается за пару секунд.',
@@ -50,30 +68,34 @@
       };
     }
     switch (pillStatus) {
-      case 'running':
-        return null;
       case 'starting':
       case 'verifying':
         return {
           kind: 'connect',
-          text: `Строим маршрут${via ? ` через ${via}` : ''} и проверяем, что сайты через него открываются.`,
+          text: route.via
+            ? `Строим маршрут ${route.via} и проверяем, что сайты ${route.viaIt} открываются.`
+            : 'Строим маршрут и проверяем, что сайты через него открываются.',
         };
-      case 'error':
+      case 'error': {
+        const through = route.via ? `${route.via.charAt(0).toUpperCase()}${route.via.slice(1)} подключиться` : 'Подключиться';
         return {
           kind: 'error',
           text: SERVER_ERRORS.has(vc.error_kind)
-            ? `${via ? `Через ${via} подключиться` : 'Подключиться'} не вышло. Попробуйте другой сервер или «Самый быстрый»\u00A0— подробности вверху страницы.`
+            ? `${through} не вышло. Попробуйте другой сервер или «Самый быстрый»\u00A0— подробности вверху страницы.`
             : 'Подключиться не вышло. Что случилось и что делать\u00A0— вверху страницы.',
         };
+      }
       case 'locked':
         return { kind: 'off', text: 'Свой VPN сейчас недоступен\u00A0— причина вверху страницы.' };
-      default:
-        return {
-          kind: 'off',
-          text: via
-            ? `Свой VPN выключен. Включите его кнопкой питания\u00A0— трафик пойдёт через ${via}.`
-            : 'Свой VPN выключен. Выберите сервер в списке ниже и включите VPN кнопкой питания.',
-        };
+      default: {
+        let next = 'Свой VPN выключен. Выберите сервер в списке ниже и включите VPN кнопкой питания.';
+        if (route.via && route.group) {
+          next = `Свой VPN выключен. Включите его кнопкой питания\u00A0— трафик пойдёт ${route.via}: Лазейка выберет в ней самый быстрый сервер.`;
+        } else if (route.via) {
+          next = `Свой VPN выключен. Включите его кнопкой питания\u00A0— трафик пойдёт ${route.via}.`;
+        }
+        return { kind: 'off', text: next };
+      }
     }
   }
 
@@ -89,11 +111,37 @@
       return [kind, art];
     }));
     const text = h('p', { class: 'vc-scene__text' });
+    const why = createWhy();
     return {
-      el: h('div', { class: 'vc-scene' }, [...arts.values()], text),
+      el: h('div', { class: 'vc-scene' }, [...arts.values()], text, why.el),
       set(scene) {
         for (const [kind, art] of arts) setHidden(art, kind !== scene.kind || art.dataset.broken === '1');
-        setText(text, scene.text);
+        setHidden(text, Boolean(scene.why));
+        setHidden(why.el, !scene.why);
+        if (scene.why) why.set(scene.why);
+        else setText(text, scene.text);
+      },
+    };
+  }
+
+  /** Причина отказа тремя строками: «Почему», «Чья сторона», «Что сделать» (texts.vpncReason). */
+  function createWhy() {
+    const reason = h('dd', { class: 'vc-scene__why-text' });
+    const side = h('span', { class: 'vc-why__side' });
+    const advice = h('dd', { class: 'vc-scene__why-text' });
+    const adviceRow = h('div', { class: 'vc-scene__why-row' }, h('dt', { text: 'Что сделать' }), advice);
+    const el = h('dl', { class: 'vc-scene__why', hidden: true },
+      h('div', { class: 'vc-scene__why-row' }, h('dt', { text: 'Почему' }), reason),
+      h('div', { class: 'vc-scene__why-row' }, h('dt', { text: 'Чья сторона' }), h('dd', null, side)),
+      adviceRow);
+    return {
+      el,
+      set(data) {
+        el.dataset.side = data.side;
+        setText(reason, data.text);
+        setText(side, data.sideLabel);
+        setText(advice, data.advice);
+        setHidden(adviceRow, !data.advice);
       },
     };
   }
@@ -118,12 +166,12 @@
 
   function createConnectionCard(onChangeServer) {
     let status = 'stopped';
-    const power = Lz.power.create({ label: 'Свой VPN', onToggle: () => gate.toggle(status) });
-    const caption = h('p', { class: 'vc-conn__caption', 'aria-live': 'polite' });
+    const power = Lz.power.create({ label: 'Свой VPN', busyKey: gate.POWER_KEY, onToggle: () => gate.toggle(status) });
+    const caption = Lz.power.caption(power, 'vc-conn__caption');
 
     const statusText = h('span', { class: 'conn__text' });
     const statusLine = h('p', { class: 'conn vc-conn__status', role: 'status' }, h('span', { class: 'conn__dot', 'aria-hidden': 'true' }), statusText);
-    const installBar = ui.progressBar({ label: 'Готовлю ядро VPN' });
+    const installBar = ui.progressBar({ label: 'Готовим ядро VPN' });
     const installBox = h('div', { class: 'vc-conn__install', hidden: true }, installBar.el);
 
     const server = ui.slot(renderSelected, { cls: 'vc-conn__selected' });
@@ -196,7 +244,7 @@
     card.body.classList.add('vc-conn');
     card.body.append(
       h('div', { class: 'vc-conn__main' },
-        h('div', { class: 'vc-conn__power' }, power.el, caption),
+        h('div', { class: 'vc-conn__power' }, power.el, caption.el),
         h('div', { class: 'vc-conn__info' },
           statusLine,
           installBox,
@@ -219,13 +267,13 @@
         status = vc.status || 'stopped';
         const available = vc.available !== false;
         power.update(pillStatus === 'verifying' ? 'running' : (available ? status : 'stopped'), { disabled: !available || !texts.vpncHasServers(vc) });
-        setText(caption, texts.vpncCaption(vc, pillStatus));
-        caption.classList.toggle('is-error', status === 'error');
+        const [captionText, captionQuiet] = texts.vpncCaptionParts(vc, pillStatus);
+        caption.set(captionText, captionQuiet, { error: status === 'error' });
 
         const line = texts.vpncLine(vc);
         statusLine.dataset.tone = line.tone;
         setText(statusText, line.text);
-        const installing = Object.values(snap.cores).find((core) => core && !core.installed && texts.VPNC_CORE_ACTIVE.has(core.state));
+        const installing = pillStatus === 'running' ? null : texts.vpncCoreFirstInstall(snap.cores);
         setHidden(installBox, !installing);
         if (installing) installBar.set(installing.state === 'downloading' && installing.progress != null ? installing.progress : null);
 
@@ -289,29 +337,56 @@
       const kind = texts.vpncError(data.kind);
       const logs = ui.button({ label: 'Открыть журнал', size: 'sm', onClick: () => Lz.nav.go('logs') }).el;
       const help = ui.button({ label: 'Что делать', size: 'sm', kind: 'ghost', onClick: () => Lz.nav.go('help', { symptom: 'vpnclient' }) }).el;
+      /* Есть причина — почему, чья сторона и что сделать показывает карточка «Подключение» ниже: здесь только что случилось. */
+      const advice = data.diagnosed ? '' : kind.advice;
       return ui.callout({
         tone: 'err',
         title: kind.title,
-        text: data.error && data.error !== kind.title ? `${data.error} ${kind.advice}` : kind.advice,
+        text: data.error && data.error !== kind.title ? `${data.error} ${advice}`.trim() : (advice || data.error || kind.title),
         actions: [help, logs],
       });
     }
-    if (data.conflict && data.status !== 'running') {
-      const toProxy = data.conflict.kind === 'tunnel' && data.mode === 'tun' ? ui.actionButton({
-        method: 'vpnclient_set_mode',
-        args: ['proxy'],
-        label: 'Перейти на системный прокси',
-        size: 'sm',
-        success: 'Режим «Системный прокси» выбран',
-      }).el : null;
+    if (data.conflict && data.status !== 'running') return renderConflict(data);
+    return null;
+  }
+
+  /**
+   * С чем свой VPN не уживётся (vpnclient.conflict): чужой туннель, чужой системный прокси или режим прокси под
+   * чужой учётной записью UAC (uac_user). Кнопка — только та, что сработает: под чужой учётной записью
+   * системный прокси недоступен (proxy_denied), и «Перейти на системный прокси» отказал бы.
+   */
+  function renderConflict(data) {
+    const conflict = data.conflict;
+    if (conflict.kind === 'uac_user') {
+      /* Ядро помнит отказ с прошлого «Включить»; режим уже «Весь трафик» — плашке не о чем говорить. */
+      if (data.mode !== 'proxy') return null;
       return ui.callout({
         tone: 'warn',
-        title: data.conflict.label ? `Работает ${data.conflict.label}` : 'Работает другой VPN',
-        text: data.conflict.text || 'Два VPN мешают друг другу.',
-        actions: toProxy,
+        title: gate.conflictTitle(conflict),
+        text: fmt.sentence(conflict.text || 'Лазейка запущена от другой учётной записи и не может поменять ваш системный прокси'),
+        actions: ui.actionButton({
+          method: 'vpnclient_set_mode',
+          args: ['tun'],
+          label: 'Весь трафик (TUN)',
+          size: 'sm',
+          success: 'Режим «Весь трафик» выбран',
+        }).el,
       });
     }
-    return null;
+    const toProxy = conflict.kind === 'tunnel' && data.mode === 'tun' && !conflict.proxyDenied ? ui.actionButton({
+      method: 'vpnclient_set_mode',
+      args: ['proxy'],
+      label: 'Перейти на системный прокси',
+      size: 'sm',
+      success: 'Режим «Системный прокси» выбран',
+    }).el : null;
+    /* Заголовок — тот же, что у окна перед включением: одна поломка, одно название. */
+    return ui.callout({
+      tone: 'warn',
+      title: gate.conflictTitle(conflict),
+      text: [conflict.text || 'Два VPN мешают друг другу', conflict.proxyDenied].filter(Boolean).map(fmt.sentence).join(' '),
+      actions: toProxy,
+    });
   }
 
   /* ---------- Страница ---------- */
@@ -327,7 +402,8 @@
     let status = 'stopped';
     const sections = Lz.vcSections;
     const pill = ui.statusPill();
-    const restartBtn = ui.actionButton({ method: 'vpnclient_restart', label: 'Перезапустить', icon: 'refresh', success: 'Свой VPN переподключается' });
+    /* «Переподключить» — как в плашке vpn-exit ядра: одно действие, одно название и один ключ (notices.js). */
+    const restartBtn = ui.actionButton({ method: 'vpnclient_restart', label: 'Переподключить', icon: 'refresh', success: 'Свой VPN переподключается' });
     const powerBtn = ui.button({
       label: 'Включить',
       icon: 'power',
@@ -343,7 +419,7 @@
     const add = sections.createAddSection();
     const routing = sections.createRoutingSection();
     const more = sections.createMoreSection();
-    const all = [connection, servers, add, routing, more];
+    const all = [add, connection, servers, routing, more];
     const anchors = { servers: servers.el, add: add.el, routing: routing.el, more: more.el, connection: connection.el };
 
     const el = h('div', { class: 'page__inner page__inner--vpnclient' }, header.el, banner.el, all.map((section) => section.el));
@@ -359,7 +435,7 @@
         const vc = snap.vc;
         status = vc.status || 'stopped';
         const available = snap.present && vc.available !== false;
-        pill.set(snap.present ? texts.vpncPillStatus(vc) : 'locked');
+        pill.set(snap.present ? texts.vpncPillShown(vc) : 'locked');
         setText(header.subtitleEl, subtitle(snap));
         const running = texts.vpncRunning(status);
         const empty = !texts.vpncHasServers(vc);
@@ -374,11 +450,13 @@
           status,
           kind: vc.error_kind || null,
           error: vc.error ? String(vc.error) : null,
+          diagnosed: Boolean(texts.vpncReason(vc.diagnosis)),
           mode: vc.mode || 'tun',
           conflict: vc.conflict && typeof vc.conflict === 'object' ? {
             kind: vc.conflict.kind || null,
             label: vc.conflict.label ? String(vc.conflict.label) : null,
             text: vc.conflict.text ? String(vc.conflict.text) : null,
+            proxyDenied: vc.conflict.proxy_denied ? String(vc.conflict.proxy_denied) : null,
           } : null,
         });
         setHidden(connection.el, empty || !snap.present);
@@ -401,5 +479,6 @@
     };
   }
 
-  Lz.pages.vpnclient = { title: 'VPN', icon: 'vpn', create };
+  /* Одно имя везде: пункт меню, заголовок страницы и ссылки на неё — «Свой VPN»; чужой VPN — «другой VPN». */
+  Lz.pages.vpnclient = { title: 'Свой VPN', icon: 'vpn', create };
 })(window.Lz);

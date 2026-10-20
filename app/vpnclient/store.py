@@ -47,6 +47,7 @@ class MergeReport:
     added: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     kept: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)    # add_servers: сервер уже был, а параметры ссылки — новые
     selection: tuple[str, str | None] | None = None    # (старый, новый), если выбранный сменился; новый None — исчез
     suggested: str | None = None                       # чем заменить исчезнувший выбор (решает менеджер)
     skipped: int = 0                                   # не вошли: лимит серверов или сервер уже есть в другой подписке
@@ -127,7 +128,7 @@ def _valid_selection(state: _State, selection: str) -> bool:
     return any(s.id == selection for s in state.servers)
 
 
-def _url_key(url: str) -> str:
+def url_key(url: str) -> str:
     """Адрес подписки для сравнения: схема и хост без учёта регистра, без завершающего «/»."""
     parts = urlsplit((url or "").strip())
     return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path.rstrip('/')}?{parts.query}"
@@ -147,6 +148,14 @@ def _credentials_of(server: Server) -> Any:
 
 def _address_of(server: Server) -> Any:
     return (server.host, server.port)
+
+
+def _link_fields(server: Server) -> dict[str, Any]:
+    """Всё, что пришло из ссылки, — без служебного (id, подписка) и своего имени человека."""
+    data = server.to_dict()
+    for key in ("id", "sub", "custom_name"):
+        data.pop(key, None)
+    return data
 
 
 def _unique(servers: Iterable[Server], key_of: Callable[[Server], Any]) -> dict[Any, Server]:
@@ -348,7 +357,7 @@ class ProfileStore:
                 raise StoreError(f"Подписок может быть не больше {MAX_SUBSCRIPTIONS}")
             if not (sub.url or "").strip():
                 raise StoreError("У подписки нет адреса")
-            if any(_url_key(s.url) == _url_key(sub.url) for s in state.subs):
+            if any(url_key(s.url) == url_key(sub.url) for s in state.subs):
                 raise StoreError("Эта подписка уже добавлена")
             new = copy.deepcopy(sub)
             new.url = sub.url.strip()
@@ -374,7 +383,7 @@ class ProfileStore:
                 url = str(values["url"] or "").strip()
                 if not url:
                     raise StoreError("У подписки нет адреса")
-                if any(s.id != sub_id and _url_key(s.url) == _url_key(url) for s in self._state.subs):
+                if any(s.id != sub_id and url_key(s.url) == url_key(url) for s in self._state.subs):
                     raise StoreError("Эта подписка уже добавлена")
                 values["url"] = url
             for name, value in values.items():
@@ -538,28 +547,45 @@ class ProfileStore:
     # ---------------------------------------------------------------- серверы
 
     def add_servers(self, servers: list[Server]) -> MergeReport:
-        """Серверы из отдельных ссылок (sub = None). Такой же сервер уже есть — kept."""
+        """Серверы из отдельных ссылок (sub = None). Такой же сервер уже есть: отдельный — обновляется
+        параметрами новой ссылки (в key() нет ключа REALITY, отпечатка, ALPN, extra XHTTP — их провайдер
+        меняет, а повторная вставка ссылки — способ их обновить), своё имя остаётся; сервер подписки — kept
+        (его параметры ведёт провайдер)."""
         with self._lock:
             state = self._state
             # Сервер, сохранённый прежним выпуском под прежним id (key() с тех пор уточнялся — например,
             # у WireGuard добавился ключ клиента), узнаётся и по нынешнему key(): повторная ссылка не дублирует.
-            existing = {s.id for s in state.servers} | {s.key() for s in state.servers}
+            known: dict[str, Server] = {}
+            for stored in state.servers:
+                known.setdefault(stored.id, stored)
+                known.setdefault(stored.key(), stored)
             report = MergeReport()
             new: list[Server] = []
+            replaced: dict[int, Server] = {}           # место в списке → сервер с новыми параметрами
             for item in servers:
                 server = copy.deepcopy(item)
                 server.sub = None
                 server.id = server.key()
-                if server.id in existing:
-                    report.kept.append(server.id)
+                stored = known.get(server.id)
+                if stored is None:
+                    known[server.id] = server
+                    new.append(server)
                     continue
-                existing.add(server.id)
-                new.append(server)
+                place = next((i for i, s in enumerate(state.servers) if s is stored), None)
+                if stored.sub is None and place is not None and _link_fields(stored) != _link_fields(server):
+                    server.id, server.custom_name = stored.id, stored.custom_name
+                    replaced[place] = server
+                    known[server.id] = known[server.key()] = server
+                    report.updated.append(server.id)
+                else:
+                    report.kept.append(stored.id)
             if len(state.servers) + len(new) > MAX_SERVERS:
                 raise StoreError(f"Серверов может быть не больше {MAX_SERVERS}")
+            for place, server in replaced.items():
+                state.servers[place] = server
             state.servers.extend(new)
             report.added = [s.id for s in new]
-            if new:
+            if new or replaced:
                 self.save()
             return report
 
@@ -602,13 +628,16 @@ class ProfileStore:
             self.save()
 
     def set_latency(self, server_id: str, ms: int | None, error: str | None = None, *,
-                    at: float | None = None, save: bool = True) -> None:
-        """Задержка сервера. Пачкой — save=False у всех и один save() в конце."""
+                    reason: dict | None = None, at: float | None = None, save: bool = True) -> None:
+        """Задержка сервера. Пачкой — save=False у всех и один save() в конце. reason — чья сторона у
+        «нет ответа» (diagnose.Reason.public): {side, code, text, advice}."""
         with self._lock:
             if self._server(server_id) is None:
                 return                       # сервер успели удалить, пока шла проверка
-            self._state.latency[server_id] = {"ms": None if ms is None else int(ms),
-                                              "at": time.time() if at is None else at, "error": error}
+            entry = {"ms": None if ms is None else int(ms), "at": time.time() if at is None else at, "error": error}
+            if reason:
+                entry["reason"] = dict(reason)
+            self._state.latency[server_id] = entry
             if save:
                 self.save()
 
@@ -642,7 +671,7 @@ class ProfileStore:
             subs: dict[str, str] = {}                   # id подписки в копии → id у нас
             for sub in incoming.subs:
                 original = sub.id
-                same = next((s for s in state.subs if _url_key(s.url) == _url_key(sub.url)), None)
+                same = next((s for s in state.subs if url_key(s.url) == url_key(sub.url)), None)
                 if same is not None:
                     subs[original] = same.id
                     continue

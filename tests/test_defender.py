@@ -165,6 +165,12 @@ class _NoUpdates:
     def available_count(self):
         return 0
 
+    def pending_keys(self):
+        return []
+
+    def app_restart_text(self):
+        return None
+
 
 def _has_defender_notice(core) -> bool:
     return any(n["id"] == "defender" for n in core._persistent_notices())

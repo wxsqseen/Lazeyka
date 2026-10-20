@@ -41,6 +41,7 @@
     const copy = (value, label) => Lz.actions.copyText(value, label);
     const server = ui.copyField({ label: 'Сервер', onCopy: copy });
     const port = ui.copyField({ label: 'Порт', onCopy: copy });
+    /* Так, как его вводят в Telegram: с приставкой dd (в настройках прокси ниже — те же 32 символа без неё). */
     const secret = ui.copyField({ label: 'Ключ', secret: true, onCopy: copy });
 
     const path = h('ol', { class: 'crumbs', 'aria-label': 'Путь в настройках Telegram' },
@@ -93,14 +94,15 @@
     const idleNote = h('p', { class: 'muted small', text: 'Прокси выключен — статистика появится, когда он заработает.' });
 
     const card = ui.card({ title: 'Сейчас' });
+    /* Загрузка перед отдачей — как на главной и у своего VPN; «за сеанс» здесь — число соединений, так и подписано. */
     card.body.append(
       h('div', { class: 'kpis' },
-        kpi('Соединений', values.active),
-        kpi('За сеанс', values.total),
-        kpi('Отдача', values.upRate, 'up'),
+        kpi('Соединений сейчас', values.active),
+        kpi('Соединений за сеанс', values.total),
         kpi('Загрузка', values.downRate, 'down'),
-        kpi('Отправлено', values.up),
-        kpi('Получено', values.down)),
+        kpi('Отдача', values.upRate, 'up'),
+        kpi('Получено', values.down),
+        kpi('Отправлено', values.up)),
       h('div', { class: 'spark-wrap spark-wrap--tall' }, spark.el),
       h('p', { class: 'routes__title', text: 'Как шли соединения' }),
       routes.el,
@@ -188,7 +190,8 @@
   function create() {
     let status = 'stopped';
     const pill = ui.statusPill();
-    const restartBtn = ui.actionButton({ method: 'tg_restart', label: 'Перезапустить', icon: 'refresh', success: 'Прокси перезапущен' });
+    /* Перезапуск идёт фоном: «перезапущен» здесь было бы раньше времени — ход видно по статусу, ошибку — уведомлением. */
+    const restartBtn = ui.actionButton({ method: 'tg_restart', label: 'Перезапустить', icon: 'refresh' });
     const powerBtn = ui.button({
       label: 'Включить',
       icon: 'power',
@@ -198,7 +201,7 @@
     });
     const header = ui.pageHeader({ title: 'Telegram', actions: [pill.el, restartBtn.el, powerBtn.el] });
     const banner = ui.slot((data) => (data.error
-      ? ui.callout({ tone: 'err', title: 'Прокси не запустился', text: data.error, actions: ui.button({ label: 'Открыть журнал', size: 'sm', onClick: () => Lz.nav.go('logs') }).el })
+      ? ui.callout({ tone: 'err', title: 'Прокси не работает', text: data.error, actions: ui.button({ label: 'Открыть журнал', size: 'sm', onClick: () => Lz.nav.go('logs') }).el })
       : null), { cls: 'page__banners' });
 
     const connection = createConnectionCard();

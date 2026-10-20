@@ -10,8 +10,10 @@
 
   const LEAD = {
     zapret: 'Обход и VPN будут работать вместе. Вот что куда пойдёт:',
-    tg: 'Прокси для Telegram и VPN будут работать вместе. Вот что куда пойдёт:',
+    tg: 'Telegram-прокси и VPN будут работать вместе. Вот что куда пойдёт:',
   };
+  /* Проверка обычно отвечает сразу; зависшая не должна держать кнопку включения занятой вечно. */
+  const PREFLIGHT_TIMEOUT_MS = 15000;
 
   function checkbox(label, checked) {
     const input = h('input', { type: 'checkbox', class: 'check__input', checked });
@@ -52,7 +54,8 @@
       });
       const content = h('div', { class: 'dialog vpn-dialog' },
         h('div', { class: 'dialog__icon', 'aria-hidden': 'true' }, icon('shieldCheck', { size: 22 })),
-        h('h2', { class: 'dialog__title', id: titleId, text: `Работает VPN — ${label}` }),
+        /* «VPN «wwan99»» уже со словом VPN — заголовок без повтора: «Работает VPN «wwan99»». */
+        h('h2', { class: 'dialog__title', id: titleId, text: /^VPN\b/.test(label) ? `Работает ${label}` : `Работает VPN — ${label}` }),
         h('p', { class: 'dialog__text', id: textId, text: LEAD[component] || LEAD.zapret }),
         routes.el,
         h('div', { class: 'vpn-dialog__checks' }, compat && compat.el, remember.el),
@@ -70,6 +73,16 @@
     });
   }
 
+  /*
+   * Проверка не ответила за PREFLIGHT_TIMEOUT_MS или отказала — включаем без окна, как и раньше при её ошибке:
+   * обход и прокси работают и рядом с VPN, а про VPN обход скажет уведомлением сам (zapret_start без quiet).
+   * Не включать вовсе значило бы, что сломанная проверка выключает обход. Человеку — тост, а не молчание.
+   */
+  function withoutWindow(reason) {
+    ui.toast({ kind: 'warn', text: `Не удалось проверить, работает ли VPN: ${Lz.fmt.sentence(reason)} Включаем без окна «Работает VPN».` });
+    return { proceed: true, asked: false };
+  }
+
   /**
    * Перед включением: спросить, если работает VPN. Promise<{ proceed, asked }>: asked — окно
    * показывали и человек согласился (тогда обход включают тихо: zapret_start(true)).
@@ -79,15 +92,12 @@
     if (!Lz.api.hasMethod('vpn_preflight')) return { proceed: true, asked: false };
     let reply;
     try {
-      reply = await Lz.api.call('vpn_preflight', component);
+      reply = await Lz.api.callWithTimeout('vpn_preflight', PREFLIGHT_TIMEOUT_MS, component);
     } catch (err) {
-      console.warn(`vpn_preflight("${component}") не ответил — включаем без окна про VPN:`, err);
-      return { proceed: true, asked: false };
+      return withoutWindow(Lz.api.describeError(err));
     }
-    if (!reply || !reply.ask) {
-      if (reply && reply.ok === false) console.warn(`vpn_preflight("${component}") отказал: ${reply.error} — включаем без окна`);
-      return { proceed: true, asked: false };
-    }
+    if (reply && reply.ok === false) return withoutWindow(String(reply.error || 'ядро отказало и не назвало причину'));
+    if (!reply || !reply.ask) return { proceed: true, asked: false };
     Lz.store.refreshSoon();
     const answer = await askUser(component, reply);
     if (!answer) return { proceed: false, asked: true };

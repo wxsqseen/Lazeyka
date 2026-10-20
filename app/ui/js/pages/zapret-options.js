@@ -11,6 +11,12 @@
   const GAME_MODES = ['disabled', 'all', 'tcp', 'udp'];
   const IPSET_MODES = ['none', 'loaded', 'any'];
   const LIST_ROWS = 12;
+  /* Пока идёт подбор или «Найти и включить», ядро отказывает в смене фильтров, списков и режима («Идёт подбор…»). */
+  const MANAGED_TITLE = 'Идёт подбор стратегии — дождитесь окончания или остановите его';
+
+  function isManaged(zapret) {
+    return Boolean(zapret && ((zapret.test && zapret.test.running) || (zapret.fix && zapret.fix.running)));
+  }
 
   /* ---------- Фильтры ---------- */
 
@@ -114,7 +120,9 @@
       const gf = zapret.game_filter || {};
       server = { mode: gf.mode || 'disabled', tcp: gf.tcp || '', udp: gf.udp || '' };
       modeSeg.set(server.mode);
-      modeSeg.setDisabled(zapret.available === false);
+      modeSeg.setDisabled(zapret.available === false || isManaged(zapret));
+      applyBtn.setDisabled(isManaged(zapret));
+      applyBtn.el.title = isManaged(zapret) ? MANAGED_TITLE : '';
       if (!dirty.tcp) ui.syncValue(tcpInput, server.tcp);
       if (!dirty.udp) ui.syncValue(udpInput, server.udp);
       const relevant = inputsFor(server.mode);
@@ -158,7 +166,8 @@
       const ipset = zapret.ipset || {};
       const mode = ipset.mode || 'none';
       modeSeg.set(mode);
-      modeSeg.setDisabled(zapret.available === false);
+      modeSeg.setDisabled(zapret.available === false || isManaged(zapret));
+      refreshBtn.setDisabled(zapret.available === false || isManaged(zapret));
       setText(explanation, texts.ipset(modeSeg.get()).text);
       setText(countText, ipset.count ? `В полном списке ${fmt.count(ipset.count, 'подсеть', 'подсети', 'подсетей')}` : '');
     }
@@ -195,6 +204,7 @@
     let loading = false;
     let loadError = null;
     let selectedId = null;
+    let managed = false;
     const drafts = new Map();
 
     const panelId = uid('list-panel');
@@ -208,23 +218,30 @@
       },
     });
     const hint = h('p', { class: 'list-panel__hint' });
+    /* Отказ ядра при сохранении («Не похоже на домен — строка 2: «…»») — у поля своего списка, до правки. */
+    const saveErrors = new Map();
     const area = ui.textArea({
       id: areaId,
       rows: LIST_ROWS,
       label: 'Содержимое списка',
       onInput: (value) => {
-        if (selectedId) drafts.set(selectedId, value);
+        if (selectedId) {
+          drafts.set(selectedId, value);
+          saveErrors.delete(selectedId);
+        }
         render();
       },
     });
+    const areaField = ui.field({ control: area, inputId: areaId });
     const meta = h('span', { class: 'list-panel__meta num' });
     const readonlyTag = h('span', { class: 'tag', text: 'Встроенный — только просмотр' });
     const resetBtn = ui.button({ label: 'Отменить изменения', kind: 'ghost', size: 'sm', onClick: () => resetDraft() });
     const saveBtn = ui.button({ label: 'Сохранить', kind: 'primary', size: 'sm', busyKey: 'lists_save', onClick: () => save() });
     const panel = h('div', { class: 'list-panel', id: panelId, role: 'tabpanel' },
       hint,
-      area,
+      areaField.el,
       h('div', { class: 'list-panel__footer' }, meta, h('span', { class: 'spacer' }), readonlyTag, resetBtn.el, saveBtn.el));
+    /* Пустой слот прячется (list-status:empty): иначе лишний отступ над вкладками. */
     const status = ui.slot((data) => {
       if (data.loading) return h('p', { class: 'muted' }, h('span', { class: 'spinner spinner--inline', 'aria-hidden': 'true' }), 'Загружаем списки…');
       if (data.error) {
@@ -237,7 +254,7 @@
       }
       if (data.empty) return ui.emptyState({ icon: 'list', title: 'Списков нет', text: 'Ядро не вернуло ни одного списка.' });
       return null;
-    });
+    }, { cls: 'list-status' });
 
     const openFolder = ui.button({
       label: 'Папка списков',
@@ -286,13 +303,16 @@
       setHidden(readonlyTag, editable);
       setHidden(saveBtn.el, !editable);
       setHidden(resetBtn.el, !editable || !isDirty(list));
-      saveBtn.setDisabled(!isDirty(list));
+      areaField.setError(saveErrors.get(list.id) || null);
+      saveBtn.setDisabled(!isDirty(list) || managed);
+      saveBtn.el.title = managed ? MANAGED_TITLE : '';
     }
 
     function resetDraft() {
       const list = current();
       if (!list) return;
       drafts.delete(list.id);
+      saveErrors.delete(list.id);
       area.value = String(list.text || '');
       render();
     }
@@ -304,21 +324,28 @@
       const result = await Lz.api.run({
         method: 'lists_save',
         args: [list.id, text],
-        success: `Список «${list.title || list.id}» сохранён`,
+        silent: true,
+        success: `Список ${fmt.quote(list.title || list.id)} сохранён`,
       });
-      if (result && result.ok) {
-        list.text = text;
-        drafts.delete(list.id);
+      if (!result) return;
+      if (!result.ok) {
+        saveErrors.set(list.id, result.error);
         render();
-        load();
+        if (selectedId === list.id) area.focus({ preventScroll: true });
+        return;
       }
+      list.text = text;
+      drafts.delete(list.id);
+      saveErrors.delete(list.id);
+      render();
+      load();
     }
 
     async function load() {
       loading = true;
       render();
       try {
-        const result = await Lz.api.call('lists_get');
+        const result = Lz.api.unwrap('lists_get', await Lz.api.call('lists_get'));
         lists = result && Array.isArray(result.lists) ? result.lists : [];
         loadError = null;
       } catch (err) {
@@ -334,7 +361,12 @@
 
     return {
       el: card.el,
-      update() {},
+      update(state) {
+        const next = isManaged(state.zapret);
+        if (next === managed) return;
+        managed = next;
+        render();
+      },
       /*
        * Перечитываем при каждом показе: «Помощь → Сайт» дописывает домены в «Мои сайты»,
        * и старый текст в редакторе затёр бы их при следующем сохранении. Черновики остаются.
@@ -433,7 +465,7 @@
       update(state) {
         const zapret = state.zapret || {};
         if (!pending) current = zapret.mode === 'service' ? 'service' : 'app';
-        locked = zapret.available === false;
+        locked = zapret.available === false || isManaged(zapret);
         setText(info, serviceSummary(zapret));
         render();
       },
@@ -464,11 +496,14 @@
       const select = ui.selectControl({
         id,
         onChange: async (name) => {
+          /* Работающий обход ядро перезапускает с новым фейком само (zapret.manager._apply_if_running). */
+          const zapret = Lz.store.state && Lz.store.state.zapret;
+          const running = Boolean(zapret && zapret.status === 'running');
           const result = await Lz.api.run({
             method: 'fakes_set',
             args: [slotInfo.id, name],
             key: `fakes_set:${slotInfo.id}`,
-            success: 'Фейк заменён. Перезапустите обход, если он работает.',
+            success: running ? 'Фейк заменён; работающий обход перезапущен' : 'Фейк заменён',
           });
           return Boolean(result && result.ok);
         },
@@ -485,7 +520,7 @@
     async function load() {
       loaded = true;
       try {
-        const data = normalizeFakes(await Lz.api.call('fakes_get'));
+        const data = normalizeFakes(Lz.api.unwrap('fakes_get', await Lz.api.call('fakes_get')));
         const options = data.files.map((name) => ({ value: name, label: name }));
         for (const control of controls) {
           const value = data[control.slotInfo.id];
@@ -520,31 +555,37 @@
     return { tone: 'info', text: text || 'Проверка завершена.' };
   }
 
+  /** Итог hosts_apply ({added, disabled, backup}): сколько добавлено, сколько своих строк отключено и где копия. */
+  function hostsApplied(result) {
+    const parts = [`записей добавлено: ${fmt.integer(Number(result.added) || 0)}`];
+    if (Number(result.disabled) > 0) parts.push(`ваших строк с другими адресами закомментировано: ${fmt.integer(result.disabled)}`);
+    const backup = result.backup ? ` Копия прежнего файла: ${result.backup}` : '';
+    return `Файл hosts обновлён: ${parts.join('; ')}.${backup}`;
+  }
+
   function createHosts() {
     const resultBox = ui.slot((data) => (data ? ui.callout({ tone: data.tone, text: data.text }) : null));
-    const checkBtn = ui.button({
-      label: 'Проверить',
-      icon: 'search',
-      size: 'sm',
-      busyKey: 'hosts_check',
-      onClick: async () => {
-        const result = await Lz.api.run({ method: 'hosts_check' });
-        resultBox.update(hostsMessage(result));
-      },
-    });
-    const applyBtn = ui.actionButton({
-      method: 'hosts_apply',
-      label: 'Обновить hosts',
-      icon: 'download',
-      size: 'sm',
-      success: 'Файл hosts обновлён',
-      confirm: {
+
+    async function check() {
+      const result = await Lz.api.run({ method: 'hosts_check' });
+      if (result) resultBox.update(hostsMessage(result));
+    }
+
+    /* После обновления — проверка заново: прежний итог «нужно обновить» остался бы на экране. */
+    async function apply() {
+      const confirmed = await ui.confirm({
         title: 'Обновить файл hosts?',
-        text: 'Лазейка добавит в системный файл hosts актуальные записи из репозитория zapret-discord-youtube. Ваши собственные записи останутся на месте.',
+        text: 'Лазейка добавит в системный файл hosts актуальные записи из репозитория zapret-discord-youtube. Ваши строки, где у тех же доменов другие адреса, будут закомментированы, остальные записи останутся. Перед изменением Лазейка сохранит копию файла.',
         confirmLabel: 'Обновить',
         icon: 'alert',
-      },
-    });
+      });
+      if (!confirmed) return;
+      const result = await Lz.api.run({ method: 'hosts_apply', success: hostsApplied });
+      if (result && result.ok) await check();
+    }
+
+    const checkBtn = ui.button({ label: 'Проверить', icon: 'search', size: 'sm', busyKey: 'hosts_check', onClick: () => check() });
+    const applyBtn = ui.button({ label: 'Обновить hosts', icon: 'download', size: 'sm', busyKey: 'hosts_apply', onClick: () => apply() });
     const el = h('div', { class: 'subsection' },
       h('h3', { class: 'subsection__title' }, icon('server', { size: 18 }), 'Файл hosts'),
       h('p', { class: 'subsection__text', text: 'Некоторые серверы Discord открываются стабильнее, если их адреса прописаны в hosts.' }),
@@ -560,22 +601,30 @@
     };
   }
 
-  function renderConflicts(conflicts) {
+  function renderConflicts(data) {
+    const conflicts = data.list;
     if (!conflicts.length) {
       return h('p', { class: 'ok-line' }, icon('checkCircle', { size: 18 }), 'Конфликтов не найдено.');
     }
     return h('ul', { class: 'issue-list' }, conflicts.map((conflict) => h('li', { class: 'issue issue--err issue--inline' },
       h('span', { class: 'issue__icon', 'aria-hidden': 'true' }, icon('alertCircle', { size: 18 })),
       h('p', { class: 'issue__text', text: conflict.text }),
-      conflict.fix_label ? ui.actionButton({
-        method: 'zapret_fix_conflict',
-        args: [conflict.id],
-        key: `zapret_fix_conflict:${conflict.id}`,
-        label: conflict.fix_label,
-        icon: 'wrench',
-        size: 'sm',
-        success: 'Готово',
-      }).el : null)));
+      conflict.fix_label ? fixConflictButton(conflict, data.managed) : null)));
+  }
+
+  function fixConflictButton(conflict, managed) {
+    const btn = ui.actionButton({
+      method: 'zapret_fix_conflict',
+      args: [conflict.id],
+      key: `zapret_fix_conflict:${conflict.id}`,
+      label: conflict.fix_label,
+      icon: 'wrench',
+      size: 'sm',
+      title: managed ? MANAGED_TITLE : null,
+      success: 'Готово',
+    });
+    btn.setDisabled(managed);
+    return btn.el;
   }
 
   function createAdvancedSection() {
@@ -607,10 +656,10 @@
       update(state) {
         const zapret = state.zapret || {};
         const list = Array.isArray(zapret.conflicts) ? zapret.conflicts : [];
-        conflicts.update(list);
+        conflicts.update({ list, managed: isManaged(zapret) });
         disclosure.setBadge(list.length ? fmt.count(list.length, 'конфликт', 'конфликта', 'конфликтов') : '', 'err');
         const locked = zapret.available === false;
-        fakes.setLocked(locked);
+        fakes.setLocked(locked || isManaged(zapret));
         hosts.setLocked(locked);
       },
       open() {

@@ -61,6 +61,10 @@
       actual: id === ctx.actualId,
       pending: id === ctx.pendingId,
       sub: server.sub || null,
+      /* В конфиге работающего VPN (выбранный и до 15 серверов его подписки): тест скорости — только через них. */
+      inConfig: Boolean(ctx.configIds && ctx.configIds.has(id)),
+      /* Что ядро проигнорирует в ссылке — человеческими словами (texts.vpncWarning). */
+      warnings: (Array.isArray(server.warnings) ? server.warnings : []).map((code) => texts.vpncWarning(code)).filter(Boolean),
     };
   }
 
@@ -90,7 +94,7 @@
     const meta = [fmt.count(Number(sub.servers) || 0, 'сервер', 'сервера', 'серверов')];
     if (texts.VPNC_FORMAT[sub.format]) meta.push(texts.VPNC_FORMAT[sub.format]);
     if (sub.updated_at) meta.push(`обновлена ${fmt.relative(sub.updated_at)}`);
-    if (sub.ua_preset && sub.ua_preset !== 'lazeyka' && texts.VPNC_UA[sub.ua_preset]) meta.push(`UA ${texts.VPNC_UA[sub.ua_preset]}`);
+    if (sub.ua_preset && sub.ua_preset !== 'lazeyka' && texts.VPNC_UA_NAME[sub.ua_preset]) meta.push(`UA: ${texts.VPNC_UA_NAME[sub.ua_preset]}`);
     if (sub.hwid) meta.push('HWID');
     const probe = sub.probe && typeof sub.probe === 'object' ? sub.probe : null;
     return {
@@ -130,6 +134,7 @@
       actualId: selected && selected.actual ? String(selected.actual.id) : null,
       actualName: selected && selected.actual ? String(selected.actual.name || '') : '',
       pendingId: local.pendingId,
+      configIds: vc.status === 'running' ? view.configServerIds(vc) : null,
     };
     const query = local.query;
     const sort = local.sort;
@@ -183,10 +188,51 @@
 
   /* ---------- Действия ---------- */
 
+  const FOCUS_WAIT_SNAPSHOTS = 10;
+
+  /**
+   * Удалённая строка уносит с собой и фокус (кнопку «⋯»). Когда список перестроится без неё, фокус — на первую
+   * из оставшихся кнопок candidates (ключи data-fk). Ждём перерисовку по снимкам состояния, а не по часам, и
+   * не трогаем фокус, если человек уже перевёл его сам.
+   */
+  function keepFocusAfterRemoval(goneFk, candidates) {
+    let seen = 0;
+    let unsubscribe = null;
+    let finished = false;
+    const finish = () => {
+      finished = true;
+      if (unsubscribe) unsubscribe();
+    };
+    unsubscribe = Lz.store.subscribe(() => {
+      if (finished) return;
+      seen += 1;
+      if (Lz.dom.byFk(goneFk)) {
+        if (seen >= FOCUS_WAIT_SNAPSHOTS) finish();
+        return;
+      }
+      const active = document.activeElement;
+      if (!active || active === document.body || !active.isConnected) {
+        const target = candidates.map((key) => Lz.dom.byFk(key)).find((node) => node && node.offsetParent !== null);
+        if (target) target.focus({ preventScroll: false });
+      }
+      finish();
+    });
+    if (finished) unsubscribe();
+  }
+
+  /** Соседняя строка списка (следующая, иначе предыдущая) — её кнопка выбора. */
+  function neighbourFk(fk, selector) {
+    const node = Lz.dom.byFk(fk);
+    const item = node && node.closest(selector);
+    const next = item && (item.nextElementSibling || item.previousElementSibling);
+    const pick = next && next.querySelector('[data-fk]');
+    return pick ? pick.dataset.fk : null;
+  }
+
   function confirmRemoveServer(row) {
     const fromSub = Boolean(row.sub);
     return ui.confirm({
-      title: `Удалить сервер «${row.name}»?`,
+      title: `Удалить сервер ${fmt.quote(row.name)}?`,
       text: fromSub
         ? 'Сервер пропадёт из списка. Если провайдер оставит его в подписке, он вернётся при следующем обновлении.'
         : 'Сервер будет удалён из Лазейки. Чтобы вернуть его, понадобится ссылка.',
@@ -198,19 +244,25 @@
 
   async function removeServer(row) {
     if (!(await confirmRemoveServer(row))) return;
-    Lz.api.run({ method: 'vpnclient_server_remove', args: [row.id], key: `vpnclient_server_remove:${row.id}`, success: 'Сервер удалён' });
+    const goneFk = `server:${row.id}`;
+    const near = neighbourFk(goneFk, '.vc-server');
+    const result = await Lz.api.run({ method: 'vpnclient_server_remove', args: [row.id], key: `vpnclient_server_remove:${row.id}`, success: 'Сервер удалён' });
+    if (result && result.ok) keepFocusAfterRemoval(goneFk, [near, 'servers-search', 'vc-add-field'].filter(Boolean));
   }
 
   async function removeSub(sub) {
     const confirmed = await ui.confirm({
-      title: `Удалить подписку «${sub.name}»?`,
+      title: `Удалить подписку ${fmt.quote(sub.name)}?`,
       text: 'Пропадут её серверы, группы и свои имена серверов. Если VPN подключён через неё, он выключится. Вернуть подписку можно, добавив ссылку заново.',
       confirmLabel: 'Удалить подписку',
       tone: 'danger',
       icon: 'trash',
     });
     if (!confirmed) return;
-    Lz.api.run({ method: 'vpnclient_sub_remove', args: [sub.id], key: `vpnclient_sub_remove:${sub.id}`, success: 'Подписка удалена' });
+    const goneFk = `sub-update:${sub.id}`;
+    const near = neighbourFk(`sub-section:${sub.id}`, '.vc-sub-wrap');
+    const result = await Lz.api.run({ method: 'vpnclient_sub_remove', args: [sub.id], key: `vpnclient_sub_remove:${sub.id}`, success: 'Подписка удалена' });
+    if (result && result.ok) keepFocusAfterRemoval(goneFk, [near, 'servers-search', 'vc-add-field'].filter(Boolean));
   }
 
   function speedtest(id) {
@@ -223,9 +275,27 @@
 
   /* ---------- Отрисовка ---------- */
 
+  /** Тест скорости меряет через включённый VPN и только серверы его конфига (выбранный и до 15 из его подписки). */
+  function speedItem(row, data) {
+    let label = 'Тест скорости';
+    let title = null;
+    if (!data.running) label = 'Тест скорости — включите VPN';
+    else if (!row.inConfig) {
+      label = 'Тест скорости — сначала выберите этот сервер';
+      title = 'Этого сервера нет в текущем подключении: в него входят выбранный сервер и до 15 других из его подписки. Выберите этот сервер — тогда скорость можно будет измерить.';
+    }
+    return {
+      label,
+      title,
+      icon: 'gauge',
+      disabled: !row.supported || !data.running || !row.inConfig,
+      onSelect: () => speedtest(row.id),
+    };
+  }
+
   function rowMenu(row, data) {
     return ui.menuButton({
-      ariaLabel: `Действия с сервером «${row.name}»`,
+      ariaLabel: `Действия с сервером ${fmt.quote(row.name)}`,
       title: 'Действия',
       fk: `server-menu:${row.id}`,
       items: () => [
@@ -242,12 +312,7 @@
         },
         { label: 'QR-код для телефона или ТВ', icon: 'qr', onSelect: () => dialogs.showQr({ id: row.id, title: row.name }) },
         { label: 'Проверить задержку', icon: 'pulse', disabled: !row.supported, onSelect: () => latency([row.id]) },
-        {
-          label: data.running ? 'Тест скорости' : 'Тест скорости — включите VPN',
-          icon: 'gauge',
-          disabled: !row.supported || !data.running,
-          onSelect: () => speedtest(row.id),
-        },
+        speedItem(row, data),
         { label: 'Удалить', icon: 'trash', tone: 'danger', onSelect: () => removeServer(row) },
       ],
     }).el;
@@ -289,6 +354,13 @@
         h('span', { class: 'vc-server__label', text: row.name, title: row.name }),
         row.actual ? h('span', { class: 'vc-tag', text: 'сейчас' }) : null),
       h('span', { class: ['vc-server__meta', !row.supported && 'is-unsupported', row.engine === 'xray' && 'is-xray'], text: metaText }),
+      /* «Нет ответа»: чья сторона и коротко почему; полный текст и что сделать — в подсказке. */
+      row.supported ? view.reasonEl(row.latency, 'vc-server__why') : null,
+      row.supported && row.warnings.length ? h('span', {
+        class: 'vc-server__warn',
+        title: `Ядро не учтёт:\n${row.warnings.join('\n')}`,
+        text: `Не учтено: ${row.warnings[0]}${row.warnings.length > 1 ? ` и ещё ${row.warnings.length - 1}` : ''}`,
+      }) : null,
       row.description ? h('span', { class: 'vc-server__desc', text: row.description }) : null),
     row.speed ? h('span', { class: 'vc-server__speed num', title: 'Скорость по последнему тесту', text: row.speed }) : null,
     row.supported ? view.latencyEl(row.latency, 'vc-server__latency') : h('span', { class: 'vc-server__latency' }));
@@ -351,7 +423,7 @@
     /* Без лимита трафика полоски нет: пустая шкала «из ∞» только путает. */
     let bar = null;
     if (sub.usage.share != null) {
-      bar = ui.progressBar({ label: `Трафик подписки «${sub.name}»` });
+      bar = ui.progressBar({ label: `Трафик подписки ${fmt.quote(sub.name)}` });
       bar.set(sub.usage.share);
       bar.el.classList.toggle('is-warn', sub.usage.tone === 'warn');
       bar.el.classList.toggle('is-err', sub.usage.tone === 'err');
@@ -390,7 +462,7 @@
         'Проверяем, отдаёт ли панель расширенный формат другим клиентам…');
     }
     const action = switchFound(sub) ? ui.button({
-      label: `Переключить на «${texts.VPNC_UA[sub.probe.ua] || sub.probe.ua}»`,
+      label: `Переключить на ${texts.VPNC_UA_NAME[sub.probe.ua] || sub.probe.ua}`,
       size: 'sm',
       busyKey: `vpnclient_sub_set:${sub.id}`,
       onClick: async () => {
@@ -408,7 +480,7 @@
 
   function subMenu(sub, ids) {
     return ui.menuButton({
-      ariaLabel: `Действия с подпиской «${sub.name}»`,
+      ariaLabel: `Действия с подпиской ${fmt.quote(sub.name)}`,
       title: 'Действия',
       fk: `sub-menu:${sub.id}`,
       items: () => [
@@ -459,7 +531,7 @@
       checkFormat = btn.el;
     }
 
-    return h('section', { class: 'vc-sub', 'aria-label': `Подписка «${sub.name}»` },
+    return h('section', { class: 'vc-sub vc-sub-wrap', 'aria-label': `Подписка ${fmt.quote(sub.name)}`, dataset: { fk: `sub-section:${sub.id}` } },
       h('header', { class: 'vc-sub__head' },
         h('div', { class: 'vc-sub__titles' },
           h('h3', { class: 'vc-sub__name', text: sub.name }),
@@ -486,7 +558,7 @@
 
   function renderManualSection(section, data, onPick) {
     if (!section.rows.length) return null;
-    return h('section', { class: 'vc-sub', 'aria-label': 'Серверы, добавленные вручную' },
+    return h('section', { class: 'vc-sub vc-sub-wrap', 'aria-label': 'Серверы, добавленные вручную' },
       h('header', { class: 'vc-sub__head' },
         h('div', { class: 'vc-sub__titles' },
           h('h3', { class: 'vc-sub__name', text: 'Добавлены вручную' }),
@@ -518,6 +590,7 @@
       autocomplete: 'off',
       spellcheck: false,
     });
+    search.dataset.fk = 'servers-search';
     search.addEventListener('input', () => {
       local.query = search.value.trim().toLowerCase();
       render();
@@ -577,7 +650,8 @@
     const list = ui.slot((data) => renderList(data, pick), { cls: 'vc-list' });
     const card = ui.card({
       title: 'Серверы',
-      subtitle: 'Нажмите на сервер, чтобы выбрать его. Если VPN включён, Лазейка переключится на лету, без переподключения.',
+      /* «Обычно»: в подключение входят выбранный и до 15 серверов его подписки (vcView.configServerIds). */
+      subtitle: 'Нажмите на сервер, чтобы выбрать его. Включённый VPN обычно переключится на сервер той же подписки без переподключения, на сервер другой подписки — переподключится на пару секунд.',
       actions: [latencyBtn.el, speedBtn.el],
     });
     card.body.append(
@@ -617,8 +691,9 @@
         speedBtn.el.title = running ? 'Скачивание через выбранный сервер, не дольше 10 секунд' : 'Включите VPN — скорость меряется через выбранный сервер';
         const result = view.speedText(speed);
         const server = speed.server ? snap.servers.find((item) => String(item.id) === String(speed.server)) : null;
+        const through = server ? `через сервер ${fmt.quote(server.name)}` : 'через выбранный сервер';
         const lineText = !speed.running && result
-          ? `Скорость через «${server ? server.name : 'выбранный сервер'}»: ${result}${speed.at ? ` · ${fmt.relative(speed.at)}` : ''}`
+          ? `Скорость ${through}: ${result}${speed.at ? ` · ${fmt.relative(speed.at)}` : ''}`
           : '';
         setText(speedLine, lineText);
         speedLine.hidden = !lineText;

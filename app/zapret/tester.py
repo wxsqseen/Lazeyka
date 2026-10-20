@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,11 +39,15 @@ CURL_MODES = {
     "tls12": ["--tlsv1.2", "--tls-max", "1.2"],
     "tls13": ["--tlsv1.3", "--tls-max", "1.3"],
 }
-_SSL_RE = re.compile(r"Could not resolve host|certificate|SSL certificate problem|self[- ]?signed|"
-                     r"certificate verify failed|unable to get local issuer certificate", re.I)
-_UNSUP_RE = re.compile(r"does not support|not supported|unsupported protocol|TLS.*not supported|"
-                       r"Unrecognized option|Unknown option|unsupported option|unsupported feature|schannel",
+_DNS_RE = re.compile(r"Could not resolve host|Couldn't resolve host", re.I)
+_SSL_RE = re.compile(r"certificate|SSL certificate problem|self[- ]?signed|certificate verify failed|"
+                     r"unable to get local issuer certificate", re.I)
+# «Не поддерживается» — только то, чего не умеют curl или Windows (TLS 1.3 до Windows 11, ключ старого
+# curl). Сброс рукопожатия (код 35, «schannel: failed to receive handshake») — это провал: так режет DPI.
+_UNSUP_RE = re.compile(r"does not support|doesn't support|not supported|unsupported protocol|"
+                       r"Unrecognized option|Unknown option|unsupported option|unsupported feature|not built-in",
                        re.I)
+CURL_FAILED_INIT, CURL_NOT_BUILT_IN, CURL_COULDNT_RESOLVE = 2, 4, 6
 
 DEFAULT_TARGETS = [
     ("Discord Main", "https://discord.com"), ("Discord Gateway", "https://gateway.discord.gg"),
@@ -61,7 +65,11 @@ QUICK_TARGETS = {
     "youtube": ("YouTube", ["https://www.youtube.com", "https://i.ytimg.com",
                             "https://redirector.googlevideo.com"]),
 }
-CONTROL_URL = "https://ya.ru"   # открывается и без обхода: если нет — нет интернета
+# Открываются и без обхода: если ни один — нет интернета. Разные компании, один адрес — без DNS,
+# чтобы блокировка одного сайта, корпоративный фильтр или DNS-блокировщик не выглядели как «нет связи».
+CONTROL_URLS = ("https://ya.ru", "http://www.msftconnecttest.com/connecttest.txt",
+                "https://1.1.1.1/cdn-cgi/trace")
+CONTROL_TIMEOUT = 4
 
 # Порядок проб, если подбор ещё ни разу не запускался: самые ходовые стратегии пакета.
 DEFAULT_CANDIDATES = ["general", "general (ALT)", "general (ALT2)", "general (FAKE TLS AUTO)",
@@ -123,11 +131,21 @@ def curl_check(url: str, mode: str, timeout: int = 4, cancel: threading.Event | 
     if cancel is not None and cancel.is_set():
         return "fail"
     res = winutil.run(args, timeout=timeout + 6)
-    if _SSL_RE.search(res.err):
+    return classify_curl(res.code, res.err)
+
+
+def classify_curl(code: int, err: str) -> str:
+    """Исход curl: ok | dns (адрес не нашёлся) | ssl (подменён сертификат) | unsup | fail. dns и ssl
+    в оценке стратегии — тоже неудачи; unsup не считается вовсе."""
+    if code == 0:
+        return "ok"
+    if code == CURL_COULDNT_RESOLVE or _DNS_RE.search(err):
+        return "dns"
+    if _SSL_RE.search(err):
         return "ssl"
-    if res.code == 35 or _UNSUP_RE.search(res.err):
+    if code in (CURL_FAILED_INIT, CURL_NOT_BUILT_IN) or _UNSUP_RE.search(err):
         return "unsup"
-    return "ok" if res.code == 0 else "fail"
+    return "fail"
 
 
 _resolved: dict[str, tuple[float, list[str]]] = {}
@@ -171,7 +189,8 @@ class _ICMP_ECHO_REPLY(ctypes.Structure):
                 ("Options", _IP_OPTION_INFORMATION)]
 
 
-_iphlpapi = ctypes.WinDLL("iphlpapi")
+# По полному пути: голое имя процесс с правами сначала ищет в папке exe, а iphlpapi.dll — не из KnownDLLs.
+_iphlpapi = ctypes.WinDLL(winutil.system32("iphlpapi.dll"))
 _iphlpapi.IcmpCreateFile.restype = wintypes.HANDLE
 _iphlpapi.IcmpCloseHandle.argtypes = [wintypes.HANDLE]
 _iphlpapi.IcmpSendEcho.argtypes = [wintypes.HANDLE, wintypes.ULONG, ctypes.c_void_p, wintypes.WORD,
@@ -243,7 +262,7 @@ def summarize(strategy_id: str, label: str, targets: list[dict]) -> dict:
                 ok += 1
             elif v == "unsup":
                 unsup += 1
-            elif v in ("fail", "ssl"):
+            elif v in ("fail", "ssl", "dns"):
                 fail += 1
         ping_total += 1  # ping проверяется у каждой цели, как в test zapret.ps1
         if t.get("ping") is not None:
@@ -266,8 +285,20 @@ def pick_best(results: list[dict]) -> str | None:
 
 
 def control_ok(cancel: threading.Event | None = None, bind: str | None = None) -> bool:
-    """Есть ли интернет вообще (сайт, который открывается без обхода)."""
-    return curl_check(CONTROL_URL, "http", timeout=5, cancel=cancel, bind=bind) == "ok"
+    """Есть ли интернет вообще: открылся хоть один проверочный адрес (CONTROL_URLS). Ответил первый —
+    остальных не ждём."""
+    pool = ThreadPoolExecutor(max_workers=len(CONTROL_URLS))
+    futures = [pool.submit(curl_check, url, "http", CONTROL_TIMEOUT, cancel, bind) for url in CONTROL_URLS]
+    try:
+        for fut in as_completed(futures):
+            try:
+                if fut.result() == "ok":
+                    return True
+            except Exception:  # noqa: BLE001 — один адрес не проверился: решают остальные
+                log.debug("Проверочный адрес не проверен", exc_info=True)
+        return False
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def quick_check(cancel: threading.Event | None = None, bind: str | None = None) -> list[dict]:
@@ -321,9 +352,7 @@ def dpi_check(host: str, payload: Path, mode: str, timeout: int = 5, bind: str |
     res = winutil.run(args, timeout=timeout + 8)
     m = re.match(r"^(\d{3})\s+(\d+)\s+(\d+)\s+([\d.]+)$", res.out.strip())
     if m is None:
-        if res.code == 35 or _UNSUP_RE.search(res.out + res.err):
-            return "unsup"
-        return "fail"
+        return "unsup" if classify_curl(res.code, res.out + res.err) == "unsup" else "fail"
     up, down, total = int(m.group(2)), int(m.group(3)), float(m.group(4))
     if up > 0 and down == 0 and total >= timeout and res.code != 0:
         return "blocked"
@@ -364,6 +393,15 @@ def check_dpi(suite: list[dict], cancel: threading.Event, bind: str | None = Non
 
 # ------------------------------------------------------------ подбор
 
+class NoDirectPath(UserError):
+    """Работает туннель VPN в интернет, а прямого подключения мимо него нет: проверка без привязки ушла бы
+    в VPN, и подбор признал бы рабочей любую стратегию."""
+
+    def __init__(self) -> None:
+        super().__init__("Работает VPN, а прямого подключения мимо него не видно — проверка обхода шла бы "
+                         "через VPN и ничего бы не показала. Выключите VPN на время проверки.")
+
+
 class StrategyTester:
     def __init__(self, zapret: "ZapretManager", notify: Callable[[str, str], None]):
         self.zapret = zapret
@@ -376,19 +414,27 @@ class StrategyTester:
         self.fix_state: dict = self._empty_fix()
         self._fix_thread: threading.Thread | None = None
         # Адрес прямого подключения, если работает VPN в интернет: проверки идут мимо туннеля.
+        # NoDirectPath — туннель есть, а прямого пути нет.
         self.source: Callable[[], str | None] = lambda: None
 
-    def _bind(self) -> str | None:
+    def _bind(self, strict: bool = False) -> str | None:
+        """strict — для подбора: без прямого пути при VPN оценивать стратегии нельзя (NoDirectPath).
+        Быстрая проверка в этом случае идёт как есть — без привязки и без пометки «напрямую»."""
         try:
             return self.source()
+        except NoDirectPath:
+            if strict:
+                raise
+            return None
         except Exception:  # noqa: BLE001
             log.debug("Адрес прямого подключения не получен", exc_info=True)
             return None
 
     @staticmethod
     def _empty(kind: str) -> dict:
+        # cancelled — подбор остановил человек: это не ошибка, error при этом пуст.
         return {"running": False, "kind": kind, "total": 0, "done": 0, "current": None, "best": None,
-                "error": None, "finished_at": None, "results": []}
+                "error": None, "cancelled": False, "finished_at": None, "results": []}
 
     @property
     def running(self) -> bool:
@@ -434,7 +480,8 @@ class StrategyTester:
         results: list[dict] = []
         try:
             # Всё, что может не получиться, — до того, как остановить обход пользователя.
-            own = {z.process.pid} if z.process and z.process.pid else set()
+            current = z.process   # одно чтение: параллельный stop() обнуляет поле
+            own = {current.pid} if current and current.pid else set()
             service = winutil.service_query(SERVICE_NAME)
             if service and service.pid:
                 own.add(service.pid)
@@ -446,13 +493,16 @@ class StrategyTester:
                     raise UserError("Не удалось загрузить список проверок DPI")
             else:
                 targets = load_targets(z.pack.path if z.pack else None)
+            bind = self._bind(strict=True)
+            self.state["direct"] = bool(bind)
 
             with z.lock:
-                was_running = z.running()
+                # Обход выключен страховкой связи посреди её проверки — он работал: подбор вернёт его сам.
+                running = z.running()
+                was_running, z.guard_paused = running or z.guard_paused, False
                 z.mark_test(original_ipset, service_was_running=(mode == "service" and was_running))
-                z.paused_for_test = True
-                paused = True
-                if was_running:
+                z.paused_for_test = paused = True
+                if running:
                     z.stop(remember=False)
             z.prepare_pack()
             if z.settings.get("zapret", "tcp_timestamps"):
@@ -460,8 +510,6 @@ class StrategyTester:
             if kind == "dpi" and original_ipset != "any":
                 lists.set_ipset_mode(lists_dir, "any")
                 ipset_switched = True
-            bind = self._bind()
-            self.state["direct"] = bool(bind)
 
             for strategy in chosen:
                 if self.cancel_event.is_set():
@@ -489,12 +537,16 @@ class StrategyTester:
                 self.state["results"] = sorted(results, key=lambda r: (-r["ok"], -r["ping_ok"]))
                 self.state["done"] = len(results)
                 self.state["best"] = pick_best(results)
-            if self.cancel_event.is_set():
-                self.state["error"] = "Подбор остановлен"
+            cancelled = self.cancel_event.is_set()
+            if cancelled:
+                self.state["cancelled"] = True   # остановил человек — не ошибка
             _save_report(kind, results, self.state["best"])
             best = self.state["best"]
             started = [r for r in results if r.get("started")]
-            if len(started) >= 3 and len({r["ok"] for r in started}) == 1 and started[0]["ok"] > 0:
+            if cancelled:
+                # Итог пишет страница: «Подбор остановлен: проверено N из M». «Завершён» было бы неправдой.
+                log.info("Подбор остановлен: проверено %d из %d", len(results), len(chosen))
+            elif len(started) >= 3 and len({r["ok"] for r in started}) == 1 and started[0]["ok"] > 0:
                 why = ("сайты открываются и без обхода" if bind else
                        "включён VPN (трафик идёт мимо провайдера) или сайты открываются и без обхода")
                 self.notify("info", f"Все стратегии показали одинаковый результат. Так бывает, если {why} — "
@@ -502,7 +554,7 @@ class StrategyTester:
             elif best:
                 label = next((s.label for s in chosen if s.id == best), best)
                 self.notify("success", f"Подбор завершён: лучшая стратегия — «{label}».")
-            elif results and not self.cancel_event.is_set():
+            elif results:
                 self.notify("warn", "Ни одна стратегия не открыла проверочные сайты. Запустите диагностику.")
         except UserError as exc:
             log.warning("Подбор стратегии не начат или прерван: %s", exc)
@@ -522,17 +574,30 @@ class StrategyTester:
             self.state["running"] = False
             self.state["finished_at"] = time.time()
             if paused:
-                z.paused_for_test = False
-                z.unmark_test()
+                self._end_pause()
             if was_running:
-                try:
-                    if mode == "service":
-                        winutil.service_start(SERVICE_NAME)
-                        z.status = "running"
-                    else:
-                        z.start()
-                except Exception as exc:  # noqa: BLE001
-                    self.notify("error", f"Обход не перезапустился после подбора: {exc}")
+                self._resume(mode, "Обход не перезапустился после подбора")
+
+    def _end_pause(self) -> None:
+        """Снять паузу подбора. Метка прерванного подбора не удалилась — не повод не вернуть обход."""
+        z = self.zapret
+        z.paused_for_test = False
+        try:
+            z.unmark_test()
+        except OSError as exc:
+            log.warning("Метка подбора не удалена: %s", exc)
+
+    def _resume(self, mode: str, failure: str) -> None:
+        """Вернуть обход, который работал до подбора. Не вышло — плашка «обход лежит» с «Включить снова»:
+        подбор запускает и сторож, человек может и не смотреть."""
+        z = self.zapret
+        try:
+            if mode == "service":
+                z.resume_service()
+            else:
+                z.start()
+        except Exception as exc:  # noqa: BLE001
+            self._report_down(f"{failure}: {exc}")
 
     def run_quick_check(self) -> None:
         if self.check_state["running"]:
@@ -561,20 +626,28 @@ class StrategyTester:
     def fix_running(self) -> bool:
         return bool(self._fix_thread and self._fix_thread.is_alive())
 
-    def best_known(self) -> tuple[str | None, dict[str, float], float | None]:
-        """Лучшая стратегия и оценки по последнему стандартному подбору (в том числе прошлых запусков)."""
+    def _last_results(self) -> tuple[list[dict], float | None]:
+        """Строки последнего стандартного подбора — этого запуска или из сохранённого отчёта."""
         results, finished = self.state.get("results") or [], self.state.get("finished_at")
         if not results or self.state.get("kind") != "standard":
             report = load_last_report()
             if report:
                 results, finished = report["results"], report["at"]
+        return results, finished
+
+    def best_known(self) -> tuple[str | None, dict[str, float], float | None]:
+        """Лучшая стратегия и оценки по последнему стандартному подбору (в том числе прошлых запусков)."""
+        results, finished = self._last_results()
         scores = {r["id"]: float(r.get("score") or 0) for r in results if r.get("started")}
         return pick_best(results), scores, finished
 
     def candidates(self, exclude: str | None) -> list:
+        """Порядок проб — как у pick_best: больше успешных проверок, при равенстве — больше ответов ping.
+        По доле (score) нельзя: одна удача при остальных «не поддерживается» дала бы 1.0."""
         usable = {s.id: s for s in self.zapret.strategies if s.usable}
-        _best, scores, _at = self.best_known()
-        ranked = [sid for sid, score in sorted(scores.items(), key=lambda kv: -kv[1]) if score > 0]
+        results, _at = self._last_results()
+        leaders = [r for r in results if r.get("started") and (r.get("ok") or 0) > 0 and r.get("id")]
+        ranked = [r["id"] for r in sorted(leaders, key=lambda r: (-(r.get("ok") or 0), -(r.get("ping_ok") or 0)))]
         order = ranked + [sid for sid in DEFAULT_CANDIDATES if sid not in ranked]
         picked = [usable[sid] for sid in order if sid in usable and sid != exclude]
         return picked[:MAX_CANDIDATES]
@@ -599,11 +672,15 @@ class StrategyTester:
         z = self.zapret
         previous = self.fix_state["previous"]
         try:
+            try:
+                bind = self._bind(strict=True)
+            except NoDirectPath as exc:
+                self._finish_fix("failed", str(exc))
+                return
             if not z.running():
                 self._set_fix(message="Включаем обход…")
                 z.start()
                 time.sleep(2)
-            bind = self._bind()
             self._set_fix(direct=bool(bind))
             results = quick_check(self.cancel_event, bind)
             self._set_fix(results=results)
@@ -616,21 +693,28 @@ class StrategyTester:
                     self._finish_fix("failed", "VPN не пускает соединения мимо себя (защита от утечек). Проверить "
                                                "обход можно, только выключив VPN или эту защиту в нём.")
                 else:
-                    self._finish_fix("failed", "Похоже, нет интернета: не открывается даже ya.ru. "
+                    self._finish_fix("failed", "Похоже, нет интернета: не открывается ни один проверочный сайт. "
                                                "Проверьте подключение.")
                 return
             found = self._quick_pick(previous, bind)
-            if self.cancel_event.is_set():
-                self._finish_fix("failed", "Остановлено.")
-                return
             if found is None:
-                self._finish_fix("failed", "Среди лучших стратегий подходящей не нашлось. Запустите полный подбор — "
-                                           "он проверит все стратегии.")
+                self._finish_fix("failed", "Остановлено." if self.cancel_event.is_set() else
+                                 "Среди лучших стратегий подходящей не нашлось. Запустите полный подбор — "
+                                 "он проверит все стратегии.")
                 return
+            # Победитель есть, обход выключен и ждёт его. Отмена после этой точки победителя уже включает:
+            # иначе человек остался бы без обхода.
             self._set_fix(stage="apply", current=None, message=f"Включаем «{_label(z, found)}»…")
-            z.set_strategy(found)
-            if not z.running():
-                z.start()
+            try:
+                z.set_strategy(found)
+                if not z.running():
+                    z.start()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Стратегия «%s» прошла пробу, но не включилась: %s", found, exc)
+                back = self._restore_previous(previous)
+                self._finish_fix("failed", f"«{_label(z, found)}» прошла пробу, но не включилась: {exc}. " + (
+                    f"Вернули «{_label(z, previous)}»." if back else "Прежняя стратегия тоже не включилась."))
+                return
             time.sleep(2)
             self._set_fix(stage="verify", message="Проверяем ещё раз…")
             results = quick_check(self.cancel_event, bind)
@@ -649,23 +733,47 @@ class StrategyTester:
         self._set_fix(running=False, stage=stage, message=message, found=found, current=None,
                       finished_at=time.time())
 
-    def _quick_pick(self, current: str | None, bind: str | None = None) -> str | None:
-        """Пробует лидеров прошлого подбора по очереди; первая, с которой всё открылось, — победитель."""
-        from .manager import SERVICE_NAME
+    def _restore_previous(self, previous: str | None) -> bool:
+        """Победитель пробы не включился — вернуть прежнюю стратегию и включить обход. Не вышло — плашка."""
+        z = self.zapret
+        try:
+            if previous and z.settings.get("zapret", "strategy") != previous:
+                z.set_strategy(previous)
+            if not z.running():
+                z.start()
+        except Exception as exc:  # noqa: BLE001
+            self._report_down(f"Обход не включился после «Найти и включить»: {exc}")
+            return False
+        return True
 
+    def _report_down(self, text: str) -> None:
+        """Обход лежит не по воле человека: плашка с «Включить снова»; без Core — уведомление."""
+        log.warning("%s", text)
+        report = getattr(self.zapret, "report_down", None)
+        if callable(report):
+            report(text)
+        else:
+            self.notify("error", text)
+
+    def _quick_pick(self, current: str | None, bind: str | None = None) -> str | None:
+        """Пробует лидеров прошлого подбора по очереди; первая, с которой всё открылось, — победитель.
+        С победителем обход остаётся выключенным — его включит _fix. Без победителя, после отмены или
+        ошибки обход возвращается как был."""
         z = self.zapret
         candidates = self.candidates(exclude=current)
         mode = z.mode
         lists_dir = z.pack.path / "lists" if z.pack else None
-        with z.lock:
-            was_running = z.running()
-            z.mark_test(lists.detect_ipset_mode(lists_dir) if lists_dir else None,
-                        service_was_running=(mode == "service" and was_running))
-            z.paused_for_test = True
-            if was_running:
-                z.stop(remember=False)
+        was_running = paused = finished = False
         found = None
         try:
+            with z.lock:
+                running = z.running()
+                was_running, z.guard_paused = running or z.guard_paused, False   # см. run()
+                z.mark_test(lists.detect_ipset_mode(lists_dir) if lists_dir else None,
+                            service_was_running=(mode == "service" and was_running))
+                z.paused_for_test = paused = True
+                if running:
+                    z.stop(remember=False)
             self._set_fix(stage="pick")
             for strategy in candidates:
                 if self.cancel_event.is_set():
@@ -685,26 +793,14 @@ class StrategyTester:
                     proc.stop()
                 if found:
                     break
+            finished = True
         finally:
-            z.paused_for_test = False
-            z.unmark_test()
-            if not found and was_running:
-                try:
-                    if mode == "service":
-                        winutil.service_start(SERVICE_NAME)
-                        z.status = "running"
-                    else:
-                        z.start()
-                except Exception as exc:  # noqa: BLE001
-                    # «Найти и включить» запускает и сторож (режим auto) — обход лежит, пока не включат: плашка.
-                    alert = getattr(z, "_alert", None)
-                    text = f"Обход не вернулся после пробы стратегий: {exc}"
-                    if callable(alert):
-                        alert("zapret-down", "error", text,
-                              action={"label": "Включить снова", "call": "zapret_start", "args": []}, page=None)
-                    else:
-                        self.notify("error", text)
-        return found
+            apply = finished and found is not None and not self.cancel_event.is_set()
+            if paused:
+                self._end_pause()
+            if was_running and not apply:
+                self._resume(mode, "Обход не вернулся после пробы стратегий")
+        return found if apply else None
 
     def revert_fix(self) -> str:
         previous = self.fix_state.get("previous")

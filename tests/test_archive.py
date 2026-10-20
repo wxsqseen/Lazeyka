@@ -1,4 +1,6 @@
 """Безопасная распаковка: лимит объёма задаёт потребитель, фильтр файлов, zip-slip."""
+import _winapi
+import os
 import zipfile
 
 import pytest
@@ -42,3 +44,21 @@ def test_unsafe_paths(tmp_path, name):
         zf.writestr(name, "x")
     with pytest.raises(archive.ArchiveError, match="Небезопасный путь"):
         archive.extract(src, tmp_path / "out")
+
+
+def test_link_inside_target_does_not_lead_outside(tmp_path):
+    """Путь в архиве безопасен, но в целевой папке уже лежит ссылка (junction) наружу: по ней не пишем."""
+    outside, target = tmp_path / "outside", tmp_path / "out"
+    outside.mkdir()
+    target.mkdir()
+    _winapi.CreateJunction(str(outside), str(target / "link"))
+    try:
+        src = tmp_path / "link.zip"
+        with zipfile.ZipFile(src, "w") as zf:
+            zf.writestr("top/link/evil.txt", "x")
+            zf.writestr("top/ok.txt", "ok")
+        with pytest.raises(archive.ArchiveError, match="Небезопасный путь"):
+            archive.extract(src, target)
+        assert not (outside / "evil.txt").exists()
+    finally:
+        os.rmdir(target / "link")          # убирает саму ссылку, не папку, на которую она указывает

@@ -1,13 +1,12 @@
-# Значок: генерация в Codex
+# Значок: промпт и обработка
 
-Значок нарисован встроенным генератором изображений Codex (CLI из расширения VS Code), выбран вариант 2 из трёх.
-Затем `build/clean_codex_icon.py` убирает белый фон, приводит цвета к палитре (#232529, #7D818A, #F2F3F5) и обрезает плитку — результат в `assets/icon-master.png`; из него `app/icons.py` делает ICO и значки трея со статусной точкой.
+Черновики значка — три варианта по промпту ниже; выбран вариант 2.
+Затем `build/clean_icon.py` убирает белый фон, приводит цвета к палитре (#232529, #7D818A, #F2F3F5) и обрезает плитку — результат в `assets/icon-master.png`; из него `app/icons.py` делает ICO и значки трея со статусной точкой.
 
-Команда (из папки черновиков, рядом reference.png — прежний вариант знака):
+К промпту прикладывался `reference.png` — прежний вариант знака. Обработка выбранного черновика:
 
 ```
-codex exec -s workspace-write --skip-git-repo-check -i reference.png -o result.md - < prompt.md
-.venv\Scripts\python.exe build\clean_codex_icon.py <папка-черновиков> assets\icon-master.png
+.venv\Scripts\python.exe build\clean_icon.py <папка-черновиков> assets\icon-master.png
 ```
 
 ## Промпт

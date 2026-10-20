@@ -79,12 +79,21 @@ STOP_WAIT = 15.0
 EXIT_URL = "https://1.1.1.1/cdn-cgi/trace"
 EXIT_TIMEOUTS = (5.0, 8.0, 8.0)         # проверка выхода: три попытки, первая короче
 RECHECK_TIMEOUTS = (5.0, 5.0)           # повторная проверка фоном — короче: за ней в очереди ждут «Выключить» и выбор
+# Причина «нет ответа» (diagnose.explain): факты собираются только по отказу.
+CONTROL_URLS = ("https://ya.ru", EXIT_URL)   # как у проверок обхода: не открылся ни один напрямую — интернета нет
+CONTROL_TIMEOUT = 3.0
+PROBE_TIMEOUT = 4.0                     # прямая проба TCP: Windows повторяет SYN после отказа — «закрыто» через ~2 с
+HANDSHAKE_TIMEOUT = 4.0                 # прямое рукопожатие TLS до сервера
+PROBE_LIMIT = 16                        # столько серверов без ответа пробуем напрямую за одну проверку задержки
+PEER_FRESH = 900.0                      # задержка соседа по подписке моложе 15 минут — годится для сравнения
+DIAGNOSIS_REUSE = 60.0                  # выход не проверен снова — прежняя причина годится минуту, без новых проб
 SPEED_URL = "https://speed.cloudflare.com/__down?bytes=50000000"
 SPEED_SECONDS = 10.0
 USER_AGENT = f"Lazeyka/{__version__} (Windows)"
 FILE_LIMIT = 5 * 1024 * 1024            # файл импорта (.conf/.json/.txt)
 NAME_LIMIT = 64
 SUB_MTU = (576, 9000)                   # свой MTU подписки (общий tun_mtu — от 1280: с IPv6 меньше нельзя)
+IPV6_MIN_MTU = 1280                     # RFC 8200: меньший MTU с IPv6 на адаптере не годится
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp")
 
 DOH_RESOLVERS = {"cloudflare": "https://1.1.1.1/dns-query", "google": "https://8.8.8.8/dns-query",
@@ -96,6 +105,8 @@ DOH_AUTO = ("cloudflare", "google", "quad9", "yandex")   # «auto»: первы�
 TUN_CANDIDATES = ("100.127.255.252/30", "100.127.254.252/30", "100.126.255.252/30", "198.51.100.252/30",
                   "192.0.2.252/30")
 TUN_IPV6 = "fdfe:dcba:9876::1/126"
+TUN_LUID_WAIT = 3.0                     # адрес своего TUN появляется в таблице адаптеров не сразу после старта ядра
+TUN_LUID_POLL = 0.2
 FINGERPRINTS = ("", "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android", "random", "randomized")
 CORE_SETTING = {"sing-box": "singbox_version", "xray": "xray_version"}
 CORE_UPDATE_KEY = {"sing-box": "vpncore", "xray": "vpnxray"}   # пункты «Обновлений» (пропущенная версия)
@@ -119,7 +130,8 @@ UA_LABELS = {"v2rayn": "как v2rayN", "happ": "как Happ", "incy": "как I
 TIMED_PROTOCOLS = ("vmess",)            # сервер сверяет время клиента (и REALITY — по security)
 # Плашки (Core.set_alert) — id с приставкой «vpn-». Плашки сеанса снимаются, когда сеанс кончился.
 EXIT_ALERT, SERVER_ALERT, KILLSWITCH_ALERT = "vpn-exit", "vpn-server", "vpn-killswitch"
-SESSION_ALERTS = (EXIT_ALERT, SERVER_ALERT, KILLSWITCH_ALERT)
+LOCAL_AUTH_ALERT = "vpn-local-auth"     # вход по паролю нужен, а логина и пароля нет — сеть не пускаем
+SESSION_ALERTS = (EXIT_ALERT, SERVER_ALERT, KILLSWITCH_ALERT, LOCAL_AUTH_ALERT)
 CRASH_ALERT = "vpn-crash"
 # Ошибка задержки сервера вне подключения: временное ядро замера kill switch не выпустит в сеть.
 KILLSWITCH_DELAY = "не проверить при включённом kill switch: он выпускает в сеть только ядра текущего подключения"
@@ -141,6 +153,32 @@ class VpnClientError(UserError):
 
 class _Aborted(VpnClientError):
     """Запуск прерван: нажали «Выключить» или Лазейка закрывается."""
+
+
+class AddressError(VpnClientError):
+    """Адрес сервера не получен через DNS: host — его имя, чтобы разобрать причину (секрет — в журнал нельзя)."""
+
+    def __init__(self, message: str, host: str):
+        super().__init__(message, "timeout")
+        self.host = host
+
+
+class SelectionError(VpnClientError):
+    """С этим выбором VPN не включить, пока его не сменят: включать нечего, выбранного сервера или группы нет,
+    их не открыть ни одним ядром. Повтор с тем же выбором не поможет. why — коротко почему, для уведомления
+    о замене выбора («его больше нет в подписке»)."""
+
+    def __init__(self, message: str, kind: str = "other", why: str = ""):
+        super().__init__(message, kind)
+        self.why = why or message
+
+
+def _refused_for_good(exc: BaseException | None) -> bool:
+    """Включение не удалось так, что с тем же выбором не удастся никогда: выбора нет или его не открыть
+    (SelectionError), конфиг для него не собрать даже без соседей (ConfigError, вид unsupported). Само
+    исключение или причина обёртки _start."""
+    return any(isinstance(item, SelectionError) or type(item).__name__ == "ConfigError"
+               for item in (exc, getattr(exc, "__cause__", None)) if item is not None)
 
 
 @dataclass
@@ -208,13 +246,27 @@ def _skip_name(buf: bytes, pos: int) -> int:
         pos += 1 + length
 
 
+RCODE_NXDOMAIN = 3
+RCODE_NAMES = {1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
+
+
+class DnsRcodeError(ValueError):
+    """Резолвер ответил ошибкой (RCODE ≠ 0): NXDOMAIN — такого имени нет; SERVFAIL, REFUSED… — он сам не
+    смог ответить, об имени это ничего не говорит."""
+
+    def __init__(self, rcode: int):
+        super().__init__(f"DNS ответил {RCODE_NAMES.get(rcode, f'кодом {rcode}')}")
+        self.rcode = rcode
+
+
 def parse_dns_answers(data: bytes) -> list[str]:
-    """Адреса из ответа DNS (wire format, RFC 1035): IPv4 из записей A, IPv6 из AAAA (RFC 3596)."""
+    """Адреса из ответа DNS (wire format, RFC 1035): IPv4 из записей A, IPv6 из AAAA (RFC 3596). Пустой
+    список — имя есть, а записей этого типа нет (NODATA); ошибка резолвера — DnsRcodeError."""
     if len(data) < 12:
         raise ValueError("ответ DNS слишком короткий")
     _, flags, qd, an, _, _ = struct.unpack(">HHHHHH", data[:12])
     if flags & 0x000F:
-        return []                                 # NXDOMAIN, SERVFAIL…
+        raise DnsRcodeError(flags & 0x000F)
     pos = 12
     for _ in range(qd):
         pos = _skip_name(data, pos) + 4
@@ -253,13 +305,23 @@ def _is_ip(value: str) -> bool:
 class Resolver:
     """Адреса серверов — заранее, через DoH с запасными: Cloudflare → Google → Quad9 → Яндекс."""
 
+    FAILURES_LIMIT = 256
+
     def __init__(self, query: Callable[[str, str], list[str]] = doh_query):
         self._query = query
         self._good: str | None = None             # кто ответил последним — его и спрашиваем первым
+        self._failures: dict[str, str] = {}       # имя → чем кончилась последняя неудача (для разбора причины)
 
     @property
     def working(self) -> str | None:
         return self._good
+
+    def failure(self, host: str) -> str | None:
+        """Последняя неудача с этим именем (diagnose.Facts.dns): nxdomain — такого имени нет; nodata — имя
+        есть, а адресов нет; no_ipv4 — нет адреса IPv4, а IPv6 не спрашивали («только IPv4»); servfail —
+        резолверы ответили ошибкой (SERVFAIL, REFUSED); unreachable — ни один не ответил. None — неудачи
+        не было (или потом адрес нашёлся)."""
+        return self._failures.get(host)
 
     def resolve(self, host: str, preferred: str | None = None, *, families: tuple[str, ...] = ("A",)) -> str:
         """Адрес сервера. families — какие записи спрашивать и в каком порядке: ("A",) — только IPv4,
@@ -268,19 +330,48 @@ class Resolver:
             return host
         order = [u for u in (preferred, self._good, *(DOH_RESOLVERS[n] for n in DOH_AUTO)) if u]
         last: Exception | None = None
+        outcomes: dict[str, set[str]] = {family: set() for family in families}   # семейство → что ответили
         for url in dict.fromkeys(order):
             for family in families:
                 try:
                     found = self._query(host, url) if family == "A" else self._query(host, url, family)
+                except DnsRcodeError as exc:
+                    last = exc
+                    if exc.rcode == RCODE_NXDOMAIN:
+                        outcomes[family].add("nxdomain")
+                        break                     # имени нет — другое семейство у этого резолвера не спрашиваем
+                    outcomes[family].add("servfail")
+                    continue                      # SERVFAIL, REFUSED об имени не говорят — спросить и другое
                 except (OSError, ValueError, urllib.error.URLError) as exc:
                     last = exc
                     break                         # резолвер не отвечает — следующий
                 if found:
                     self._good = url
+                    self._failures.pop(host, None)
                     return found[0]
-        kinds = " и ".join("IPv6" if f == "AAAA" else "IPv4" for f in families)
-        raise VpnClientError(f"адрес ({kinds}) не получен ни от одного DNS через HTTPS"
-                             + (f" ({last})" if last else ""), "timeout")
+                outcomes[family].add("nodata")
+        if len(self._failures) >= self.FAILURES_LIMIT:
+            self._failures.clear()
+        kind, text = _dns_failure(outcomes, families, last)
+        self._failures[host] = kind
+        raise VpnClientError(text, "timeout")
+
+
+def _dns_failure(outcomes: dict[str, set[str]], families: tuple[str, ...],
+                 last: Exception | None) -> tuple[str, str]:
+    """(Resolver.failure, текст) по ответам резолверов на каждое семейство: nxdomain | nodata | servfail
+    (SERVFAIL, REFUSED) | исключение. Имя подтвердил хоть один ответ без записей (NODATA) — «нет такого имени»
+    другого резолвера уже не правда. «Адресов нет» — только если NODATA пришёл про каждое семейство: про
+    семейство, на которое отвечали лишь ошибкой или молчанием, ничего не известно."""
+    kinds = " и ".join("IPv6" if f == "AAAA" else "IPv4" for f in families)
+    seen = set().union(*outcomes.values())
+    if "nodata" in seen and all("nodata" in outcomes[f] for f in families):
+        kind = "no_ipv4" if families == ("A",) else "nodata"
+        return kind, f"DNS через HTTPS знает это имя, но адреса ({kinds}) у него нет"
+    if "nodata" not in seen and "nxdomain" in seen:
+        return "nxdomain", "DNS через HTTPS отвечает, что такого имени нет (NXDOMAIN)"
+    kind = "servfail" if "servfail" in seen else "unreachable"
+    return kind, f"адрес ({kinds}) не получен ни от одного DNS через HTTPS" + (f" ({last})" if last else "")
 
 
 def free_port(preferred: int | None = None, *, host: str = "127.0.0.1", avoid: frozenset[int] = frozenset(),
@@ -335,56 +426,95 @@ def taken_nets() -> list[str]:
     from .. import vpn
     out = []
     for adapter in vpn.list_adapters():
-        if adapter.name != TUN_NAME:              # свой осиротевший адаптер занимаем снова
+        # Адрес своего осиротевшего адаптера занятым не считаем: его /30 можно взять снова. Kill switch
+        # всё равно найдёт свой TUN однозначно — среди включённых адаптеров (tun_luid).
+        if adapter.name != TUN_NAME:
             out += [f"{ip}/32" for ip in adapter.ipv4]
-    for dest, plen, _hop, _index in vpn.routes():
+    for route in vpn.routes():
+        dest, plen = route[0], route[1]
         if ":" not in dest and plen >= 8 and not dest.startswith(("127.", "224.", "255.")):
             out.append(f"{dest}/{plen}")
     return out
 
 
-def physical_interface() -> str | None:
-    """Имя физического адаптера с маршрутом в интернет — для sockopt.interface помощника Xray."""
+def _direct_exit(overrides: dict | None, family: int):
+    """Прямой выход в интернет (vpn.direct_exit): свой TUN узнаётся по имени и в выбор не попадает."""
     from .. import vpn
-    best = None
-    for a in vpn.list_adapters():
-        if a.up and a.gateways and a.ipv4 and a.name != TUN_NAME and a.if_type in (6, 71, 23):
-            if best is None or a.metric < best.metric:
-                best = a
-    return best.name if best else None
+    return vpn.direct_exit(overrides, vpn.OwnVpn(adapter_name=TUN_NAME), family)
+
+
+def physical_interface(overrides: dict | None = None) -> str | None:
+    """Имя прямого выхода в интернет — для sockopt.interface помощника Xray: не туннель, не свой TUN, не
+    Radmin и не Hamachi (у Radmin есть шлюз и метрика интерфейса 1 — раньше он побеждал Ethernet, и
+    соединения с сервером уходили в Radmin). overrides — поправки человека «прямое/туннель» из
+    «Совместимости с VPN». Не прочиталась таблица адаптеров или прямого выхода нет — None."""
+    from .. import vpn
+    try:
+        adapter = _direct_exit(overrides, vpn.AF_INET)
+    except OSError as exc:
+        log.warning("Прямой выход в интернет не определён: %s", exc)
+        return None
+    return adapter.name if adapter else None
 
 
 def ipv6_internet() -> bool:
-    """Есть ли у физического адаптера путь в интернет по IPv6: глобальный адрес (не Teredo, не ULA и не
-    link-local) и шлюз IPv6. Только таблица адаптеров — без пакетов в сеть; свой TUN не в счёт (его
-    маршруты по умолчанию указывают на него самого). Не прочиталась таблица — IPv6 считаем недоступным."""
+    """Есть ли путь в интернет по IPv6 мимо туннелей: у прямого выхода (тот же выбор, что у
+    physical_interface, по маршруту ::/0) — глобальный адрес (не Teredo, не ULA и не link-local). Только
+    таблицы адаптеров и маршрутов — без пакетов в сеть. Не прочиталось — IPv6 считаем недоступным."""
     from .. import vpn
     try:
-        adapters = vpn.list_adapters()
+        return _direct_exit(None, vpn.AF_INET6) is not None
     except OSError:
         return False
-    for a in adapters:
-        if not a.up or a.name == TUN_NAME or a.if_type not in (6, 71, 23):
-            continue
-        if any(":" in g for g in a.gateways) and any(_global_v6(ip) for ip in a.ipv6):
-            return True
-    return False
 
 
-def _global_v6(text: str) -> bool:
+def lan_networks() -> list[tuple[int, list[str]]]:
+    """Сети Radmin VPN, Hamachi, ZeroTier и Tailscale (vpn.lan_networks) — их kill switch не закрывает.
+    Не прочиталось — пустой список: kill switch закроет и их, как раньше."""
+    from .. import vpn
     try:
-        return ipaddress.ip_address(text.split("%", 1)[0]).is_global
-    except ValueError:
-        return False
+        return vpn.lan_networks()
+    except OSError as exc:
+        log.warning("Сети Radmin и других виртуальных сетей не прочитаны: %s", exc)
+        return []
 
 
-def adapter_luid(name: str) -> int | None:
+def _index_luid(index: int) -> int | None:
     lib = ctypes.WinDLL(winutil.system32("iphlpapi.dll"))
-    fn = lib.ConvertInterfaceAliasToLuid
-    fn.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_uint64)]
+    fn = lib.ConvertInterfaceIndexToLuid
+    fn.argtypes = [wintypes.ULONG, ctypes.POINTER(ctypes.c_uint64)]
     fn.restype = wintypes.DWORD
     luid = ctypes.c_uint64()
-    return luid.value if fn(name, ctypes.byref(luid)) == 0 and luid.value else None
+    return luid.value if index > 0 and fn(index, ctypes.byref(luid)) == 0 and luid.value else None
+
+
+def tun_luid(address: str, timeout: float = TUN_LUID_WAIT,
+             adapters: Callable[[], list] | None = None, luid_of: Callable[[int], int | None] = _index_luid
+             ) -> int | None:
+    """LUID своего TUN — по адресу своей /30, а не по имени: имя «Lazeyka» может держать осиротевший
+    адаптер прошлого сеанса (тогда новый Windows назовёт «Lazeyka 2»), и kill switch разрешил бы чужой
+    интерфейс. Нужен ровно один включённый адаптер с этим адресом; ни одного (адрес ещё не появился —
+    ждём до timeout) или несколько — None. Только таблица адаптеров: в сеть ничего не уходит."""
+    if adapters is None:
+        from .. import vpn
+        adapters = vpn.list_adapters
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            found = [a for a in adapters() if a.up and address in a.ipv4]
+        except OSError as exc:
+            log.warning("Таблица адаптеров не прочитана — адаптер своего VPN не найти: %s", exc)
+            return None
+        if len(found) > 1:
+            log.warning("Адрес своего TUN %s — у нескольких адаптеров (%s): какой из них свой, не понять",
+                        address, ", ".join(a.name for a in found))
+            return None
+        if found:
+            return luid_of(found[0].index)
+        if time.monotonic() >= deadline:
+            log.warning("Адаптера с адресом своего TUN %s нет в таблице адаптеров", address)
+            return None
+        time.sleep(TUN_LUID_POLL)
 
 
 def parse_trace(body: str) -> dict[str, str]:
@@ -412,6 +542,26 @@ def direct_date(timeout: float = 5.0) -> str | None:
             return resp.headers.get("Date")
     except (OSError, urllib.error.URLError, ValueError):
         return None
+
+
+def direct_online(timeout: float = CONTROL_TIMEOUT) -> bool:
+    """Открывается ли напрямую хоть один контрольный сайт. Любой ответ HTTP, даже ошибка, — интернет есть."""
+    for url in CONTROL_URLS:
+        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+        try:
+            with direct_opener().open(request, timeout=timeout):
+                return True
+        except urllib.error.HTTPError:
+            return True
+        except (OSError, urllib.error.URLError, ValueError):
+            continue
+    return False
+
+
+def system_knows(host: str) -> bool:
+    """Знает ли имя сервера DNS сети (системный): так видно, блокируют DNS через HTTPS или DNS лежит весь."""
+    from .. import helpdesk
+    return bool(helpdesk.system_resolve(host))
 
 
 def speed_check(port: int, user: str, password: str, seconds: float = SPEED_SECONDS) -> float:
@@ -451,14 +601,19 @@ def running_apps() -> list[dict]:
 
 # ------------------------------------------------------------ очередь действий над ядром
 
+_QUEUE_END = object()      # метка конца очереди _Worker: задачи до неё доработают, затем поток выйдет
+
+
 class _Worker:
     """Одна очередь: задачи выполняются строго по одной. submit — поставить и забыть (key — не ставить
-    вторую такую же, пока первая ждёт); call — поставить и дождаться (из самой очереди — выполнить сразу)."""
+    вторую такую же, пока первая ждёт); call — поставить и дождаться (из самой очереди — выполнить сразу).
+    close() — новых задач не принимать; поставленные доработают, и поток очереди завершится."""
 
     def __init__(self, name: str):
         self._queue: queue.Queue = queue.Queue()
         self._pending: set[str] = set()
         self._busy = 0
+        self._closed = False
         self._cond = threading.Condition()
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
@@ -478,18 +633,29 @@ class _Worker:
         if threading.current_thread() is self._thread:
             return fn()
         future: concurrent.futures.Future = concurrent.futures.Future()
-        self._put(fn, None, future)
+        if not self._put(fn, None, future):
+            raise VpnClientError("Свой VPN завершает работу вместе с Лазейкой — действие не выполнено")
         return future.result(timeout)
 
     def _put(self, fn: Callable[[], Any], key: str | None, future: concurrent.futures.Future | None) -> bool:
+        # Постановка — под той же блокировкой, что и close(): иначе задача могла бы встать за меткой конца
+        # и не выполниться никогда (а call() ждал бы её без срока).
         with self._cond:
+            if self._closed:
+                return False
             if key is not None:
                 if key in self._pending:
                     return False
                 self._pending.add(key)
             self._busy += 1
-        self._queue.put((key, fn, future))
+            self._queue.put((key, fn, future))
         return True
+
+    def close(self) -> None:
+        with self._cond:
+            if not self._closed:
+                self._closed = True
+                self._queue.put(_QUEUE_END)
 
     def waiting(self, key: str) -> bool:
         """Задача с этим ключом стоит в очереди и ещё не началась."""
@@ -502,7 +668,10 @@ class _Worker:
 
     def _run(self) -> None:
         while True:
-            key, fn, future = self._queue.get()
+            item = self._queue.get()
+            if item is _QUEUE_END:
+                return
+            key, fn, future = item
             with self._cond:
                 self._pending.discard(key)
             try:
@@ -638,6 +807,12 @@ class _Session:
     proxy_address: str | None = None
     secrets: list[str] = field(default_factory=list)
     last_totals: tuple[int, int] = (0, 0)
+    # Подписка обновилась, и параметры серверов конфига у провайдера уже другие: туннель не рвём, пока
+    # работает, а замолчит сервер — переподключение с новыми, а не переход на соседа по старому конфигу.
+    outdated: bool = False
+    # LUID своего TUN, с которым kill switch включился под этот сеанс: перестановка фильтров того же TUN (новые
+    # локальные сети) берёт его, а не ищет адаптер заново.
+    tun_luid: int | None = None
 
     def pids(self) -> set[int]:
         return {p.pid for p in (self.main, self.helper) if p is not None and p.pid}
@@ -659,13 +834,18 @@ class Deps:
     free_port: Callable[..., int] = free_port
     port_open: Callable[[int], bool] = port_open
     taken_nets: Callable[[], list[str]] = taken_nets
-    physical_interface: Callable[[], str | None] = physical_interface
+    physical_interface: Callable[[dict | None], str | None] = physical_interface   # (поправки человека)
     ipv6_internet: Callable[[], bool] = ipv6_internet
-    adapter_luid: Callable[[str], int | None] = adapter_luid
+    lan_networks: Callable[[], list[tuple[int, list[str]]]] = lan_networks          # для kill switch
+    tun_luid: Callable[[str], int | None] = tun_luid       # LUID своего TUN по его адресу
     exit_check: Callable[..., dict] = exit_check
     direct_date: Callable[[], str | None] = direct_date
     speed_check: Callable[..., float] = speed_check
-    tcp_reach: Callable[..., float | None] = diagnose.tcp_reach
+    # Факты для причины «нет ответа» — только по отказу (diagnose.explain).
+    tcp_probe: Callable[..., diagnose.TcpProbe] = diagnose.tcp_probe
+    tls_probe: Callable[..., str] = diagnose.tls_probe
+    online: Callable[[], bool] = direct_online
+    system_dns: Callable[[str], bool] = system_knows
     memory: Callable[[int], int | None] = process_memory
     running_apps: Callable[[], list[dict]] = running_apps
     adapters: Callable[[], list] = diagnose.collect_adapters
@@ -709,6 +889,10 @@ class VpnClientManager:
         self._verified = False
         self._error: str | None = None
         self._error_kind: str | None = None
+        self._diagnosis: dict | None = None          # чья сторона и что сделать (diagnose.Reason.public)
+        self._exit_reason: tuple | None = None       # ((сеанс, сервер), когда, Reason) — прежняя причина без выхода
+        self._device_limit: dict[str, bool] = {}     # подписка → провайдер сообщил о лимите устройств
+        self._latency_causes: dict[str, str] = {}    # сервер → почему не мерили: killswitch | unsupported | dns
         self._exit: dict | None = None
         self._session: _Session | None = None
         self._pending: RunPlan | None = None         # план собран, ядро ещё не запущено (для own())
@@ -736,6 +920,8 @@ class VpnClientManager:
         self._sub_retry: dict[str, float] = {}
         self._probes: dict[str, dict] = {}            # «Проверить расширенный формат» по подпискам
         self._gone: dict[str, str] = {}               # имя выбранного до слияния подписки (для уведомления)
+        # Выбранный пропал из подписки, пока VPN работал: (его id, чем заменить — предложение хранилища).
+        self._offered: tuple[str, str] | None = None
         self._last_import: tuple[str, str | None] | None = None   # повтор с другим UA или с HWID (секрет)
         self._deeplink: dict | None = None
         self._deeplink_text: str | None = None
@@ -751,6 +937,8 @@ class VpnClientManager:
         self._health_fails = 0
         self._health_busy = False                    # проверка здоровья поставлена или идёт
         self._ks_apps: set[str] = set()              # программы, которые пропускает включённый kill switch
+        self._ks_lan: list[tuple[int, list[str]]] = []   # сети Radmin и др., которые он пропускает
+        self._ks_lan_retry = False                   # фильтры под новые локальные сети не встали — повторить
         self._next_health = 0.0
         self._next_memory = 0.0
         self._next_save = 0.0
@@ -864,16 +1052,22 @@ class VpnClientManager:
                 return None
         return self.deps.killswitch
 
-    def opener_for(self, route: str) -> urllib.request.OpenerDirector:
-        """Маршрут загрузок (подписки, файлы правил): "direct" — напрямую, "vpn" — через служебный вход."""
+    def opener_for(self, route: str) -> urllib.request.OpenerDirector | None:
+        """Маршрут загрузок: "direct" — напрямую; "vpn" (подписки) и "core" (файлы правил, rules.ROUTES) —
+        через служебный вход работающего ядра. Ядро не работает: "vpn" — ошибка, "core" — None (маршрут
+        сейчас недоступен: RulesManager пробует следующий источник)."""
         if self.deps.opener is not None:
             return self.deps.opener(route)
-        if route == "vpn":
+        if route in ("vpn", "core"):
             session = self._session
             if session is None or self._status != "running":
+                if route == "core":
+                    return None
                 raise VpnClientError("Свой VPN выключен — через него не скачать")
             return proxy_opener(session.plan.ports.internal, session.plan.secrets.internal_user,
                                 session.plan.secrets.internal_pass)
+        if route != "direct":
+            raise VpnClientError(f"Неизвестный маршрут загрузки: {route}")
         return direct_opener()
 
     # ================================================================ жизненный цикл менеджера
@@ -921,7 +1115,8 @@ class VpnClientManager:
             except BaseException as exc:  # noqa: BLE001
                 future.set_exception(exc)
 
-        self._ops.submit(job)
+        if not self._ops.submit(job):
+            future.set_result(None)      # очередь закрыл прошлый shutdown(): ядра остановлены им
         try:
             future.result(STOP_WAIT)
         except concurrent.futures.TimeoutError:
@@ -934,6 +1129,7 @@ class VpnClientManager:
             log.exception("Свой VPN не остановился при выходе")
         self._restore_proxy()
         self._traffic.save()
+        self._ops.close()
 
     def wait_idle(self, timeout: float = 10.0) -> bool:
         """Дождаться, пока очередь действий опустеет (тесты и выход)."""
@@ -984,6 +1180,7 @@ class VpnClientManager:
         with self._lock:
             status, verified = self._status, self._verified
             error, error_kind, exit_info = self._error, self._error_kind, self._exit
+            diagnosis = self._diagnosis
             session = self._session
             cores = {k: dict(v) for k, v in self._cores.items()}
             latency, speed, imp = dict(self._latency), dict(self._speed), dict(self._import)
@@ -1005,8 +1202,11 @@ class VpnClientManager:
             "available": unavailable is None, "unavailable_reason": unavailable,
             "cores": self._cores_snapshot(cores, servers, noises),
             "status": status, "verified": verified, "error": error, "error_kind": error_kind,
+            "diagnosis": dict(diagnosis) if diagnosis and error else None,
             "mode": vc["mode"], "started_at": session.started if session else None,
             "listen": session.proxy_address if session and session.plan.mode in ("proxy", "local") else None,
+            # Серверы работающего конфига: их выбор — без переподключения, тест скорости — только через них.
+            "config_servers": [s.id for s in session.plan.servers] if session else None,
             "exit": dict(exit_info) if exit_info else None,
             "selected": self._selected_snapshot(selected_id, servers, groups, subs, session, sampled, noises),
             "stats": sampled["stats"] if sampled else idle_stats,
@@ -1207,6 +1407,11 @@ class VpnClientManager:
 
     # ================================================================ запуск
 
+    def proxy_unavailable(self) -> str | None:
+        """Почему режим «Системный прокси» недоступен (Лазейка под чужой учётной записью UAC), или None — в любом
+        режиме: Core не предлагает «включите Лазейку как системный прокси» рядом с чужим туннелем, если он откажет."""
+        return self._sysproxy().available()
+
     def preflight(self) -> dict:
         """То, что видит только менеджер: режим прокси под чужой учётной записью UAC."""
         conflict = None
@@ -1238,24 +1443,44 @@ class VpnClientManager:
         """Режим сохраняется сразу, поэтому ответ правдив: недоступный режим — ошибка, {} — режим уже другой
         (на нём и включится VPN следующим действием). Работающий VPN переподключается в очереди ядра, ход —
         в статусе. Без сеанса kill switch, оставшийся после падения, снимается, если режим не «Весь трафик»:
-        вне TUN он держал бы интернет закрытым без всякого VPN."""
+        вне TUN он держал бы интернет закрытым без всякого VPN. Идёт включение — проверка kill switch встаёт
+        в очередь за ним и за переподключением: включение могло и не удаться, и тогда сеанса нет."""
         if mode not in MODES:
             raise VpnClientError(f"Неизвестный режим: {mode}")
         if mode == "proxy":
             reason = self._sysproxy().available()
             if reason:
                 raise VpnClientError(reason)
-        running = self._session is not None
-        if running:
+        live = self._live()
+        if live:
             self._ensure_available()
         self.settings.update(lambda d: d["vpnclient"].__setitem__("mode", mode))
-        if running:
-            self._abort.clear()
-            self._ops.submit(self._restart_job, key="restart")
-        elif mode != "tun":
-            self._ops.submit(self._toggle_killswitch, key="killswitch")
+        if live:
+            # «Выключить» уже нажали (идёт остановка) — переподключение после неё ничего не включит.
+            self._restart_live()
+        if mode != "tun":
+            self._ops.submit(self._killswitch_for_mode, key="killswitch-mode")
         self._changed()
         return {}
+
+    def _killswitch_for_mode(self) -> None:
+        """Из очереди после смены режима не на «Весь трафик»: kill switch бывает только у TUN. Режим и сеанс —
+        к началу задачи: человек мог уже вернуть «Весь трафик», и тогда фильтры держат интернет закрытым до
+        переподключения, как положено."""
+        session = self._session
+        if self._vc()["mode"] == "tun" or (session is not None and session.plan.mode == "tun"):
+            return
+        self._toggle_killswitch()
+
+    def _live(self) -> bool:
+        """VPN включён или включается. Изменения, которые входят в конфиг, применяет переподключение;
+        идущее включение могло собрать план по прежним — переподключение встанет в очередь за ним."""
+        return self._session is not None or self._status == "starting"
+
+    def _restart_live(self) -> None:
+        """Переподключить включённый (или включающийся) VPN с новыми настройками — в очереди ядра."""
+        if self._live():
+            self._ops.submit(self._restart_job, key="restart")
 
     def _ensure_available(self) -> None:
         if self._closing:
@@ -1270,7 +1495,7 @@ class VpnClientManager:
     def _start(self, reason: str) -> dict:
         if self._session is not None:
             return {"verified": self._verified, "exit": self._exit}
-        self._set(status="starting", error=None, error_kind=None, verified=False, exit=None)
+        self._set(status="starting", error=None, error_kind=None, diagnosis=None, verified=False, exit=None)
         try:
             result = self._launch_or_rollback()
         except _Aborted:
@@ -1279,8 +1504,11 @@ class VpnClientManager:
             return {"verified": False, "exit": None}
         except BaseException as exc:
             kind, text = self._failure(exc)
-            self._set(status="error", error=text, error_kind=kind, pending=None)
-            log.warning("Свой VPN не включился (%s): %s", kind, text)
+            reason = self._failure_reason(exc, kind)
+            self._set(status="error", error=text, error_kind=kind, diagnosis=reason.public() if reason else None,
+                      pending=None)
+            log.warning("Свой VPN не включился (%s): %s%s", kind, text,
+                        f" [{reason.side}/{reason.code}]" if reason else "")
             if isinstance(exc, UserError):
                 raise VpnClientError(text, kind) from exc
             raise
@@ -1300,6 +1528,20 @@ class VpnClientManager:
         else:
             kind, text = getattr(exc, "kind", None) or "other", str(exc) or repr(exc)
         return kind, applog.scrub(text)
+
+    def _failure_reason(self, exc: BaseException, kind: str) -> diagnose.Reason | None:
+        """Чья сторона у несостоявшегося включения. Адрес сервера не получен — по DNS и контрольному сайту;
+        ядро не запустилось или не собрался конфиг — по словам ядра. Остальные отказы (включать нечего, ядро
+        не скачалось) — без причины: их текст сам говорит, что делать."""
+        if isinstance(exc, AddressError):
+            facts = diagnose.Facts(online=self.deps.online(), **self._dns_facts(exc.host))
+            return diagnose.explain(facts)
+        if (isinstance(exc, (ProcessError, ClashError)) or type(exc).__name__ == "ConfigError"
+                or kind in ("port", "admin", "conflict", "unsupported")):
+            # У отказа в доступе к адаптеру причина точнее вида ошибки страницы (diagnose.stop_kind).
+            stopped = diagnose.stop_kind(exc.tail) if isinstance(exc, ProcessError) and exc.tail else kind
+            return diagnose.explain(diagnose.Facts(kind=stopped, fatal=True))
+        return None
 
     def _launch_all(self) -> dict:
         # Kill switch уже держит интернет (перезапуск, падение, повтор) — неудачный запуск его не снимает:
@@ -1377,27 +1619,10 @@ class VpnClientManager:
         selected = store.selected()
         if not selected:
             if not supported:
-                raise VpnClientError("Добавьте подписку или ссылку на сервер — включать пока нечего")
+                raise SelectionError("Добавьте подписку или ссылку на сервер — включать пока нечего")
             selected = supported[0].id
             store.select(selected)
-        if selected.startswith("auto:"):
-            group = self._group(selected[5:], groups, subs, all_servers)
-            if group is None:
-                raise VpnClientError("Выбранная группа «Самый быстрый» пропала — выберите сервер")
-            members = [s for s in supported if s.id in group.members][:MAX_CONFIG_SERVERS]
-            if not members:
-                raise VpnClientError(f"В группе «{group.name}» нет серверов, которые Лазейка умеет открывать",
-                                     "unsupported")
-            sub_id, primary = group.sub, members
-            plan_groups = [replace(group, members=[s.id for s in members])]
-        else:
-            first = next((s for s in all_servers if s.id == selected), None)
-            if first is None:
-                raise VpnClientError("Выбранный сервер пропал из подписки — выберите другой")
-            engine, why = engine_for(first, force_xray=noises)
-            if engine is None:
-                raise VpnClientError(f"Сервер «{first.display_name()}» не поддерживается: {why}", "unsupported")
-            sub_id, primary, plan_groups = first.sub, [first], []
+        sub_id, primary, plan_groups = self._primary(selected, all_servers, groups, subs, supported, noises)
         chosen = {s.id for s in primary}
         servers = (primary + [s for s in supported if s.sub == sub_id and s.id not in chosen])[:MAX_CONFIG_SERVERS]
         ids = {s.id for s in servers}
@@ -1408,6 +1633,43 @@ class VpnClientManager:
                 "primary": primary,
                 "engines": {s.id: engine_for(s, force_xray=noises)[0] for s in servers},
                 "sub": next((s for s in subs if s.id == sub_id), None)}
+
+    def _primary(self, selected: str, all_servers: list[Server], groups: list[Group], subs: list[Subscription],
+                 supported: list[Server], noises: bool) -> tuple[str | None, list[Server], list[Group]]:
+        """(подписка, выбранный сервер или участники выбранной группы, группа плана). Выбора нет или его не
+        открыть — SelectionError."""
+        if selected.startswith("auto:"):
+            group = self._group(selected[5:], groups, subs, all_servers)
+            if group is None:
+                raise SelectionError("Выбранная группа «Самый быстрый» пропала — выберите сервер",
+                                     why="этой группы в подписке больше нет")
+            members = [s for s in supported if s.id in group.members][:MAX_CONFIG_SERVERS]
+            if not members:
+                raise SelectionError(f"В группе «{group.name}» нет серверов, которые Лазейка умеет открывать",
+                                     "unsupported",
+                                     why="в группе не осталось серверов, которые Лазейка умеет открывать")
+            return group.sub, members, [replace(group, members=[s.id for s in members])]
+        first = next((s for s in all_servers if s.id == selected), None)
+        if first is None:
+            raise SelectionError("Выбранный сервер пропал из подписки — выберите другой",
+                                 why="этого сервера в подписке больше нет")
+        engine, why = engine_for(first, force_xray=noises)
+        if engine is None:
+            raise SelectionError(f"Сервер «{first.display_name()}» не поддерживается: {why}", "unsupported",
+                                 why=f"сервер не поддерживается ({why})")
+        return first.sub, [first], []
+
+    def _unusable(self, item_id: str) -> SelectionError | None:
+        """Почему с этим выбором (сервер или auto:<группа|подписка>) VPN не включить; None — включить можно."""
+        store = self.store
+        noises = bool(self._vc().get("noises"))
+        all_servers = store.servers()
+        supported = [s for s in all_servers if engine_for(s, force_xray=noises)[0]]
+        try:
+            self._primary(item_id, all_servers, store.groups(), store.subscriptions(), supported, noises)
+        except SelectionError as exc:
+            return exc
+        return None
 
     @staticmethod
     def _group(group_id: str, groups: list[Group], subs: list[Subscription], servers: list[Server]) -> Group | None:
@@ -1574,7 +1836,7 @@ class VpnClientManager:
                 current = self._active_core(name)
                 if current is not None and self._verifies(name, current):
                     self._fetch_succeeded(name)
-                    return f"{spec.title} {current} уже установлено"
+                    return f"{spec.title} {current} уже {spec.agree('установлен')}"
                 version = spec.version
                 if engines.installed(name, version) is None or not self._verifies(name, version):
                     try:
@@ -1595,7 +1857,7 @@ class VpnClientManager:
             self._activate_core(name, version, trial=release is not None)
         self._fetch_succeeded(name)
         self._restart_on_new_core(name, version)
-        return f"{spec.title} {version} установлено"
+        return f"{spec.title} {version} {spec.agree('установлен')}"
 
     def core_rollback(self, name: str) -> str:
         """«Откатить» на «Обновлениях»: прежняя установленная версия, иначе закреплённая (скачается).
@@ -1771,7 +2033,7 @@ class VpnClientManager:
                 self._fetch_at = self.deps.clock() + FETCH_RETRY[min(self._fetch_attempt, len(FETCH_RETRY)) - 1]
                 self._fetch_retry_at = self._fetch_at
             retry_at = self._fetch_retry_at
-        when = f" Повторю в {time.strftime('%H:%M', time.localtime(retry_at))}." if retry_at else ""
+        when = f" Повторим в {time.strftime('%H:%M', time.localtime(retry_at))}." if retry_at else ""
         for name, reason in failed.items():
             what = "Ядро VPN не скачалось" if name == "sing-box" else "Помощник Xray не скачался"
             self._core_alert(name, f"{what}: {applog.scrub(reason).rstrip('.')}.{when}")
@@ -1807,7 +2069,9 @@ class VpnClientManager:
         except UserError:
             return True
         if name == "xray":
-            return any(engine_for(s)[0] == "xray" for s in servers)
+            # Как needed в снимке: с UDP-шумами помощник нужен и серверам, которые sing-box открыл бы сам.
+            noises = bool(self._vc().get("noises"))
+            return any(engine_for(s, force_xray=noises)[0] == "xray" for s in servers)
         return bool(servers)
 
     def _clear_core_alert(self, name: str) -> None:
@@ -1944,7 +2208,7 @@ class VpnClientManager:
                 with self._core_lock(name, abortable=True):
                     self._mark_bad(name, new, f"не запустилось: {exc}")
                     self._activate_core(name, target)
-            self._set(status="starting", error=None, error_kind=None, pending=None)
+            self._set(status="starting", error=None, error_kind=None, diagnosis=None, pending=None)
             self._attempt.versions = {}
             try:
                 result = self._launch_all()
@@ -2038,12 +2302,19 @@ class VpnClientManager:
                 servers.append(server)
             except UserError as exc:
                 if server.id == required:
-                    raise VpnClientError(f"Не удалось узнать адрес сервера «{server.display_name()}»: {exc}",
-                                         "timeout") from exc
+                    raise AddressError(f"Не удалось узнать адрес сервера «{server.display_name()}»: {exc}",
+                                       server.host) from exc
                 failure = exc
                 log.info("Сервер «%s» без адреса — в конфиг не войдёт", server.display_name())
         if not servers and not quiet:
-            raise VpnClientError(f"Не удалось узнать адреса серверов: {failure}", "timeout")
+            raise AddressError(f"Не удалось узнать адреса серверов: {failure}", pick["first"].host)
+        members = pick.get("primary") or [pick["first"]]
+        if not quiet and required is None and not any(m.id in addresses for m in members):
+            # Ни один участник группы не резолвится: соседи по подписке в конфиг вошли бы, а сама группа — пустой
+            # (генератор отказал бы ей, и причина вышла бы «ошибка Лазейки» вместо DNS).
+            group = next((g for g in pick["groups"] if f"auto:{g.id}" == pick["selected"]), None)
+            name = f" «{group.name}»" if group else ""
+            raise AddressError(f"Не удалось узнать адрес ни одного сервера группы{name}: {failure}", members[0].host)
         working = getattr(self._resolver, "working", None)
         if vc["dns_direct"] == "auto" and working:
             dns.direct = working
@@ -2051,20 +2322,24 @@ class VpnClientManager:
         groups = [replace(g, members=[m for m in g.members if m in engines]) for g in pick["groups"]]
         plan = RunPlan(mode=mode or vc["mode"], servers=servers, selected=pick["selected"], groups=groups,
                        addresses=addresses, engines=engines, dns=dns)
+        auth = self._local_auth(vc, plan.mode, quiet)
+        plan.proxy_listen = "0.0.0.0" if vc["allow_lan"] and auth else "127.0.0.1"
         self._fill_ports(plan, vc, avoid)
         self._fill_routing(plan, vc, routing_dir or self.run_dir, quiet)
-        auth = self._auth.load() if vc["local_auth"] or vc["allow_lan"] else {}
         plan.secrets = Secrets(clash=secrets.token_urlsafe(24), internal_user=f"lz{secrets.token_hex(4)}",
                                internal_pass=secrets.token_urlsafe(18), helper_user=f"lzh{secrets.token_hex(4)}",
                                helper_pass=secrets.token_urlsafe(18), local_user=auth.get("user"),
                                local_pass=auth.get("password"))
         if plan.mode == "tun":
             net = pick_tun_subnet(self.deps.taken_nets(), list(vc["exclude_nets"]))
+            mtu = int(sub.mtu if sub and sub.mtu else vc["tun_mtu"])
+            if vc["ipv6"] and mtu < IPV6_MIN_MTU:
+                # Свой MTU подписки бывает и меньше: с адресом IPv6 на адаптере такой Windows не примет.
+                log.info("MTU подписки %d меньше минимума IPv6 — беру %d", mtu, IPV6_MIN_MTU)
+                mtu = IPV6_MIN_MTU
             plan.tun = TunOptions(address4=f"{next(net.hosts())}/{net.prefixlen}",
-                                  address6=TUN_IPV6 if vc["ipv6"] else None,
-                                  mtu=int(sub.mtu if sub and sub.mtu else vc["tun_mtu"]),
+                                  address6=TUN_IPV6 if vc["ipv6"] else None, mtu=mtu,
                                   exclude=list(vc["exclude_nets"]), interface_name=TUN_NAME)
-        plan.proxy_listen = "0.0.0.0" if vc["allow_lan"] else "127.0.0.1"
         plan.socks_udp = bool(vc["socks_udp"])
         plan.proxy_override = list(vc["proxy_override"])
         plan.tls_fragment, plan.mux, plan.noises = bool(vc["tls_fragment"]), bool(vc["mux"]), bool(vc["noises"])
@@ -2076,12 +2351,45 @@ class VpnClientManager:
         if "xray" in engines.values() and versions.get("xray"):
             core = self._engines()
             plan.xray_exe = str(core.version_dir("xray", versions["xray"]) / core.spec("xray").exe)
-            plan.physical_interface = self.deps.physical_interface()
+            # Привязка к физическому адаптеру — только против петли через свой TUN. В режимах прокси
+            # помощник идёт по маршрутам Windows, как и sing-box (auto_detect_interface): при чужом VPN
+            # трафик серверов через помощника не должен уходить мимо него.
+            plan.physical_interface = self._exit_interface() if plan.mode == "tun" else None
         plan.log_level = "info" if vc["verbose"] else "error"
         plan.work_dir = self.run_dir
         group = next((g for g in groups if f"auto:{g.id}" == plan.selected), None)
         plan.probe_url = group.probe_url if group else PROBE_URL
         return plan
+
+    def _local_auth(self, vc: dict, mode: str, quiet: bool) -> dict:
+        """Логин и пароль входа для программ и устройств из сети ({user, password}), если вход по паролю нужен
+        (local_auth или «Пускать устройства из сети»), иначе {}. Нужен, а их нет (local-proxy.json пропал или
+        не прочитался) — без пароля в сеть не пускаем никогда: вход слушает только этот компьютер, а плашка
+        просит задать пароль. quiet — план для проверки, а не для включения: плашек нет."""
+        stored = self._auth.load() if vc["local_auth"] or vc["allow_lan"] else {}
+        complete = bool(stored.get("user") and stored.get("password"))
+        auth = {"user": stored["user"], "password": stored["password"]} if complete else {}
+        if quiet:
+            return auth
+        if auth or not (vc["allow_lan"] or (vc["local_auth"] and mode in ("proxy", "local"))):
+            # Пароль есть — или вход по паролю не нужен: в TUN без раздачи в сеть входа для программ нет вовсе.
+            self._clear_alert(LOCAL_AUTH_ALERT)
+            return auth
+        if vc["allow_lan"]:
+            log.warning("Логина и пароля локального прокси нет — устройства из сети к VPN не пускаем")
+            text = ("Пароль для устройств из сети пропал: логина и пароля локального прокси нет. Пока к VPN "
+                    "подключается только этот компьютер — задайте логин и пароль в «Подробнее» → «Локальный прокси».")
+        else:
+            text = ("Пароль локального прокси пропал: логина и пароля нет, и программы этого компьютера "
+                    "подключаются к прокси без него. Задайте логин и пароль в «Подробнее» → «Локальный прокси».")
+        self._set_alert(LOCAL_AUTH_ALERT, "warn", text, action={"label": "Открыть VPN", "page": "vpnclient"})
+        return auth
+
+    def _exit_interface(self) -> str | None:
+        """Прямой выход в интернет для привязки помощника Xray — с поправками человека «прямое/туннель»
+        из «Совместимости с VPN» (например, L2TP провайдера, который Windows считает VPN)."""
+        overrides = self.settings.get("vpn", "overrides")
+        return self.deps.physical_interface(dict(overrides) if isinstance(overrides, dict) else None)
 
     @staticmethod
     def _dns_choice(vc: dict, sub: Subscription | None) -> DnsChoice:
@@ -2102,8 +2410,7 @@ class VpnClientManager:
             taken.add(port)
             return port
 
-        proxy = self.deps.free_port(int(vc["port"]), host="0.0.0.0" if vc["allow_lan"] else "127.0.0.1",
-                                    avoid=frozenset(taken))
+        proxy = self.deps.free_port(int(vc["port"]), host=plan.proxy_listen, avoid=frozenset(taken))
         taken.add(proxy)
         plan.ports = Ports(proxy=proxy, internal=auto(), clash=auto(),
                            helper={sid: auto() for sid, engine in plan.engines.items() if engine == "xray"})
@@ -2123,6 +2430,8 @@ class VpnClientManager:
         wanted = self._wanted_rule_sets(vc, profile[1] if profile is not None else [])
         if wanted:
             self._attach_rules(plan, wanted, quiet)
+        elif not quiet:
+            self._clear_alert(RULES_ALERT)       # маршрутам списки больше не нужны («Всё через VPN»)
         view = self._view(fresh=True)
         plan.via_zapret = bool(vc["via_zapret"]) and bool(view.strategy_args) and view.pack_dir is not None
         if plan.via_zapret:
@@ -2152,6 +2461,8 @@ class VpnClientManager:
         except UserError as exc:
             log.warning("Файлы правил недоступны: %s", exc)
             return
+        if not missing and not quiet:
+            self._clear_alert(RULES_ALERT)       # всё нужное уже на диске (скачалось по кнопке или раньше)
         if missing and not quiet:
             routing = self._routing()
             strict = routing.strict_level(
@@ -2201,17 +2512,20 @@ class VpnClientManager:
     def _launch(self, plan: RunPlan, versions: dict[str, str], config_paths: dict[str, Path]) -> _Session:
         engines, config = self._engines(), self._config()
         sid = secrets.token_hex(4)
-        helper = None
-        if "xray" in config_paths:
-            helper = self._start_helper(sid, plan, engines.verify("xray", versions["xray"]), config_paths["xray"])
-        main = self.deps.process("sing-box", engines.verify("sing-box", versions["sing-box"]),
-                                 ["run", "--disable-color", "-D", str(self.run_dir), "-c",
-                                  str(config_paths["sing-box"])], cwd=self.run_dir,
-                                 on_exit=lambda code, tail: self._on_exit(sid, "sing-box", code, tail))
-        clash = self.deps.clash(plan.ports.clash, plan.secrets.clash)
+        # Оба exe сверяются до старта помощника: изменённый sing-box не должен оставить его работать.
+        main_exe = engines.verify("sing-box", versions["sing-box"])
+        helper_exe = engines.verify("xray", versions["xray"]) if "xray" in config_paths else None
         session_secrets = [plan.secrets.clash, plan.secrets.internal_pass, plan.secrets.helper_pass]
         applog.add_secrets(session_secrets)
+        helper = None
         try:
+            if helper_exe is not None:
+                helper = self._start_helper(sid, plan, helper_exe, config_paths["xray"])
+            main = self.deps.process("sing-box", main_exe,
+                                     ["run", "--disable-color", "-D", str(self.run_dir), "-c",
+                                      str(config_paths["sing-box"])], cwd=self.run_dir,
+                                     on_exit=lambda code, tail: self._on_exit(sid, "sing-box", code, tail))
+            clash = self.deps.clash(plan.ports.clash, plan.secrets.clash)
             main.start(lambda: bool(clash.version()), READY_TIMEOUT)
         except BaseException:
             applog.remove_secrets(session_secrets)
@@ -2227,7 +2541,9 @@ class VpnClientManager:
         if plan.tun is not None:
             session.tun_net = str(ipaddress.ip_interface(plan.tun.address4).network)
         if plan.mode in ("proxy", "local"):
-            session.proxy_address = f"{plan.proxy_listen}:{plan.ports.proxy}"
+            # Адрес для программы на этом ПК — и тот, что записан в системный прокси: с «Пускать устройства
+            # из сети» ядро слушает 0.0.0.0, а свой прокси всё равно 127.0.0.1 (иначе он казался бы чужим).
+            session.proxy_address = f"127.0.0.1:{plan.ports.proxy}"
         return session
 
     def _start_helper(self, sid: str, plan: RunPlan, exe: Path, config_path: Path):
@@ -2253,21 +2569,60 @@ class VpnClientManager:
             self._disable_killswitch()
         session.sampler.start()
 
-    def _enable_killswitch(self, session: _Session) -> None:
+    def _enable_killswitch(self, session: _Session, lan: list[tuple[int, list[str]]] | None = None) -> None:
+        """Фильтры под этот сеанс: его TUN (LUID — по адресу своей /30) и exe его ядер. Не включился — VPN
+        работает без kill switch, плашка при каждом включении, пока не включится. Прежние фильтры другого
+        сеанса (перезапуск ядра) при этом снимаются: в них LUID прежнего TUN, и они закрыли бы интернет и
+        этому сеансу — «Подключено» было бы неправдой. Не снялись — запуск не удался (KillSwitchError), а
+        интернет закрыт, как после падения. Перестановка фильтров того же сеанса (сменились локальные сети)
+        на неудаче оставляет прежние: тот же TUN они пропускают, а защита от утечек важнее новых сетей."""
         ks = self._killswitch()
         if ks is None or session.plan.tun is None:
             return
         apps = [str(session.main.exe)] + ([str(session.helper.exe)] if session.helper is not None else [])
         apps += [session.plan.lazeyka_exe, winutil.system32("curl.exe")]
+        address = str(ipaddress.ip_interface(session.plan.tun.address4).ip)
+        # Radmin VPN, Hamachi, ZeroTier, Tailscale — локальные сети, а не интернет: их сети (26.0.0.0/8 у
+        # Radmin) пропускаются только через их же адаптер. exclude_nets этих сетей не знает.
+        lan = self.deps.lan_networks() if lan is None else lan
+        same = bool(getattr(ks, "active", False)) and session.tun_luid is not None
+        luid = session.tun_luid if same else self.deps.tun_luid(address)
         try:
-            ks.enable(tun_luid=self.deps.adapter_luid(TUN_NAME), allow_apps=apps,
-                      allow_nets=list(session.plan.tun.exclude))
-        except UserError as exc:   # при каждом включении VPN — плашка, пока не включится
-            self._set_alert(KILLSWITCH_ALERT, "warn", f"Kill switch не включился: {exc}")
+            ks.enable(tun_luid=luid, allow_apps=apps, allow_nets=list(session.plan.tun.exclude), allow_lan=lan)
+        except UserError as exc:
+            reason = str(exc).removeprefix("Kill switch: ")
+            if same:
+                # Замена атомарна: не вышла — в силе прежние фильтры этого же TUN. Проверка здоровья повторит.
+                log.warning("Kill switch не переставлен под новые локальные сети (%s) — прежние фильтры работают",
+                            reason)
+                self._ks_lan_retry = True
+                self._set_alert(KILLSWITCH_ALERT, "warn",
+                                f"Kill switch не открыл новые локальные сети (Radmin VPN, Hamachi и подобные): "
+                                f"{reason.rstrip('.')}. Защита от утечек работает, как раньше; попробуем снова "
+                                "через минуту.")
+                return
+            if getattr(ks, "active", False):
+                log.warning("Kill switch не включился под новый сеанс (%s) — снимаю прежние фильтры", reason)
+                ks.disable()
+                self._ks_apps = set()
+            self._set_alert(KILLSWITCH_ALERT, "warn", f"Kill switch не включился: {reason}")
             return
-        # Неудачное включение оставляет прежние фильтры (замена атомарна) — и прежний список программ.
+        session.tun_luid = luid
         self._ks_apps = {os.path.normcase(app) for app in apps}
+        self._ks_lan, self._ks_lan_retry = lan, False
         self._clear_alert(KILLSWITCH_ALERT)
+
+    def _refresh_killswitch(self, session: _Session) -> None:
+        """Radmin или Hamachi включили после VPN — их сети kill switch ещё закрывает: переставить фильтры того
+        же TUN, если список локальных сетей сменился."""
+        lan = self.deps.lan_networks() if getattr(self.deps.killswitch, "active", False) else None
+        if lan is not None and lan != self._ks_lan:
+            self._enable_killswitch(session, lan)
+            return
+        if self._ks_lan_retry:                   # повторять нечего: kill switch выключен или сети прежние
+            self._ks_lan_retry = False
+            if lan is not None:
+                self._clear_alert(KILLSWITCH_ALERT)
 
     def _blocked_cores(self, versions: dict[str, str]) -> set[str]:
         """Ядра временного замера, которые включённый kill switch не выпустит в сеть: их exe нет среди
@@ -2314,18 +2669,23 @@ class VpnClientManager:
                 continue
             if not self._verified and not announce:
                 log.info("Свой VPN снова подключён: выход через сервер работает")
+            self._exit_reason = None
             self._set(verified=True, exit={"ip": info["ip"], "country": info.get("country"),
-                                           "at": self.deps.clock()}, error=None, error_kind=None,
+                                           "at": self.deps.clock()}, error=None, error_kind=None, diagnosis=None,
                       next_health=self.deps.clock() + HEALTH_EVERY)
             self._clear_alert(EXIT_ALERT)        # снова работает — плашка уходит сама, без уведомления
             return True
         if self._session is not session or self._yielding(session):
             return False
-        kind, text = self._explain_no_exit(session)
-        log.warning("Проверка выхода через сервер не прошла (%s): %s; %s", kind, text, last)
-        self._set(verified=False, error=text, error_kind=kind, next_health=self.deps.clock() + UNVERIFIED_RETRY)
+        reason = self._explain_no_exit(session)
+        kind = diagnose.error_kind(reason)
+        log.warning("Проверка выхода через сервер не прошла (%s, %s/%s): %s; %s", kind, reason.side, reason.code,
+                    reason.text, last)
+        self._set(verified=False, error=reason.text, error_kind=kind, diagnosis=reason.public(),
+                  next_health=self.deps.clock() + UNVERIFIED_RETRY)
         # Проверка повторяется сама каждые UNVERIFIED_RETRY секунд — плашка вместо уведомлений.
-        self._set_alert(EXIT_ALERT, "warn", f"Ядро включено, но через сервер ничего не открывается: {text}",
+        self._set_alert(EXIT_ALERT, "warn", "Ядро включено, но через сервер ничего не открывается. "
+                                            + diagnose.alert_text(reason),
                         action={"label": "Переподключить", "call": "vpnclient_restart", "args": []})
         return False
 
@@ -2336,16 +2696,103 @@ class VpnClientManager:
             return True
         return self._ops.waiting("select") and self.store.selected() != session.active
 
-    def _explain_no_exit(self, session: _Session) -> tuple[str, str]:
+    def _explain_no_exit(self, session: _Session) -> diagnose.Reason:
+        """Почему через сервер ничего не открывается. Проверка выхода повторяется каждые 15 с — повторная
+        неудача того же сервера в течение DIAGNOSIS_REUSE берёт прежнюю причину, без новых проб."""
         server = self._active_server(session)
-        reach, timed = None, False
-        if server is not None:
-            reach = self.deps.tcp_reach(session.plan.addresses.get(server.id) or server.host, server.port, 3.0)
-            timed = server.proto in TIMED_PROTOCOLS or server.security == "reality"
-        skew = diagnose.clock_skew(self.deps.direct_date()) if timed else None
+        key = (session.id, server.id if server else None)
+        now = self.deps.clock()
+        cached = self._exit_reason
+        if cached is not None and cached[0] == key and now - cached[1] < DIAGNOSIS_REUSE:
+            return cached[2]
         tail = list(session.main.tail) + (list(session.helper.tail) if session.helper is not None else [])
-        kind, text = diagnose.explain_no_exit(tail, reach_ms=reach, skew=skew, timed_sensitive=timed)
-        return kind, applog.scrub(text)
+        address = session.plan.addresses.get(server.id) if server is not None else None
+        reason = self._explain_server(server, address, hint=diagnose.runtime_hint(tail))
+        self._exit_reason = (key, now, reason)
+        return reason
+
+    # ---------------------------------------------------------------- причина «нет ответа»: факты
+
+    def _explain_server(self, server: Server | None, address: str | None, *, hint: str | None = None,
+                        peers: dict | None = None) -> diagnose.Reason:
+        """Причина «сервер не отвечает»: контрольный сайт и часы — параллельно с прямыми пробами до сервера;
+        соседи по подписке — по свежим задержкам или peers (их только что измерили)."""
+        if server is None:
+            return diagnose.explain(diagnose.Facts(kind=hint, online=self.deps.online()))
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            network = pool.submit(self._online_and_skew, _timed(server))
+            probe = pool.submit(self._server_probe, server, address or server.host)
+            (online, skew), probed = network.result(), probe.result()
+        if peers is None:
+            results = self.store.latency()
+            peers = self._peer_facts(server, results, self._fresh(results))
+        facts = self._facts(server, kind=hint, online=online, skew=skew, peers=peers)
+        facts.tcp, facts.handshake = probed.get("tcp"), probed.get("handshake")
+        return diagnose.explain(facts)
+
+    def _online_and_skew(self, timed: bool) -> tuple[bool, float | None]:
+        """Открывается ли интернет напрямую и (для VMess и REALITY) насколько сбиты часы: Date контрольного
+        ответа заодно говорит, что интернет есть."""
+        date = self.deps.direct_date() if timed else None
+        return (True if date else self.deps.online()), diagnose.clock_skew(date)
+
+    def _server_probe(self, server: Server, address: str | None) -> dict:
+        """Прямые пробы мимо ядра: TCP, затем рукопожатие TLS (у TLS и REALITY). Серверы на UDP напрямую не
+        проверить — по ним судят соседи по подписке."""
+        if not address or diagnose.uses_udp(server.proto, server.network):
+            return {}
+        tcp = self.deps.tcp_probe(address, server.port, PROBE_TIMEOUT).outcome
+        handshake = None
+        if tcp == "ok" and server.security in ("tls", "reality"):
+            handshake = self.deps.tls_probe(address, server.port, _sni(server), HANDSHAKE_TIMEOUT)
+        return {"tcp": tcp, "handshake": handshake}
+
+    def _dns_facts(self, host: str) -> dict:
+        """Адрес не получен: что ответили резолверы DNS через HTTPS (их опрашивал Resolver) и, если ни один не
+        ответил, знает ли имя DNS сети."""
+        failure = getattr(self._resolver, "failure", None)
+        dns = (failure(host) if callable(failure) else None) or "found"
+        return {"dns": dns, "system_dns": self.deps.system_dns(host) if dns == "unreachable" else None}
+
+    def _facts(self, server: Server, *, kind: str | None, online: bool | None, skew: float | None,
+               peers: dict) -> diagnose.Facts:
+        """Факты о сервере без новых запросов в сеть: протокол, подписка (срок, трафик, устройства), соседи."""
+        sub = self.store.subscription(server.sub) if server.sub else None
+        facts = diagnose.Facts(kind=kind, udp=diagnose.uses_udp(server.proto, server.network), timed=_timed(server),
+                               online=online, skew=skew, fragment=bool(self._vc().get("tls_fragment")),
+                               device_limit=bool(self._device_limit.get(server.sub or "")),
+                               **diagnose.account_facts(sub.userinfo if sub else None, self.deps.clock()))
+        for key, value in peers.items():
+            setattr(facts, key, value)
+        return facts
+
+    def _fresh(self, results: dict, measured: set[str] = frozenset()) -> set[str]:
+        """Серверы, чья задержка годится для сравнения: измерены сейчас или не раньше PEER_FRESH назад."""
+        now = self.deps.clock()
+        return {sid for sid, entry in results.items() if sid in measured or (
+            isinstance(entry, dict) and isinstance(entry.get("at"), (int, float)) and now - entry["at"] <= PEER_FRESH)}
+
+    def _peer_facts(self, server: Server, results: dict, fresh: set[str], skip: set[str] = frozenset()) -> dict:
+        """Соседи по подписке со свежей задержкой: сколько ответили (из них на UDP) и сколько нет; и ответил ли
+        хоть один сервер на TCP вообще — для серверов на UDP это признак, что провайдер режет UDP. skip — серверы,
+        которые не мерили (kill switch, конфиг не собрался, нет адреса): их молчание ничего не говорит."""
+        ok = udp_ok = failed = 0
+        tcp_anywhere = False
+        for other in self.store.servers():
+            entry = results.get(other.id)
+            if other.id == server.id or other.id in skip or other.id not in fresh or not isinstance(entry, dict):
+                continue
+            answered = bool(entry.get("ms")) and not entry.get("error")
+            udp = diagnose.uses_udp(other.proto, other.network)
+            tcp_anywhere = tcp_anywhere or (answered and not udp)
+            if server.sub is None or other.sub != server.sub:
+                continue
+            if answered:
+                ok += 1
+                udp_ok += udp
+            elif entry.get("error") and not _not_measured(entry):
+                failed += 1
+        return {"peers_ok": ok, "peers_udp_ok": udp_ok, "peers_failed": failed, "tcp_ok_anywhere": tcp_anywhere}
 
     def _active_server(self, session: _Session) -> Server | None:
         active = session.active
@@ -2366,11 +2813,12 @@ class VpnClientManager:
             self._disable_killswitch()            # после падения kill switch держал интернет закрытым
             self._restore_proxy()                 # прошлое восстановление могло вернуть не все подключения
             if self._status != "stopped":
-                self._set(status="stopped", error=None, error_kind=None, verified=False, exit=None)
+                self._set(status="stopped", error=None, error_kind=None, diagnosis=None, verified=False,
+                          exit=None)
             return {}
         self._set(status="stopping")
         self._teardown(session)
-        self._set(status="stopped", verified=False, exit=None, error=None, error_kind=None)
+        self._set(status="stopped", verified=False, exit=None, error=None, error_kind=None, diagnosis=None)
         log.info("Свой VPN выключен")
         return {}
 
@@ -2423,14 +2871,18 @@ class VpnClientManager:
         if may_restart:
             self._restarts.append(now)
             # Плашка, пока перезапуск идёт: снимется сама на «работает» (_alerts_for_status).
-            self._set_alert(CRASH_ALERT, "warn", f"Ядро VPN остановилось ({text}) — перезапускаю.", page=None)
+            self._set_alert(CRASH_ALERT, "warn", f"Ядро VPN остановилось ({text}) — перезапускаем.", page=None)
             self._abort.clear()
+            self._replace_selection(session)
             try:
                 self._start(reason="crash")
-                return
-            except UserError as exc:
-                kind, text = getattr(exc, "kind", kind), str(exc)
-        self._set(status="error", error=text, error_kind=kind, verified=False, exit=None)
+            except Exception as exc:  # noqa: BLE001 — любая неудача: ошибку и причину уже записал _start
+                # Как у автоматического перезапуска: плашка и повтор через 30 с, 2 и 5 минут, пока не удастся
+                # или человек не нажмёт «Выключить» (сеть могла ещё не подняться после сбоя).
+                self._restart_failed(auto=True, exc=exc)
+            return
+        self._set(status="error", error=text, error_kind=kind,
+                  diagnosis=_stopped_reason(name, diagnose.stop_kind(tail)).public(), verified=False, exit=None)
         self._down_alert(f"Свой VPN остановился: {text}")
 
     def _restart_helper(self, session: _Session) -> None:
@@ -2438,7 +2890,15 @@ class VpnClientManager:
         if session.helper is None:
             return
         session.helper.stop()
-        session.plan.physical_interface = self.deps.physical_interface()
+        if session.plan.mode == "tun":
+            exit_name = self._exit_interface()
+            if exit_name is not None or session.plan.physical_interface is None:
+                session.plan.physical_interface = exit_name
+            else:
+                # Прямого выхода сейчас нет (Wi-Fi переподключается): без привязки помощник ушёл бы в свой же
+                # TUN. Держим прежнюю — следующая смена сети выберет заново.
+                log.info("Прямого выхода в интернет нет — помощник Xray остаётся привязан к «%s»",
+                         session.plan.physical_interface)
         path = session.config_paths["xray"]
         _write_json(path, self._config().build_xray(session.plan))
         try:
@@ -2446,11 +2906,15 @@ class VpnClientManager:
                                                 self._engines().verify("xray", session.versions["xray"]), path)
         except (ProcessError, UserError) as exc:
             kind, text = self._failure(exc)
-            self._set(error=f"Помощник Xray не перезапустился: {text}", error_kind=kind)
+            # Выход больше не подтверждён: серверы помощника молчат. Проверка здоровья перепроверит выход
+            # через UNVERIFIED_RETRY — удачная снимет ошибку, неудачная назовёт причину (_verify_exit).
+            self._set(error=f"Помощник Xray не перезапустился: {text}", error_kind=kind,
+                      diagnosis=_stopped_reason("xray", kind).public(), verified=False,
+                      next_health=min(self._next_health, self.deps.clock() + UNVERIFIED_RETRY))
             return
         self._changed()
 
-    def _restart_job(self, user: bool = False) -> dict:
+    def _restart_job(self, user: bool = False, retry: bool = False) -> dict:
         """Перезапуск с новым конфигом. Kill switch не снимаем, как после падения: между старым и новым
         туннелем трафик не должен уйти напрямую, а новый запуск заменит его фильтры атомарно.
 
@@ -2458,31 +2922,47 @@ class VpnClientManager:
         (правила, маршруты провайдера, сеть, настройки, сервер вне конфига, новое ядро): их неудачу некому
         показать, а выключал VPN не человек — плашка как у падения и повтор с паузами (_restart_failed).
         План и конфиги собираются уже после разборки: прежнее ядро держит порты и подсеть TUN, и новый план
-        рядом с ним взял бы другие (системный прокси — на другом порту)."""
+        рядом с ним взял бы другие (системный прокси — на другом порту).
+
+        Сеанса к началу задачи нет — автоматический перезапуск ничего не включает: VPN выключили (или
+        включение не удалось), пока задача ждала очереди. Включают только «Переподключить» (user) и повтор
+        неудавшегося перезапуска (retry)."""
         session = self._session
+        if session is None and not (user or retry):
+            log.info("Перезапуск своего VPN не нужен: он уже выключен")
+            return {}
         if session is not None:
             self._set(status="stopping")
             self._teardown(session, keep_killswitch=True)
+        if not user:
+            self._replace_selection(session)      # «Переподключить» человека — с его выбором: отказ он увидит
         try:
             return self._start(reason="restart")
-        except Exception:
-            self._restart_failed(auto=not user)
+        except Exception as exc:
+            self._restart_failed(auto=not user, exc=exc)
             raise
 
-    def _restart_failed(self, auto: bool) -> None:
+    def _restart_failed(self, auto: bool, exc: BaseException | None = None) -> None:
         """Перезапуск не удался, а kill switch по-прежнему держит интернет закрытым — так и сказать.
         Автоматический — ещё плашка и новый запуск через 30 с, 2 и 5 минут, дальше раз в 5 минут, пока он
-        не удастся или человек не нажмёт «Выключить» (_stop_session снимает повтор)."""
+        не удастся или человек не нажмёт «Выключить» (_stop_session снимает повтор). Отказ из-за выбора
+        (сервер пропал, а замены нет; его не открыть; конфиг для него не собрать — _refused_for_good) не
+        повторяется: с тем же выбором он не удастся никогда — плашка просит выбрать сервер."""
         text = self._error or "ядро не запустилось"
         if getattr(self.deps.killswitch, "active", False):
-            self._set(error=f"{text} Kill switch держит интернет закрытым — выключите VPN, чтобы открыть.")
+            self._set(error=f"{text.rstrip().rstrip('.')}. Kill switch держит интернет закрытым — выключите VPN, "
+                            "чтобы открыть.")
         if not auto or self._closing or self._abort.is_set():
+            return
+        if _refused_for_good(exc):
+            self._retry_at, self._retry_attempt = None, 0
+            self._down_alert(f"Свой VPN не перезапустился: {text.rstrip('.')}.", choose=True)
             return
         pause = RESTART_RETRY[min(self._retry_attempt, len(RESTART_RETRY) - 1)]
         self._retry_attempt += 1
         self._retry_at = self.deps.clock() + pause
         when = f"{int(pause)} с" if pause < 60 else f"{int(pause // 60)} мин"
-        self._down_alert(f"Свой VPN не перезапустился: {text.rstrip('.')}. Повторю через {when}.")
+        self._down_alert(f"Свой VPN не перезапустился: {text.rstrip('.')}. Повторим через {when}.")
 
     def _retry_start(self) -> None:
         """Тикер: пора повторить неудавшийся автоматический перезапуск (если VPN с тех пор не выключили и не
@@ -2491,18 +2971,23 @@ class VpnClientManager:
             return
         self._retry_at = None
         log.info("Повторяю запуск своего VPN после неудачного перезапуска (попытка %d)", self._retry_attempt + 1)
-        self._restart_job()
+        self._restart_job(retry=True)
 
-    def _down_alert(self, text: str) -> None:
+    def _down_alert(self, text: str, choose: bool = False) -> None:
         """Свой VPN остановился сам (упал, не перезапустился) — плашка до «работает» или «выключено». Ошибку
         страница VPN показывает сама — плашка там нужна, только если kill switch держит интернет закрытым:
-        тогда главное действие — выключить VPN."""
+        тогда главное действие — выключить VPN. choose — с этим выбором VPN не включить: «Включить снова»
+        отказало бы так же, нужно выбрать сервер."""
         closed = getattr(self.deps.killswitch, "active", False)
+        if closed:
+            action = {"label": "Выключить VPN", "call": "vpnclient_stop", "args": []}
+        elif choose:
+            action = {"label": "Выбрать сервер", "page": "vpnclient"}
+        else:
+            action = {"label": "Включить снова", "call": "vpnclient_start", "args": []}
         self._set_alert(CRASH_ALERT, "error", text + (
             " Kill switch держит интернет закрытым — выключите VPN, чтобы открыть." if closed else ""),
-            action=({"label": "Выключить VPN", "call": "vpnclient_stop", "args": []} if closed else
-                    {"label": "Включить снова", "call": "vpnclient_start", "args": []}),
-            page="vpnclient" if closed else None)
+            action=action, page="vpnclient" if closed else None)
 
     # ================================================================ сон, сеть, здоровье, обход
 
@@ -2525,8 +3010,11 @@ class VpnClientManager:
             log.info("В сети больше нет IPv6, а адрес сервера в конфиге — IPv6: перезапускаю VPN")
             self._restart_job()
             return
-        if session.helper is not None:
+        if session.helper is not None and session.plan.mode == "tun":
+            # Привязка помощника к прямому выходу (sockopt.interface) — только в TUN; в режимах прокси он
+            # идёт по маршрутам Windows, и перезапуск лишь оборвал бы его соединения.
             self._restart_helper(session)
+        self._refresh_killswitch(session)
         self._verify_exit(session)
 
     def _health(self) -> None:
@@ -2541,12 +3029,18 @@ class VpnClientManager:
         session = self._session
         if session is None or self._status != "running":
             return
+        if self._ks_lan_retry:
+            self._refresh_killswitch(session)    # фильтры под новые локальные сети не встали при смене сети
         if not self._verified:
             self._verify_exit(session, timeouts=RECHECK_TIMEOUTS)
+            if (not self._verified and session.outdated and self._session is session
+                    and not self._yielding(session)):
+                self._recover_outdated(session)
             return
-        if session.active.startswith("auto:"):
+        if session.active.startswith("auto:") and not session.outdated:
             return                              # urltest сам выбирает живой сервер
         try:
+            # У группы «Самый быстрый» задержка — у сервера, который urltest выбрал сейчас.
             session.clash.delay(self._tag(session.active), session.plan.probe_url, DELAY_TIMEOUT_MS)
             self._health_fails = 0
             self._clear_alert(SERVER_ALERT)      # сервер снова отвечает
@@ -2556,23 +3050,109 @@ class VpnClientManager:
             log.info("Сервер не ответил на проверку здоровья (%d): %s", self._health_fails, exc)
         if self._health_fails >= HEALTH_FAILS:
             self._health_fails = 0
-            self._switch_to_fastest(session)
+            if session.outdated:
+                self._recover_outdated(session)
+            else:
+                self._switch_to_fastest(session)
 
-    def _switch_to_fastest(self, session: _Session) -> None:
+    def _recover_outdated(self, session: _Session) -> None:
+        """Сервер не отвечает, а подписка с тех пор обновилась (ключи, адреса). Выбор на месте —
+        переподключиться с параметрами из подписки: соседи в старом конфиге, скорее всего, тоже с прежними
+        ключами. Выбранного сервера (группы) в подписке больше нет — с ним не переподключиться никогда: сначала
+        живой сосед из работающего конфига, который в подписке остался (без перезапуска); живого нет —
+        перезапуск, и он сам выберет замену (_replace_selection)."""
+        selected = self.store.selected()
+        if selected and self._unusable(selected) is not None and self._switch_to_fastest(session, quiet=True):
+            return
+        log.info("Сервер не отвечает, а подписка обновилась — переподключаю свой VPN с её новыми параметрами")
+        try:
+            self._restart_job()
+        except UserError as exc:
+            log.warning("Свой VPN не переподключился с новыми параметрами подписки: %s", exc)
+
+    def _replace_selection(self, session: _Session | None) -> None:
+        """Автоматический перезапуск, а с выбором VPN не включить (сервер или группа пропали из подписки, сервер
+        больше не поддерживается): выбрать замену и сказать об этом — план 5.8, «соединение упало —
+        переключиться с уведомлением». Замена — что предложило хранилище при обновлении подписки (группа
+        сервера или первый сервер), иначе «Самый быстрый» всей его подписки. Заменить нечем — выбор остаётся,
+        запуск откажет понятной ошибкой выбора, и повторять его по кругу не будем (_restart_failed)."""
+        selected = self.store.selected()
+        problem = self._unusable(selected) if selected else None
+        if problem is None:
+            return
+        offered = self._offered
+        candidates = [offered[1]] if offered and offered[0] == selected else []
+        subs = [s.sub for s in session.plan.servers if s.sub] if session is not None else []
+        candidates += [f"auto:{sub_id}" for sub_id in dict.fromkeys(subs)]
+        replacement = next((c for c in candidates if c != selected and self._unusable(c) is None), None)
+        if replacement is None:
+            log.warning("Выбор своего VPN не заменить: %s", problem)
+            return
+        gone = self._plan_label(session, selected)
+        self.store.select(replacement)
+        self._offered = None
+        self.notify("info", f"С «{gone}» свой VPN больше не включить: {problem.why}. "
+                            f"Выбран «{self._label(replacement)}» — переподключаемся.")
+        self._changed()
+
+    def _plan_label(self, session: _Session | None, item_id: str) -> str:
+        """Имя выбора — и того, что из хранилища уже пропал: из работающего конфига или запомненное до слияния."""
+        plan = session.plan if session is not None else None
+        server = next((s for s in plan.servers if s.id == item_id), None) if plan else None
+        if server is not None:
+            return server.display_name()
+        group = next((g for g in plan.groups if f"auto:{g.id}" == item_id), None) if plan else None
+        if group is not None:
+            return group.name
+        return self._gone.get(item_id) or self._label(item_id)
+
+    def _note_outdated(self, sub_id: str | None) -> None:
+        """После обновления подписки (None — серверов из отдельных ссылок): у серверов работающего конфига
+        другие параметры (ключ сменился, сервер убран или поменялся) — сеанс устарел. Туннель, пока
+        работает, не рвём (план 5.8)."""
+        session = self._session
+        if session is None or session.outdated:
+            return
+        current = {s.id: s for s in self.store.servers() if s.sub == sub_id}
+        for server in session.plan.servers:
+            if server.sub == sub_id and (server.id not in current
+                                         or _connection(current[server.id]) != _connection(server)):
+                session.outdated = True
+                log.info("Подписка обновилась, а в работающем конфиге — прежние параметры её серверов: "
+                         "переподключусь, если сервер перестанет отвечать")
+                return
+
+    def _switch_to_fastest(self, session: _Session, quiet: bool = False) -> bool:
+        """Самый быстрый живой сервер работающего конфига — без перезапуска. Только из тех, что остались в
+        хранилище: выбор не должен показывать на пропавший сервер. True — переключились. Живого нет — плашка
+        с причиной (quiet — без неё: решает вызывающий)."""
         config = self._config()
+        measured = True
         try:
             delays = session.clash.group_delay(config.SELECTOR_PROXY, session.plan.probe_url, DELAY_TIMEOUT_MS,
                                                members=len(session.plan.servers))
         except ClashError as exc:
             log.info("Быстрый сервер не найден: %s", exc)
-            delays = {}
+            delays, measured = {}, False
         current = self._tag(session.active)
-        alive = sorted((ms, tag) for tag, ms in delays.items() if tag in session.tags and tag != current)
-        dead = next((s.display_name() for s in session.plan.servers if s.id == session.active), "сервер")
+        known = {s.id for s in self.store.servers()}
+        alive = sorted((ms, tag) for tag, ms in delays.items()
+                       if tag in session.tags and tag != current and session.tags[tag] in known)
+        server = next((s for s in session.plan.servers if s.id == session.active), None)
+        dead = server.display_name() if server is not None else "сервер"
+        if not alive and quiet:
+            return False
         if not alive:   # проверка здоровья повторяется раз в минуту — плашка вместо уведомлений
-            self._set_alert(SERVER_ALERT, "warn", f"Сервер «{dead}» не отвечает, а другого живого сервера в "
-                                                  "подписке нет.")
-            return
+            text = f"Сервер «{dead}» не отвечает, а другого живого сервера в подписке нет."
+            if server is not None and not self._yielding(session):
+                # Соседи только что не ответили все (если замер группой удался) — это и есть сравнение.
+                others = sum(1 for s in session.plan.servers if s.id != server.id and s.sub == server.sub)
+                peers = ({"peers_ok": 0, "peers_udp_ok": 0, "peers_failed": others, "tcp_ok_anywhere": False}
+                         if measured and server.sub else None)
+                reason = self._explain_server(server, session.plan.addresses.get(server.id), peers=peers)
+                text += " " + diagnose.alert_text(reason)
+            self._set_alert(SERVER_ALERT, "warn", text)
+            return False
         tag = alive[0][1]
         target = session.tags[tag]
         name = next((s.display_name() for s in session.plan.servers if s.id == target), target)
@@ -2580,7 +3160,7 @@ class VpnClientManager:
             session.clash.select(config.SELECTOR_PROXY, tag)
         except ClashError as exc:
             log.warning("Переключение на «%s» не удалось: %s", name, exc)
-            return
+            return False
         session.active = target
         try:
             self.store.select(target)
@@ -2591,6 +3171,8 @@ class VpnClientManager:
         # без уведомления Windows.
         self.notify("info", f"Сервер «{dead}» перестал отвечать — переключила на самый быстрый: «{name}».")
         self._changed()
+        self._verify_exit(session)               # выход теперь через другой сервер: IP и страна — его
+        return True
 
     def _bypass_wanted(self) -> str | None:
         session = self._session
@@ -2657,8 +3239,10 @@ class VpnClientManager:
                 raise VpnClientError(f"Сервер не поддерживается: {why}", "unsupported")
         store.select(item_id)
         self._changed()
-        if self._session is not None:
-            self._ops.submit(self._switch, key="select")   # задача возьмёт выбор, последний к её началу
+        if self._live():
+            # Задача возьмёт выбор, последний к её началу; идёт включение — встанет за ним: оно могло взять
+            # прежний сервер (выбор берётся в начале, а ядро, бывает, ещё скачивается).
+            self._ops.submit(self._switch, key="select")
         return {}
 
     def _switch(self) -> None:
@@ -2679,6 +3263,7 @@ class VpnClientManager:
             return
         session.active = item_id
         self._health_fails = 0
+        self._clear_alert(SERVER_ALERT)          # плашка была о прежнем сервере: человек выбрал другой
         self._changed()
         self._verify_exit(session)
 
@@ -2700,18 +3285,24 @@ class VpnClientManager:
         return {}
 
     def _measure(self, servers: list[Server]) -> None:
+        addresses: dict[str, str] = {}               # адреса серверов из планов замера — для прямых проб
+        with self._lock:
+            self._latency_causes = {}
         try:
             session = self._session
             in_config = {s.id for s in session.plan.servers} if session is not None else set()
             live = [s for s in servers if s.id in in_config]
             rest = [s for s in servers if s.id not in in_config]
             if live:
+                addresses.update(session.plan.addresses)
                 self._delays_via(session.clash, live, members=len(session.plan.servers) + len(session.plan.groups))
             if rest:
-                self._delays_temporary(rest)
+                addresses.update(self._delays_temporary(rest))
         except Exception as exc:  # noqa: BLE001 — итог показываем у серверов и уведомлением
             log.warning("Проверка задержки не удалась: %s", exc)
             self.notify("warn", f"Задержку проверить не удалось: {applog.scrub(str(exc))}")
+        else:
+            self._explain_latency(servers, addresses)
         finally:
             try:
                 self.store.save()
@@ -2746,17 +3337,57 @@ class VpnClientManager:
         with concurrent.futures.ThreadPoolExecutor(DELAY_WORKERS) as pool:
             list(pool.map(one, servers))
 
-    def _latency_done(self, server_id: str, ms: int | None, error: str | None) -> None:
+    def _latency_done(self, server_id: str, ms: int | None, error: str | None, cause: str | None = None) -> None:
+        """cause — почему сервер не мерили: killswitch | unsupported | dns (причину назовёт _explain_latency)."""
         try:
             self.store.set_latency(server_id, ms, error, save=False)   # файл — один раз в конце проверки
         except UserError as exc:
             log.debug("Задержка не сохранена: %s", exc)
         with self._lock:
             self._latency["done"] = self._latency.get("done", 0) + 1
+            if cause:
+                self._latency_causes[server_id] = cause
 
-    def _delays_temporary(self, servers: list[Server]) -> None:
+    def _explain_latency(self, servers: list[Server], addresses: dict[str, str]) -> None:
+        """После проверки задержки — причина у каждого «нет ответа». В сеть — только если отказы есть: один раз
+        контрольный сайт (и часы, если среди отказов VMess или REALITY), затем прямые пробы не больше PROBE_LIMIT
+        серверов параллельно. Соседи по подписке — эта проверка и свежие прошлые."""
+        try:
+            results = self.store.latency()
+            failed = [s for s in servers if _no_answer(results.get(s.id))]
+            if not failed:
+                return
+            with self._lock:
+                causes = dict(self._latency_causes)
+            fresh = self._fresh(results, {s.id for s in servers})
+            network = [s for s in failed if causes.get(s.id) not in ("killswitch", "unsupported")]
+            online, skew = self._online_and_skew(any(_timed(s) for s in network)) if network else (None, None)
+            probed: dict[str, dict] = {}
+            targets = [s for s in network if s.id not in causes][:PROBE_LIMIT] if online is not False else []
+            if targets:
+                with concurrent.futures.ThreadPoolExecutor(DELAY_WORKERS) as pool:
+                    found = pool.map(lambda s: self._server_probe(s, addresses.get(s.id)), targets)
+                    probed = dict(zip((s.id for s in targets), found))
+            for server in failed:
+                cause = causes.get(server.id)
+                facts = self._facts(server, kind=cause if cause != "dns" else None, online=online, skew=skew,
+                                    peers=self._peer_facts(server, results, fresh, set(causes)))
+                if cause == "dns":
+                    for key, value in self._dns_facts(server.host).items():
+                        setattr(facts, key, value)
+                probe = probed.get(server.id, {})
+                facts.tcp, facts.handshake = probe.get("tcp"), probe.get("handshake")
+                reason = diagnose.explain(facts)
+                self.store.set_latency(server.id, None, results[server.id].get("error"), reason=reason.public(),
+                                       save=False)
+        except Exception:  # noqa: BLE001 — задержки уже записаны: без причины, но не без них
+            log.warning("Причины «нет ответа» не определены", exc_info=True)
+
+    def _delays_temporary(self, servers: list[Server]) -> dict[str, str]:
         """Сервера нет в работающем конфиге (или ядро выключено): временный экземпляр — только выходы и API
-        (+ помощник для своих серверов). В систему он ничего не добавляет: ни TUN, ни прокси."""
+        (+ помощник для своих серверов). В систему он ничего не добавляет: ни TUN, ни прокси. Ответ — адреса
+        серверов, полученные для замера (для прямых проб тех, кто не ответил)."""
+        found: dict[str, str] = {}
         vc = self._vc()
         noises = bool(vc.get("noises"))
         engines_by_id = {s.id: engine_for(s, force_xray=noises)[0] for s in servers}
@@ -2771,7 +3402,7 @@ class VpnClientManager:
             # Такому ядру kill switch не даст соединиться: «нет ответа» у сервера было бы неправдой.
             skipped = {s.id for s in servers if "sing-box" in blocked or engines_by_id[s.id] in blocked}
             for server_id in skipped:
-                self._latency_done(server_id, None, KILLSWITCH_DELAY)
+                self._latency_done(server_id, None, KILLSWITCH_DELAY, cause="killswitch")
             servers = [s for s in servers if s.id not in skipped]
         config = self._config()
         probe_dir = self.run_dir / "delay"
@@ -2779,9 +3410,10 @@ class VpnClientManager:
             pick = {"selected": chunk[0].id, "servers": chunk, "groups": [], "first": chunk[0], "sub": None,
                     "engines": {s.id: engines_by_id[s.id] for s in chunk}}
             plan = self._build_plan(vc, pick, versions, set(), mode="local", routing_dir=probe_dir, quiet=True)
+            found.update(plan.addresses)
             for server in chunk:
                 if server.id not in plan.engines:     # адрес не получен — мерить нечего
-                    self._latency_done(server.id, None, "адрес сервера не получен через DNS")
+                    self._latency_done(server.id, None, "адрес сервера не получен через DNS", cause="dns")
             plan = self._buildable(plan)
             if not plan.servers:
                 continue
@@ -2811,6 +3443,7 @@ class VpnClientManager:
                 applog.remove_secrets(temp_secrets)
                 for path in probe_dir.glob("*.json"):
                     path.unlink(missing_ok=True)
+        return found
 
     def _buildable(self, plan: RunPlan) -> RunPlan:
         """План временного экземпляра без серверов, из которых конфиг не собрать (у них — ошибка задержки)."""
@@ -2832,7 +3465,7 @@ class VpnClientManager:
                     config.build_xray(single)
                 good.append(server)
             except UserError as exc:
-                self._latency_done(server.id, None, applog.scrub(str(exc)))
+                self._latency_done(server.id, None, applog.scrub(str(exc)), cause="unsupported")
         ids = {s.id for s in good}
         return replace(plan, servers=good, engines={k: v for k, v in plan.engines.items() if k in ids},
                        selected=good[0].id if good else plan.selected)
@@ -2923,8 +3556,9 @@ class VpnClientManager:
 
     def _import_body(self, text: str) -> dict:
         """Текст из поля импорта — тем же разбором, что тело подписки: ссылки по строкам, base64, JSON
-        Xray и SIP008, .conf WireGuard. Серверы-заглушки провайдера — только сообщением."""
-        decoded = self._mod("subscription").decode(text.encode("utf-8"), {})
+        Xray и SIP008, .conf WireGuard. Серверы-заглушки провайдера — только сообщением; сервер на 127.x
+        или localhost, вставленный человеком, — настоящий (свой прокси на этом ПК)."""
+        decoded = self._mod("subscription").decode(text.encode("utf-8"), {}, keep_local=True)
         notices = "; ".join(getattr(decoded, "notices", None) or [])
         if not decoded.servers:
             if notices:
@@ -2932,8 +3566,7 @@ class VpnClientManager:
             first = decoded.errors[0][1] if decoded.errors else None
             raise VpnClientError(str(first) if first else "Ссылок на серверы не найдено")
         applog.add_secrets([v for s in decoded.servers for v in _server_secrets(s)])
-        added = _report_count(self.store.add_servers(decoded.servers), "added", len(decoded.servers))
-        parts = [f"Добавлено серверов: {added}"]
+        parts = [self._add_servers(decoded.servers, "Добавлено серверов")]
         if decoded.errors:
             parts.append(f"не разобрано строк: {len(decoded.errors)}")
         if decoded.groups:
@@ -2942,10 +3575,22 @@ class VpnClientManager:
             parts.append(f"провайдер сообщает: {notices}")
         return {"message": "; ".join(parts)}
 
+    def _add_servers(self, servers: list[Server], what: str) -> str:
+        """Серверы из ссылок — в хранилище; итог словами: сколько добавлено и сколько обновлено (тот же
+        сервер с новыми параметрами — например, ключом REALITY)."""
+        report = self.store.add_servers(servers)
+        added, updated = _report_count(report, "added", len(servers)), _report_count(report, "updated", 0)
+        if updated:
+            self._note_outdated(None)           # обновлённый сервер мог быть в работающем конфиге
+        return f"{what}: {added}" + (f", обновлено: {updated}" if updated else "")
+
     def _import_subscription(self, url: str, ua_preset: str | None, hwid: bool = False) -> dict:
         applog.add_secrets([url])
         subscription = self._mod("subscription")
-        existing = next((s for s in self.store.subscriptions() if s.url == url), None)
+        # Тот же адрес, что и у хранилища: «/» на конце и регистр хоста — та же подписка (обновить, а не
+        # «уже добавлена»).
+        same = self._mod("store").url_key
+        existing = next((s for s in self.store.subscriptions() if same(s.url) == same(url)), None)
         if existing is not None:
             changes: dict[str, Any] = {}
             if ua_preset and ua_preset != existing.ua_preset:
@@ -3000,6 +3645,10 @@ class VpnClientManager:
             if sub is None:
                 return {"error": "Подписка удалена"}
             fetched, decoded, error = self._download(sub)
+            answer = fetched if fetched is not None else getattr(error, "fetched", None)
+            if answer is not None:               # причина «нет ответа»: лимит устройств — сторона провайдера
+                flags = subscription.hwid_flags(getattr(answer, "headers", None))
+                self._device_limit[sub.id] = bool(flags.get("max_devices"))
             offer = subscription.offer(fetched, decoded, error)
             outcome["offer"] = dict(offer, sub=sub.id) if offer else None
             if error is not None or decoded is None:
@@ -3020,7 +3669,8 @@ class VpnClientManager:
             self._gone = {selected: self._label(selected)} if selected else {}
             report = self.store.apply_decoded(sub.id, decoded)
             if self._store_provider_profile(sub, decoded) and self._uses_sub(sub.id):
-                self._ops.submit(self._restart_job, key="restart")   # включённые маршруты провайдера сменились
+                self._restart_live()             # включённые маршруты провайдера сменились
+            self._note_outdated(sub.id)
             self._selection_after_merge(sub, report)
             added, removed = _report_count(report, "added", 0), _report_count(report, "removed", 0)
             name = (self.store.subscription(sub.id) or sub).name
@@ -3041,7 +3691,7 @@ class VpnClientManager:
                 self._set_alert(f"vpn-sub:{sub.id}", "warn", f"Подписка «{name}»: " + "; ".join(problems))
             else:
                 self._clear_alert(f"vpn-sub:{sub.id}")   # обновилась (по кнопке проблемы ушли уведомлением)
-            if (announce or auto) and (added or removed):
+            if announce and (added or removed):   # итог — только по кнопке (ui-contract, «Уведомления»)
                 self.notify("success", f"Подписка обновлена: +{added} / −{removed}")
             if self._vc()["latency_on_update"] and decoded.servers:
                 try:
@@ -3076,6 +3726,7 @@ class VpnClientManager:
                 self.notify("info", f"«{gone}» пропал из подписки «{sub.name}», выбран «{label}».")
             return
         if suggested:
+            self._offered = (change[0], suggested)   # прервётся соединение — переключимся на него сами
             self.notify("warn", f"«{gone}» пропал из подписки «{sub.name}». Подключение пока работает — "
                                 f"переключиться на «{label}»?",
                         action={"label": "Переключиться", "call": "vpnclient_select", "args": [suggested]})
@@ -3089,23 +3740,36 @@ class VpnClientManager:
         return server.display_name() if server else item_id
 
     def _download(self, sub: Subscription, ua_preset: str | None = None) -> tuple[Any, Any, Any]:
-        """(fetched, decoded, error): напрямую, при сбое сети — через свой VPN. ua_preset — проба с чужим
-        UA без изменения сохранённой подписки."""
+        """(fetched, decoded, error): напрямую, при сбое сети — через свой VPN; адрес подписки не открылся
+        ни так, ни так — запасные адреса провайдера (заголовок fallback-url, только https) по очереди. Ошибка —
+        основного адреса, если запасные тоже не помогли. ua_preset — проба с чужим UA без изменения
+        сохранённой подписки."""
         subscription = self._mod("subscription")
         trial = replace(sub, ua_preset=ua_preset) if ua_preset else sub
-        fetched = decoded = error = None
         routes = ["direct"] + (["vpn"] if self._session is not None and self._status == "running" else [])
-        for route in routes:
-            try:
-                fetched = subscription.fetch(sub.url, user_agent=subscription.user_agent(trial, __version__),
-                                             hwid=sub.hwid, opener=self.opener_for(route))
-                decoded = subscription.decode(fetched.body, fetched.headers, sub_id=sub.id)
+        first_error = None
+        for url in [sub.url, *(u for u in sub.fallback_urls if u != sub.url)]:
+            fetched = decoded = error = None
+            for route in routes:
+                try:
+                    fetched = subscription.fetch(url, user_agent=subscription.user_agent(trial, __version__),
+                                                 hwid=sub.hwid, opener=self.opener_for(route))
+                    decoded = subscription.decode(fetched.body, fetched.headers, sub_id=sub.id)
+                except subscription.SubscriptionError as exc:
+                    error = exc
+                    if exc.kind not in ("network", "timeout", "tls"):
+                        break                   # провайдер ответил — другим маршрутом не лучше
+                    continue
+                if url != sub.url:
+                    log.info("Подписка «%s» загружена с запасного адреса провайдера", applog.scrub(sub.name))
+                    if not decoded.meta.fallback_urls:
+                        decoded.meta.fallback_urls = list(sub.fallback_urls)   # запасной о себе может молчать
                 return fetched, decoded, None
-            except subscription.SubscriptionError as exc:
-                error = exc
-                if exc.kind not in ("network", "timeout", "tls"):
-                    break                       # провайдер ответил — другим маршрутом не лучше
-        return fetched, decoded, error
+            if first_error is None:
+                first_error = (fetched, decoded, error)
+            if error is not None and error.kind not in ("network", "timeout", "tls"):
+                break                           # адрес ответил: запасные — только когда он недоступен
+        return first_error
 
     def sub_probe(self, sub_id: str) -> dict:
         """«Проверить расширенный формат»: подписка с UA «как v2rayN» (затем «как Happ», «как Incy»), ничего не
@@ -3173,14 +3837,16 @@ class VpnClientManager:
     def sub_remove(self, sub_id: str) -> dict:
         if self.store.subscription(sub_id) is None:
             raise VpnClientError("Такой подписки нет")
-        session = self._session
-        in_use = session is not None and any(s.sub == sub_id for s in session.plan.servers)
+        in_use = self._uses_sub(sub_id)
         self.store.remove_subscription(sub_id)
         self._profiles.save([p for p in self._profiles.load() if p.get("id") != f"r-{sub_id}"])
         self._disk_cache.pop("profiles", None)
         self._clear_alert(f"vpn-sub:{sub_id}")   # подписки нет — и её плашки тоже
         if in_use:
-            self._ops.submit(lambda: self._stop_session(remember=False))
+            # Как «Выключить»: идущее включение прерывается, а при следующем запуске Лазейки VPN сам не
+            # включится на первом сервере другой подписки (was_running снимается).
+            self._abort.set()
+            self._ops.submit(lambda: self._stop_session(remember=True))
             self.notify("info", "Подписка удалена — свой VPN выключен: его серверы были из неё.")
         self._changed()
         return {}
@@ -3206,10 +3872,8 @@ class VpnClientManager:
             offer = self._import.get("offer")
             if isinstance(offer, dict) and offer.get("sub") == sub_id:
                 self._import = dict(self._import, offer=None)   # и предложение по ней — тоже
-        session = self._session
-        if session is not None and {"dns", "mtu", "provider_routes"} & set(changes) and any(
-                s.sub == sub_id for s in session.plan.servers):
-            self._ops.submit(self._restart_job, key="restart")
+        if {"dns", "mtu", "provider_routes"} & set(changes) and self._uses_sub(sub_id):
+            self._restart_live()
         self._changed()
         return {}
 
@@ -3259,16 +3923,18 @@ class VpnClientManager:
             problem, normalized = _dns(value) if value is not None else (None, None)
             if problem:
                 errors["dns"] = "Свой DNS подписки — из списка или адрес https://…/dns-query"
-            else:
+            elif normalized != sub.dns:
                 changes["dns"] = normalized
         if "mtu" in values:
             mtu = values["mtu"]
             if mtu is not None and (isinstance(mtu, bool) or not isinstance(mtu, int)
                                     or not SUB_MTU[0] <= mtu <= SUB_MTU[1]):
                 errors["mtu"] = f"MTU подписки — пусто или от {SUB_MTU[0]} до {SUB_MTU[1]}"
-            else:
+            elif mtu != sub.mtu:
                 changes["mtu"] = mtu
-        if "provider_routes" in values:
+        # dns, mtu и маршруты провайдера перезапускают работающий VPN (sub_set) — только если они правда другие:
+        # окно свойств шлёт их и при переименовании подписки.
+        if "provider_routes" in values and bool(values["provider_routes"]) != bool(sub.provider_routes):
             changes["provider_routes"] = bool(values["provider_routes"])
         return changes, errors
 
@@ -3330,9 +3996,9 @@ class VpnClientManager:
         if file.suffix.lower() == ".conf":
             servers = self._mod("links").parse_wireguard_conf(text, file.stem)
             applog.add_secrets([v for s in servers for v in _server_secrets(s)])
-            added = _report_count(self.store.add_servers(servers), "added", len(servers))
+            message = self._add_servers(servers, "Добавлено серверов WireGuard")
             self._changed()
-            return {"message": f"Добавлено серверов WireGuard: {added}"}
+            return {"message": message}
         return self.import_text(text)
 
     def import_qr(self, source: str, path: str | None = None) -> dict:
@@ -3416,8 +4082,7 @@ class VpnClientManager:
             sub_id = p.get("sub")
             if p.get("source") == "subscription" and sub_id and self.store.subscription(sub_id) is not None:
                 self.store.update_subscription(sub_id, provider_routes=bool(p.get("active")))
-        if self._session is not None:
-            self._ops.submit(self._restart_job, key="restart")
+        self._restart_live()
         self._changed()
         return {}
 
@@ -3428,8 +4093,8 @@ class VpnClientManager:
             raise VpnClientError("Такого профиля нет")
         self._profiles.save(kept)
         self._disk_cache.pop("profiles", None)
-        if any(p.get("active") for p in profiles if p.get("id") == profile_id) and self._session is not None:
-            self._ops.submit(self._restart_job, key="restart")
+        if any(p.get("active") for p in profiles if p.get("id") == profile_id):
+            self._restart_live()
         self._changed()
         return {}
 
@@ -3472,27 +4137,50 @@ class VpnClientManager:
         return list(rules), list(sets)
 
     def _store_provider_profile(self, sub: Subscription, decoded) -> bool:
-        """Маршруты провайдера (JSON Xray или заголовок routing) — профилем; включён, только если человек
-        включил «маршруты провайдера» у подписки. True — изменились правила включённого профиля."""
-        text = getattr(decoded.meta, "routing", None)
+        """Маршруты провайдера (JSON Xray, заголовок routing или строка «…://routing/…» в теле подписки) —
+        профилем; включён, только если человек включил «маршруты провайдера» у подписки. True — изменились
+        правила включённого профиля."""
+        lines = getattr(decoded, "route_lines", None) or []
+        text = getattr(decoded.meta, "routing", None) or (lines[0] if lines else None)
         routing = getattr(decoded, "routing", None)
         if not text and not routing:
             return False
         profiles = self._profiles.load()
         pid = f"r-{sub.id}"
         current = next((p for p in profiles if p.get("id") == pid), None)
-        entry = {"id": pid, "name": f"Маршруты «{sub.name}»", "source": "subscription", "sub": sub.id,
+        entry = {"id": pid, "name": f"{sub.name}: маршруты провайдера", "source": "subscription", "sub": sub.id,
                  "active": bool(sub.provider_routes), "text": text or "",
                  "routing": routing if isinstance(routing, dict) else None}
         if current == entry:
             return False
+        # Имя в правила не входит: другое (выпуск 1.2 называл профиль «Маршруты «…»», подписку переименовали) —
+        # обновить молча, без переподключения работающего VPN.
+        same_rules = current is not None and _without_name(current) == _without_name(entry)
         self._profiles.save([p for p in profiles if p.get("id") != pid] + [entry])
         self._disk_cache.pop("profiles", None)
-        return entry["active"]
+        return entry["active"] and not same_rules
 
     def _uses_sub(self, sub_id: str) -> bool:
-        session = self._session
-        return session is not None and any(s.sub == sub_id for s in session.plan.servers)
+        """Серверы подписки — в работающем конфиге или в плане идущего включения. План ещё не собран (ядро
+        скачивается) — по выбору: включение берёт выбранный сервер или группу и соседей по его подписке."""
+        with self._lock:
+            session, pending = self._session, self._pending
+        plan = session.plan if session is not None else pending
+        if plan is not None:
+            return any(s.sub == sub_id for s in plan.servers)
+        return self._status == "starting" and self._selected_sub() == sub_id
+
+    def _selected_sub(self) -> str | None:
+        """Подписка выбранного сервера или группы «Самый быстрый»."""
+        store = self.store
+        selected = store.selected()
+        if not selected:
+            return None
+        if selected.startswith("auto:"):
+            group = self._group(selected[len("auto:"):], store.groups(), store.subscriptions(), store.servers())
+            return group.sub if group else None
+        server = store.server(selected)
+        return server.sub if server else None
 
     # ================================================================ настройки
 
@@ -3543,8 +4231,8 @@ class VpnClientManager:
                 self.rules_update()
             except UserError as exc:
                 log.warning("Списки для маршрутов не скачиваются: %s", exc)
-        if self._session is not None and changed & RESTART_KEYS:
-            self._ops.submit(self._restart_job, key="restart")
+        if changed & RESTART_KEYS and self._live():
+            self._restart_live()
         elif "kill_switch" in changed:
             # И без сеанса: после падения или неудачного перезапуска фильтры держат интернет закрытым.
             self._ops.submit(self._toggle_killswitch, key="killswitch")
@@ -3633,17 +4321,39 @@ class VpnClientManager:
         if not clean:
             return
         applog.add_secrets([clean])
-        if re.match(r"^https?://", clean, re.I):
-            host = urllib.parse.urlsplit(clean).hostname
-            kind = "subscription"
-            text = f"Подписка с адреса {host} (полный адрес скрыт)" if host else "Подписка (адрес скрыт)"
-        else:
-            kind = "links"
-            text = f"Ссылок на серверы: {sum(1 for line in clean.splitlines() if '://' in line)}"
+        # Только lazeyka://import/<…>: остальное (команды, повреждённые и слишком длинные ссылки) — отказ.
+        inner = self._mod("deeplink").parse(clean)
+        if inner is None:
+            log.warning("Ссылка lazeyka:// отклонена: это не lazeyka://import/<…> или она повреждена")
+            self.notify("warn", "Ссылка lazeyka:// не подошла: Лазейка принимает только lazeyka://import/<подписка "
+                                "или ссылки на серверы>.")
+            return
+        applog.add_secrets([inner])
+        try:
+            kind, summary = self._deeplink_summary(clean)
+        except UserError as exc:
+            log.warning("Ссылка lazeyka:// отклонена: %s", applog.scrub(str(exc)))
+            self.notify("warn", f"Ссылка lazeyka:// не подошла: {applog.scrub(str(exc))}")
+            return
         with self._lock:
-            self._deeplink = {"token": secrets.token_urlsafe(12), "kind": kind, "summary": text}
-            self._deeplink_text = clean
+            self._deeplink = {"token": secrets.token_urlsafe(12), "kind": kind, "summary": summary}
+            self._deeplink_text = clean          # import_text снимет обёртку сам — ровно один уровень
         self._changed()
+
+    def _deeplink_summary(self, link: str) -> tuple[str, str]:
+        """Что внутри ссылки — тем же разбором, что импорт (без сети): подписка или сколько серверов."""
+        target = self._mod("links").unwrap(link).strip()
+        applog.add_secrets([target])
+        if "\n" not in target and re.match(r"^https?://\S+$", target, re.I):
+            host = urllib.parse.urlsplit(target).hostname
+            return "subscription", (f"Подписка с адреса {host} (полный адрес скрыт)" if host
+                                    else "Подписка (адрес скрыт)")
+        decoded = self._mod("subscription").decode(target.encode("utf-8"), {}, keep_local=True)
+        if not decoded.servers:
+            first = decoded.errors[0][1] if decoded.errors else None
+            raise VpnClientError(str(first) if first else "в ней нет ссылок на серверы")
+        applog.add_secrets([v for s in decoded.servers for v in _server_secrets(s)])
+        return "links", f"Ссылок на серверы: {len(decoded.servers)}"
 
     def deeplink_confirm(self, token: str, accept: bool) -> dict:
         with self._lock:
@@ -3841,6 +4551,22 @@ def _server_secrets(server: Server) -> list[str | None]:
     return out
 
 
+# Поля сервера, которые в конфиг ядра не входят: имена, описание, служебное (исходную ссылку меняет и имя).
+_NOT_CONNECTION = ("name", "custom_name", "description", "warnings", "country", "sub", "raw")
+
+
+def _connection(server: Server) -> dict:
+    """Параметры подключения сервера — для сравнения работающего конфига с обновлённой подпиской."""
+    data = server.to_dict()
+    for key in _NOT_CONNECTION:
+        data.pop(key, None)
+    return data
+
+
+def _without_name(profile: dict) -> dict:
+    return {key: value for key, value in profile.items() if key != "name"}
+
+
 def _bypass_shape(profiles: list, voice: list[str]) -> tuple:
     """Что из профилей «через обход» попадает в правила конфига (содержимое файлов — нет)."""
     return (tuple((p.network, tuple(p.ports), str(p.domains_file or ""), str(p.ips_file or ""),
@@ -3862,9 +4588,44 @@ def _public(server: Server, noises: bool) -> dict:
 
 
 def _latency_entry(value: Any) -> dict:
+    """Задержка для страницы; reason — чья сторона у «нет ответа» (только вместе с ошибкой)."""
     if isinstance(value, dict):
-        return {"ms": value.get("ms"), "at": value.get("at"), "error": value.get("error")}
-    return {"ms": None, "at": None, "error": None}
+        error = value.get("error")
+        return {"ms": value.get("ms"), "at": value.get("at"), "error": error,
+                "reason": diagnose.public_reason(value.get("reason")) if error else None}
+    return {"ms": None, "at": None, "error": None, "reason": None}
+
+
+def _no_answer(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("ms") is None and bool(value.get("error"))
+
+
+def _not_measured(value: dict) -> bool:
+    """Ошибка задержки — не молчание сервера: его не мерили (kill switch, конфиг не собрался)."""
+    reason = value.get("reason")
+    code = reason.get("code") if isinstance(reason, dict) else None
+    return value.get("error") == KILLSWITCH_DELAY or code in ("killswitch", "unsupported")
+
+
+def _timed(server: Server) -> bool:
+    """Сервер сверяет время клиента: часы, сбитые больше чем на минуту-две, — отказ."""
+    return server.proto in TIMED_PROTOCOLS or server.security == "reality"
+
+
+def _sni(server: Server) -> str | None:
+    """Имя для прямого рукопожатия TLS — как его пошлёт ядро: sni, иначе host транспорта, иначе имя сервера."""
+    host = (server.transport or {}).get("host")
+    for name in ((server.tls or {}).get("sni"), host if isinstance(host, str) else None, server.host):
+        if name and not _is_ip(str(name)):
+            return str(name)
+    return None
+
+
+def _stopped_reason(name: str, kind: str) -> diagnose.Reason:
+    """Ядро упало или не перезапустилось: помощник Xray без внятной причины — его ошибка, а не sing-box."""
+    if name == "xray" and kind in ("core", "other"):
+        kind = "helper"
+    return diagnose.explain(diagnose.Facts(kind=kind, fatal=True))
 
 
 def _speed_entry(value: Any) -> dict | None:

@@ -1,5 +1,4 @@
 import logging
-import os
 import socket
 
 import pytest
@@ -10,8 +9,6 @@ from app.tgproxy import loader
 from app.tgproxy.manager import TgError, TgProxyManager, explain_bind_error
 
 from .mtproto_probe import probe
-
-NETWORK = os.environ.get("LAZEYKA_NO_NETWORK") != "1"
 
 
 def _free_port() -> int:
@@ -108,7 +105,7 @@ def test_start_stop_listens(manager):
         socket.create_connection(("127.0.0.1", port), timeout=1).close()
 
 
-@pytest.mark.skipif(not NETWORK, reason="без сети")
+@pytest.mark.network
 def test_telegram_answers_through_proxy(manager, caplog):
     caplog.set_level(logging.INFO)
     manager.start()

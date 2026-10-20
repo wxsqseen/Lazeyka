@@ -313,6 +313,28 @@
   font-size: 12.5px;
 }
 
+/* Совсем узко: «Автоматически» и «Вручную» друг под другом, цифры — по две в ряд. */
+@container app (max-width: 760px) {
+  .connect {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .connect__col {
+    padding-right: 0;
+  }
+
+  .connect__col--manual {
+    padding: 16px 0 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .is-dirty .form-actions__text {
   color: var(--text);
 }

@@ -64,10 +64,8 @@ def test_read_game_filter_old_and_new_formats(tmp_path):
     assert migrate.read_game_filter(none) is None
 
 
-def test_root_from_binary():
-    import tempfile
-    from pathlib import Path
-    root = _fake_zapret(Path(tempfile.mkdtemp()) / "z", None)
+def test_root_from_binary(tmp_path):
+    root = _fake_zapret(tmp_path / "z", None)
     sys_path = root / "bin" / "WinDivert64.sys"
     assert migrate._root_from_binary(f"\\??\\{sys_path}") == root
     assert migrate._root_from_binary(f'"{root / "bin" / "winws.exe"}" --wf-tcp=80') == root
@@ -99,3 +97,32 @@ def test_hosts_plan_comments_conflicts_and_keeps_block():
     assert plan["conflicts"] == ["1.2.3.4 github.com"]
     assert hosts.BEGIN not in plan["outside"] and "9.9.9.9 old.example" not in plan["outside"]
     assert ("162.159.135.232", "discord.com") in plan["missing"]
+
+
+def test_hosts_apply_disables_only_conflicting_names():
+    """Строка «старый адрес discord.com + внутреннее имя организации»: отключается discord.com, а внутреннее
+    имя остаётся действующим — его сопоставление не теряется."""
+    current = ["127.0.0.1 localhost", "10.0.0.5 discord.com intranet.corp  # офис"]
+    wanted = [("162.159.135.232", "discord.com")]
+    plan = hosts.plan("\n".join(current), wanted)
+    assert plan["conflicts"] == ["10.0.0.5 discord.com intranet.corp  # офис"]
+    body = hosts._disable_conflicts(plan["outside"], set(plan["conflicts"]), wanted)
+    assert body == ["127.0.0.1 localhost", hosts.DISABLED_PREFIX + current[1], "10.0.0.5 intranet.corp # офис"]
+    active = hosts.parse("\n".join(body))
+    assert ("10.0.0.5", "intranet.corp") in active and ("10.0.0.5", "discord.com") not in active
+    assert hosts._disable_conflicts(["1.2.3.4 discord.com"], {"1.2.3.4 discord.com"}, wanted) == [
+        hosts.DISABLED_PREFIX + "1.2.3.4 discord.com"], "других имён нет — строка просто отключена"
+
+
+def test_diagnostics_does_not_claim_timestamps_off_when_unknown(monkeypatch):
+    from app.zapret import diagnostics, netcfg
+    monkeypatch.setattr(netcfg, "tcp_timestamps_enabled", lambda: None)
+    monkeypatch.setattr(diagnostics.winutil, "service_list", lambda drivers=False: [])
+    monkeypatch.setattr(diagnostics.winutil, "service_query", lambda name, with_config=False: None)
+    monkeypatch.setattr(diagnostics, "_process_running", lambda name: False)
+    monkeypatch.setattr(diagnostics, "_vpn_item", lambda *a, **k: diagnostics._item("vpn", "VPN", "ok", "—"))
+    monkeypatch.setattr(diagnostics, "doh_configured", lambda: True)
+    monkeypatch.setattr(netcfg, "windivert_states", lambda: {})
+    item = next(i for i in diagnostics.run_all(None, False) if i["id"] == "tcp_ts")
+    assert item["status"] == "info" and "Не удалось узнать" in item["text"] and "Выключены" not in item["text"]
+    assert item["fix"]["id"] == "tcp_timestamps"

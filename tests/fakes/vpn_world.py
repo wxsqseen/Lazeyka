@@ -68,8 +68,8 @@ class FakeStore:
     def latency(self):
         return dict(self._latency)
 
-    def set_latency(self, sid, ms, error=None, *, save=True):
-        self._latency[sid] = {"ms": ms, "at": 1.0, "error": error}
+    def set_latency(self, sid, ms, error=None, *, reason=None, save=True):
+        self._latency[sid] = {"ms": ms, "at": 1.0, "error": error, **({"reason": reason} if reason else {})}
         self.calls.append(("set_latency", sid, save))
 
     def save(self):
@@ -412,10 +412,15 @@ class FakeKillSwitch:
     def __init__(self):
         self.active = False
         self.enabled_with = None
+        self.lan: list = []                      # (LUID, сети) Radmin и других виртуальных сетей
 
-    def enable(self, *, tun_luid, allow_apps, allow_nets):
+    def enable(self, *, tun_luid, allow_apps, allow_nets, allow_lan=()):
+        if tun_luid is None:                     # как настоящий: без своего TUN не включается
+            from app.vpnclient.killswitch import KillSwitchError
+            raise KillSwitchError("Kill switch: адаптер своего VPN не найден — включать запрет без него нельзя")
         self.active = True
         self.enabled_with = (tun_luid, list(allow_apps), list(allow_nets))
+        self.lan = list(allow_lan)
 
     def disable(self):
         self.active = False
@@ -425,14 +430,25 @@ class FakeResolver:
     def __init__(self):
         self.working = "https://1.1.1.1/dns-query"
         self.fail: set[str] = set()
+        self.fail_kind: dict[str, str] = {}           # имя → nxdomain | unreachable (по умолчанию unreachable)
+        self.failures: dict[str, str] = {}
         self.families: list[tuple[str, ...]] = []     # с какими семействами адресов спрашивали
+
+    @staticmethod
+    def address(host):
+        return "203.0.113." + str(sum(host.encode()) % 200 + 1)
+
+    def failure(self, host):
+        return self.failures.get(host)
 
     def resolve(self, host, preferred=None, *, families=("A",)):
         from app.vpnclient.manager import VpnClientError
         self.families.append(tuple(families))
         if host in self.fail:
+            self.failures[host] = self.fail_kind.get(host, "unreachable")
             raise VpnClientError("нет ответа DNS")
-        return "203.0.113." + str(sum(host.encode()) % 200 + 1)
+        self.failures.pop(host, None)
+        return self.address(host)
 
 
 @dataclass
@@ -455,9 +471,25 @@ class World:
     before_core_calls: list = field(default_factory=list)
     changes: int = 0
     group_delays: int = 0
+    # Прямые пробы для причины «нет ответа»: по адресу сервера (FakeResolver.address), по умолчанию — ok.
+    online: bool = True
+    system_dns: bool = True
+    tcp: dict = field(default_factory=dict)                 # адрес → ok | refused | timeout | reset | unreachable
+    handshakes: dict = field(default_factory=dict)          # адрес → ok | alert | reset | timeout
+    probes: list = field(default_factory=list)              # (вид пробы, адрес)
 
     def clock(self) -> float:
         return self.clock_value
+
+    def tcp_probe(self, host, port, timeout=None):
+        from app.vpnclient.diagnose import TcpProbe
+        self.probes.append(("tcp", host))
+        outcome = self.tcp.get(host, "ok")
+        return TcpProbe(outcome, 12.0 if outcome == "ok" else None)
+
+    def tls_probe(self, host, port, sni, timeout=None):
+        self.probes.append(("tls", host))
+        return self.handshakes.get(host, "ok")
 
     def advance(self, seconds: float) -> None:
         self.clock_value += seconds
@@ -493,8 +525,10 @@ def make_manager(tmp_path: Path, store: FakeStore, *, settings=None, is_admin: b
                 process=lambda *a, **kw: FakeProcess(world, *a, **kw),
                 clash=lambda port, secret: FakeClient(world, port, secret), sampler=FakeSampler,
                 resolver=resolver, free_port=free_port, port_open=lambda port: True, taken_nets=lambda: [],
-                physical_interface=lambda: "Ethernet", adapter_luid=lambda name: 42, exit_check=exit_check,
-                direct_date=lambda: None, speed_check=lambda *a: 87.4, tcp_reach=lambda *a: 12.0,
+                physical_interface=lambda overrides=None: "Ethernet", lan_networks=lambda: [],
+                tun_luid=lambda address: 42, exit_check=exit_check,
+                direct_date=lambda: None, speed_check=lambda *a: 87.4, tcp_probe=world.tcp_probe,
+                tls_probe=world.tls_probe, online=lambda: world.online, system_dns=lambda host: world.system_dns,
                 memory=lambda pid: pid * 1000, running_apps=lambda: [{"name": "game.exe", "path": "C:/g/game.exe"}],
                 adapters=lambda: [], opener=lambda route: route, clock=world.clock, data_dir=tmp_path / "vpnclient")
     for key, value in overrides.items():
@@ -564,7 +598,7 @@ class FakeSubscription:
             raise answer
         return self.real.Fetched(200, {}, b"", url, user_agent=user_agent, hwid=bool(hwid))
 
-    def decode(self, body, headers=None, *, sub_id=None):
+    def decode(self, body, headers=None, *, sub_id=None, keep_local=False):
         answer = self.answers.get(self.calls[-1][0])
         if answer is None:
             return self.real.Decoded(format="links")

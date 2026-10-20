@@ -16,12 +16,27 @@ if TYPE_CHECKING:
 log = logging.getLogger("lazeyka.tray")
 
 WM_RBUTTONUP = 0x0205
-TOOLTIP_MAX = 127      # больше Windows в подсказке значка не показывает
+TOOLTIP_MAX = 127      # szTip — 128 единиц UTF-16 вместе с завершающим нулём
+NOTIFY_MAX = 255       # szInfo — 256 единиц UTF-16
 MENU_SERVERS = 20      # серверов в подменю «Сервер»; остальные — в окне
 ALERT_LINE = 44        # текст плашки в подсказке: строки состояния тоже должны поместиться в 127 знаков
 
 _NAMES = {"running": "работает", "starting": "запускается", "stopping": "останавливается",
           "stopped": "выключен", "error": "ошибка"}
+
+
+def utf16_cut(text: str, units: int) -> str:
+    """Не длиннее units единиц UTF-16 — так считают поля значка Windows. Флаг страны в имени сервера или
+    эмодзи — две единицы на символ: обрезка по символам переполняла szTip, и подсказка не обновлялась."""
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        size = 2 if ord(ch) > 0xFFFF else 1
+        if used + size > units:
+            break
+        out.append(ch)
+        used += size
+    return "".join(out)
 
 
 def _rate(value: float | int | None) -> str:
@@ -131,18 +146,18 @@ class Tray:
     def _tooltip(self) -> str:
         z = _NAMES.get(self.core.zapret.status, self.core.zapret.status)
         t = _NAMES.get(self.core.tg.status, self.core.tg.status)
-        lines = [APP_NAME, f"Discord и YouTube: {z}", f"Telegram: {t}"]
+        lines = [APP_NAME, f"Discord и YouTube: обход {z}", f"Telegram-прокси: {t}"]
         alerts = self._alerts()
         if alerts:   # сразу под именем: подсказку Windows обрезает по длине
             text = " ".join(str(alerts[0].get("text") or "").split())
-            if len(text) > ALERT_LINE:
-                text = text[:ALERT_LINE - 1].rstrip() + "…"
+            if utf16_cut(text, ALERT_LINE) != text:
+                text = utf16_cut(text, ALERT_LINE - 1).rstrip() + "…"
             more = f" (+{len(alerts) - 1})" if len(alerts) > 1 else ""
             lines.insert(1, f"Проблема: {text}{more}")
         vpn_line = self._vpn_line(self._vpn())
         if vpn_line:
             lines.append(vpn_line)
-        return "\n".join(lines)[:TOOLTIP_MAX]
+        return utf16_cut("\n".join(lines), TOOLTIP_MAX)
 
     # ------------------------------------------------------------ меню
 
@@ -159,7 +174,7 @@ class Tray:
                  enabled=lambda _i: core.zapret.available and bool(core.zapret.strategies)),
             item("Telegram-прокси", self._toggle_tg,
                  checked=lambda _i: core.tg.status in ("running", "starting")),
-            item("Подключить Telegram", lambda: core.tg_open_in_telegram()),
+            item("Подключить Telegram", self._open_telegram),
             item("Свой VPN", self._toggle_vpn,
                  checked=lambda _i: (self._vpn() or {}).get("status") in ("running", "starting"),
                  enabled=lambda _i: bool(self._server_choices(self._vpn())),
@@ -259,28 +274,62 @@ class Tray:
         if not result.get("ok"):
             self.notify(result.get("error", "Свой VPN не переключился"))
 
+    def _report(self, call, failure: str) -> dict:
+        """Вызов ядра из меню: ошибка — уведомлением, а не исключением в потоке значка."""
+        try:
+            result = call()
+        except (UserError, PermissionError, OSError, ValueError, RuntimeError) as exc:
+            result = {"ok": False, "error": str(exc)}
+        if not isinstance(result, dict):
+            result = {"ok": True}
+        if not result.get("ok"):
+            self.notify(result.get("error") or failure)
+        return result
+
+    def _vpn_asks(self, component: str) -> bool:
+        """Работает чужой VPN, про который нужно спросить («Работает VPN»): окно Лазейки, а не включение
+        вслепую — там можно включить совместимость. True — включать не надо."""
+        check = self._report(lambda: self.core.vpn_preflight(component), "VPN не проверен")
+        if not (check.get("ok") and check.get("ask")):
+            return False
+        self.core.show()
+        label = (check.get("vpn") or {}).get("label") or "VPN"
+        what = "обход" if component == "zapret" else "Telegram-прокси"
+        self.notify(f"Работает {label}. Включите {what} в окне Лазейки — там можно включить совместимость с VPN.")
+        return True
+
     def _choose(self, strategy_id: str):
         def action(_icon=None, _item=None) -> None:
-            result = self.core.zapret_set_strategy(strategy_id)
-            if not result.get("ok"):
-                self.notify(result.get("error", "Стратегия не применена"))
+            self._report(lambda: self.core.zapret_set_strategy(strategy_id), "Стратегия не применена")
         return action
 
     def _toggle_zapret(self, _icon=None, _item=None) -> None:
         core = self.core
-        try:
-            if core.zapret.status in ("running", "starting"):
-                core.zapret_stop()
-            else:
-                core.zapret_start()
-        except PermissionError as exc:
-            self.notify(str(exc))
+        if core.zapret.status in ("running", "starting"):
+            self._report(core.zapret_stop, "Обход не выключился")
+        elif not self._vpn_asks("zapret"):
+            self._report(core.zapret_start, "Обход не включился")
 
     def _toggle_tg(self, _icon=None, _item=None) -> None:
-        if self.core.tg.status in ("running", "starting"):
-            self.core.tg_stop()
-        else:
-            self.core.tg_start()
+        core = self.core
+        if core.tg.status in ("running", "starting"):
+            self._report(core.tg_stop, "Telegram-прокси не выключился")
+        elif not self._vpn_asks("tg"):
+            self._report(core.tg_start, "Telegram-прокси не включился")
+
+    def _open_telegram(self, _icon=None, _item=None) -> None:
+        """Как кнопка «Подключить Telegram»: прокси выключен — включить, затем открыть ссылку. Фоном: ядро
+        ждёт, пока прокси начнёт слушать порт, а поток значка ждать не должен."""
+        def work() -> None:
+            core = self.core
+            if core.tg.status not in ("running", "starting"):
+                if self._vpn_asks("tg") or not self._report(core.tg_start, "Telegram-прокси не включился").get("ok"):
+                    return
+            result = self._report(core.tg_open_in_telegram, "Telegram не открылся")
+            if result.get("ok") and result.get("warning"):
+                self.notify(result["warning"])
+
+        threading.Thread(target=work, name="tray-telegram", daemon=True).start()
 
     # ------------------------------------------------------------ жизненный цикл
 
@@ -303,7 +352,7 @@ class Tray:
 
     def notify(self, text: str) -> None:
         try:
-            self.icon.notify(text[:250], APP_NAME)
+            self.icon.notify(utf16_cut(text, NOTIFY_MAX), APP_NAME)
         except Exception:  # noqa: BLE001
             log.debug("Уведомление в трее не показано", exc_info=True)
 

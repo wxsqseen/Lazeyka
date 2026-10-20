@@ -5,9 +5,12 @@ import hashlib
 import json
 import logging
 import shutil
+import socket
 import threading
 import time
 import winreg
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -27,6 +30,15 @@ IPSET_URL = ("https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/
              "refs/heads/main/.service/ipset-service.txt")
 FULL_IPSET_FILE = "ipset-all.full.txt"
 ACTIVE_FAKES = {"discord": "ACTIVE_DISCORD_UDP.bin", "game": "ACTIVE_GAME_UDP.bin"}
+TESTING_ERROR = "Идёт подбор стратегии — дождитесь окончания или остановите его"
+SERVICE_STOP_ERROR = "Служба обхода не остановилась за 10 секунд — обход ещё работает"
+# Адреса Discord и YouTube: сервер VPN с таким же адресом из перехвата не исключаем (VPN через CDN).
+TARGET_HOSTS = ("discord.com", "gateway.discord.gg", "cdn.discordapp.com", "media.discordapp.net",
+                "www.youtube.com", "youtube.com", "redirector.googlevideo.com", "i.ytimg.com", "yt3.ggpht.com")
+TARGET_TTL = 600.0       # адреса держим 10 минут; пустой ответ не держим вовсе
+RESOLVE_TIMEOUT = 3.0    # DNS не ответил за это время — запуск обхода его не ждёт
+FILTER_RETRY_DELAY = 30.0   # фильтр совместимости с VPN не собрался — повтор запуска через столько секунд
+FILTER_RETRIES = 3
 
 Notify = Callable[[str, str], None]  # (уровень, текст)
 
@@ -35,7 +47,12 @@ class ZapretError(UserError):
     pass
 
 
+class FilterRefused(ZapretError):
+    """Рядом VPN в интернет, а фильтр совместимости не собрался: обычный перехват задел бы VPN."""
+
+
 _RETRY = {"label": "Включить снова", "call": "zapret_start", "args": []}
+SERVICE_ALERT = "zapret-service"   # служба запускает winws из прежнего пакета, перенастроить не вышло
 
 
 class ZapretManager:
@@ -52,6 +69,9 @@ class ZapretManager:
         self.process: WinwsProcess | None = None
         self.unavailable_reason: str | None = None
         self.paused_for_test = False
+        # Обход выключила страховка связи посреди проверки (zapret/guard.py): подбор, начатый в это время,
+        # считает его работавшим и вернёт сам; выход Лазейки возвращает службу. Сбрасывают start() и stop().
+        self.guard_paused = False
         self._restarts: list[float] = []
         self.av_removal_seen = False   # антивирус удалял файлы пакета (повод предложить исключение)
         # Домены, которые нужно добавить в списки ради других частей Лазейки (Telegram-прокси).
@@ -62,7 +82,12 @@ class ZapretManager:
         self._vpn_error_shown: str | None = None
         # Постоянная плашка Core (core.alert): поломки, найденные без нажатия человека. Без неё — уведомление.
         self.alert: Callable[..., None] | None = None
+        # Страховка связи Core (zapret/guard.py): guard_probe() — есть ли связь, пока новый winws не запущен;
+        # on_started(связь_была) — Лазейка запустила winws (сама или службой).
+        self.guard_probe: Callable[[], bool | None] | None = None
+        self.on_started: Callable[[bool | None], None] | None = None
         self._target_cache: tuple[float, set[str]] = (0.0, set())
+        self._filter_retries = 0
 
     def _alert(self, alert_id: str, level: str | None, text: str = "", action: dict | None = None,
                page: str | None = "zapret") -> None:
@@ -75,8 +100,9 @@ class ZapretManager:
     # ------------------------------------------------------------ подготовка
 
     def init(self) -> None:
-        if not self.is_admin:
-            self.unavailable_reason = "Для работы обхода нужны права администратора."
+        # Повторный init (пакет восстановлен после Defender) — с чистого листа: прежняя причина
+        # недоступности больше не правда.
+        self.unavailable_reason = None if self.is_admin else "Для работы обхода нужны права администратора."
         try:
             wanted = self.settings.get("zapret", "pack")
             current = pack.find(wanted)
@@ -86,12 +112,13 @@ class ZapretManager:
             broken = pack.problem_of(wanted) if current is None else None
             if broken:
                 self.av_removal_seen = True
-                restore = ("Ставлю его заново из встроенной копии." if wanted == pack.BUNDLED_VERSION and self.is_admin
-                           else "Переустановите его на странице «Обновления».")
-                self.notify("warn", f"Пакет стратегий {wanted} повреждён ({broken}) — похоже, файл удалил "
-                                    f"антивирус. {restore}")
             if self.is_admin:
-                bundled, fresh = pack.ensure_bundled()
+                try:
+                    bundled, fresh = pack.ensure_bundled()
+                except pack.PackError:
+                    if broken:
+                        self._notify_broken(wanted, broken, None)
+                    raise
                 # Выбор пользователя (в том числе откат) уважаем; встроенный пакет перебивает
                 # его, только если он новее и пришёл вместе с новой версией приложения.
                 if bundled is not None and (current is None or (
@@ -99,6 +126,8 @@ class ZapretManager:
                     current = bundled
             if current is None:
                 current = pack.newest()
+            if broken:
+                self._notify_broken(wanted, broken, current)
             if current is None:
                 self.unavailable_reason = self.unavailable_reason or "Пакет стратегий ещё не установлен."
                 return
@@ -110,7 +139,14 @@ class ZapretManager:
                 self.prepare_pack()  # режим IPSet, списки и фейки — сразу, чтобы окно показывало правду
                 if self.mode == "service":
                     self._load_service_filter()
-                self._align_service()
+                try:
+                    self._align_service()
+                except ZapretError as exc:
+                    # Служба работает по-старому — обход от этого не недоступен: плашка, а не «недоступно».
+                    log.warning("Служба обхода не перенастроена на пакет %s: %s", current.version, exc)
+                    self._alert(SERVICE_ALERT, "warn", f"Служба обхода запускает winws из прежнего пакета, а "
+                                                       f"перенастроить её на {current.version} не вышло: {exc}")
+                self._align_service_start()
                 keep = {current.version}
                 previous = [p for p in pack.installed() if p.version != current.version
                             and pack.version_key(p.version) < pack.version_key(current.version)]
@@ -120,9 +156,23 @@ class ZapretManager:
                 if service_pack:
                     keep.add(service_pack)       # пакет, из которого запускается служба, не трогаем
                 pack.cleanup(keep)
-        except (pack.PackError, OSError, ZapretError) as exc:
+        except (pack.PackError, OSError, ZapretError, ValueError) as exc:
             log.exception("Пакет стратегий не подготовлен")
             self.unavailable_reason = f"Пакет стратегий не подготовлен: {exc}"
+        except Exception as exc:  # noqa: BLE001 — непредвиденное: Лазейка (прокси, свой VPN) запускается без обхода
+            log.exception("Пакет стратегий не подготовлен из-за непредвиденной ошибки")
+            self.unavailable_reason = f"Пакет стратегий не подготовлен: {exc!r}"
+
+    def _notify_broken(self, wanted: str, problem: str, current: pack.PackInfo | None) -> None:
+        """Пакет повреждён — сказать, что с ним стало на самом деле (встроенный ставится заново, только
+        если новее его ничего не установлено)."""
+        if current is not None and current.version == wanted:
+            what = "Он поставлен заново из встроенной копии."
+        elif current is not None:
+            what = f"Обход работает на пакете {current.version}, а {wanted} можно переустановить на странице «Обновления»."
+        else:
+            what = "Переустановите его на странице «Обновления»."
+        self.notify("warn", f"Пакет стратегий {wanted} повреждён ({problem}) — похоже, файл удалил антивирус. {what}")
 
     # ------------------------------------------------------------ подбор: защита от прерывания
 
@@ -158,9 +208,9 @@ class ZapretManager:
                     log.warning("Режим IPSet не восстановлен: %s", exc)
         if data.get("service_was_running") and self.mode == "service":
             try:
-                winutil.service_start(SERVICE_NAME)
+                self.resume_service()
                 restored.append("служба обхода")
-            except winutil.ServiceError as exc:
+            except ZapretError as exc:
                 log.warning("Служба не запущена после прерванного подбора: %s", exc)
         log.warning("Прошлый подбор стратегии был прерван; восстановлено: %s", ", ".join(restored) or "нечего")
         if restored:
@@ -188,6 +238,20 @@ class ZapretManager:
         log.info("Служба запускает winws из другого пакета — перенастраиваю на %s", self.pack.version)
         self._service_apply(start=info.state == "running")
 
+    def _align_service_start(self) -> None:
+        """До 1.3 служба, выключенная человеком, оставалась в автозапуске Windows и после перезагрузки
+        включала обход сама. Выключен и не работает — запуск вручную («Включить» вернёт автозапуск)."""
+        if self.mode != "service" or self.settings.get("zapret", "was_running"):
+            return
+        info = winutil.service_query(SERVICE_NAME, with_config=True)
+        if info is None or info.state != "stopped" or info.start_type != winutil.SERVICE_AUTO_START:
+            return
+        try:
+            winutil.service_set_start(SERVICE_NAME, auto=False)
+            log.info("Обход выключен, а служба стартовала бы вместе с Windows — теперь она запускается вручную")
+        except winutil.ServiceError as exc:
+            log.warning("Служба выключенного обхода осталась в автозапуске Windows: %s", exc)
+
     def _activate_pack(self, info: pack.PackInfo) -> None:
         self.pack = info
         self.strategies, self.parse_errors = strategies.discover(info.path)
@@ -203,8 +267,10 @@ class ZapretManager:
 
         self.settings.update(mutate)
         if chosen not in ids and ids:
-            self.notify("warn", f"Стратегии «{chosen}» нет в пакете {info.version} — выбрана "
-                                f"«{self.settings.get('zapret', 'strategy')}».")
+            picked = self.settings.get("zapret", "strategy")
+            names = {s.id: s.label for s in self.strategies}
+            self.notify("warn", f"Стратегии «{strategies.label_for(chosen) if chosen else '—'}» нет в пакете "
+                                f"{info.version} — выбрана «{names.get(picked, picked)}».")
 
     @property
     def available(self) -> bool:
@@ -235,6 +301,11 @@ class ZapretManager:
         with self.lock:
             if not self.pack or not self.is_admin:
                 return
+            if self.paused_for_test:
+                # Пробы подбора идут при одних и тех же списках; обход после подбора запускается с
+                # prepare_pack (и служба — тоже), он и перенесёт новые домены.
+                log.info("Списки обхода обновлю после подбора стратегии")
+                return
             lists_dir = self.pack.path / "lists"
             before = {n: (lists_dir / n).read_bytes() if (lists_dir / n).exists() else b"" for n in lists.USER_LISTS}
             lists.sync_user_lists(paths.USER_LISTS_DIR, lists_dir, self._extra())
@@ -249,12 +320,8 @@ class ZapretManager:
         lists_dir = self.pack.path / "lists"
         lists.sync_user_lists(paths.USER_LISTS_DIR, lists_dir, self._extra())
         cfg = self.settings.get("zapret")
-        full_user = paths.USER_LISTS_DIR / FULL_IPSET_FILE
-        if cfg["ipset_custom"] and full_user.is_file():
-            current = lists.read_full_ipset(lists_dir)
-            fresh = full_user.read_text(encoding="utf-8", errors="replace")
-            if current is None or lists.count_entries(current) != lists.count_entries(fresh) or current.strip() != fresh.strip():
-                lists.store_full_ipset(lists_dir, fresh)
+        if cfg["ipset_custom"]:
+            self._apply_custom_ipset(lists_dir)
         mode = cfg["ipset_mode"]
         if mode and lists.detect_ipset_mode(lists_dir) != mode:
             try:
@@ -262,6 +329,35 @@ class ZapretManager:
             except ValueError as exc:
                 log.warning("Режим IPSet %s не применён: %s", mode, exc)
         self._apply_fakes(cfg["fakes"])
+
+    def _apply_custom_ipset(self, lists_dir: Path) -> None:
+        """Скачанный человеком список IP — в пакет, если он годен и свежее списка самого пакета."""
+        full_user = paths.USER_LISTS_DIR / FULL_IPSET_FILE
+        try:
+            fresh = full_user.read_text(encoding="utf-8", errors="replace")
+            downloaded_at = full_user.stat().st_mtime
+        except OSError:
+            return
+        if not lists.count_entries(fresh):
+            log.warning("Скачанный список IP пуст или испорчен — остаётся список из пакета")
+            return
+        if self._pack_published_after(downloaded_at):
+            # Новый пакет вышел позже, чем человек скачивал список: его список свежее.
+            log.info("Список IP пакета %s свежее скачанного — беру его", self.pack.version)
+            self.settings.update(lambda d: d["zapret"].__setitem__("ipset_custom", False))
+            return
+        current = lists.read_full_ipset(lists_dir)
+        if current is None or current.strip() != lists.normalize_text(fresh).strip():
+            lists.store_full_ipset(lists_dir, fresh)
+
+    def _pack_published_after(self, stamp: float) -> bool:
+        published = getattr(self.pack, "published_at", None)
+        if not published:
+            return False
+        try:
+            return datetime.fromisoformat(str(published).replace("Z", "+00:00")).timestamp() > stamp
+        except ValueError:
+            return False
 
     def build_args(self, strategy: strategies.Strategy) -> list[str]:
         assert self.pack is not None
@@ -271,22 +367,32 @@ class ZapretManager:
         return strategy.args(self.pack.path, game_tcp=tcp, game_udp=udp, game_any=legacy)
 
     def runtime_args(self, strategy: strategies.Strategy, record: bool = True) -> list[str]:
-        """Аргументы запуска winws. Рядом с VPN — с фильтром только по прямым интерфейсам и без
-        серверов VPN; если собрать его не вышло, обход запускается как обычно.
+        """Аргументы запуска winws. Рядом с VPN — с фильтром только по прямым интерфейсам и без серверов
+        VPN. Не собрался: при одних виртуальных сетях (Radmin, Hamachi) обход запускается как обычно; рядом
+        с VPN в интернет (план strict) — не запускается вовсе (FilterRefused): обычный перехват задел бы
+        туннель или соединение с сервером, и интернет пропал бы.
         record=False — для проб подбора: они не меняют то, что показывается о работающем обходе."""
         args = self.build_args(strategy)
         plan = None
         if self.vpn_plan is not None:
             try:
                 plan = self.vpn_plan()
-            except Exception:  # noqa: BLE001
-                log.exception("Сетевые адаптеры не прочитаны — обход запускается как обычно")
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Сетевые адаптеры не прочитаны")
+                if self.vpn_applied.get("mode") in ("vpn", "own"):
+                    # Только что рядом был VPN — без осмотра адаптеров обычный перехват мог бы его задеть.
+                    raise FilterRefused(f"Сетевые адаптеры не прочитаны ({exc}) — обход не запущен, чтобы не "
+                                        "задеть VPN") from exc
         if not plan:
             if record:
                 self.vpn_applied = {"mode": "plain"}
                 self._alert("zapret-vpnfilter", None)   # фильтр под VPN больше не нужен — и плашка о нём
             return args
-        servers = vpnfilter.guard_servers(plan["servers"], self._target_ips())[:vpnfilter.MAX_SERVERS]
+        own = [str(s) for s in plan.get("own_servers") or []]
+        foreign = [s for s in plan["servers"] if str(s) not in own]
+        # Свой сервер исключается всегда: совпади его адрес с Discord, обход менял бы транспорт своего VPN.
+        targets = self._target_ips() if foreign else set()
+        servers = vpnfilter.guard_servers(plan["servers"], targets, keep=own)[:vpnfilter.MAX_SERVERS]
         folder = paths.ZAPRET_DIR / "vpnfilter"
         try:
             path = vpnfilter.build(self.winws_exe, args, plan["interfaces"], servers,
@@ -294,13 +400,18 @@ class ZapretManager:
                                    keep_files=vpnfilter.KEEP_FILTERS if record else vpnfilter.KEEP_PROBES)
         except (vpnfilter.VpnFilterError, OSError, ValueError) as exc:
             log.warning("Фильтр для работы рядом с VPN не собран: %s", exc)
+            strict = bool(plan.get("strict"))
             if record:
                 self.vpn_applied = {"mode": "error", "error": str(exc), "interfaces": list(plan["interfaces"]),
                                     "servers_seen": list(plan["servers"])}
                 if self.alert is not None or self._vpn_error_shown != str(exc):
                     self._vpn_error_shown = str(exc)
-                    self._alert("zapret-vpnfilter", "warn", f"Совместимость с VPN не включилась ({exc}). Обход "
-                                                            "работает как обычно и может задевать трафик VPN.")
+                    tail = ("Чтобы не оборвать VPN, обход не запущен." if strict else
+                            "Обход работает как обычно и может задевать трафик VPN.")
+                    self._alert("zapret-vpnfilter", "warn", f"Совместимость с VPN не включилась ({exc}). {tail}")
+            if strict:
+                raise FilterRefused(f"Совместимость с VPN не включилась ({exc}) — обход не запущен, чтобы не "
+                                    "оборвать VPN") from exc
             return args
         if record:
             self._vpn_error_shown = None
@@ -330,19 +441,23 @@ class ZapretManager:
 
     def _target_ips(self) -> set[str]:
         """Адреса, по которым сейчас отвечают Discord и YouTube: сервер VPN с таким же адресом
-        из перехвата не исключаем (VPN через CDN)."""
-        import socket
+        из перехвата не исключаем (VPN через CDN). Имена — параллельно и не дольше RESOLVE_TIMEOUT:
+        запуск обхода идёт под блокировкой и без DNS ждал бы десятки секунд."""
         stamp, found = self._target_cache
-        if time.monotonic() - stamp < 600:
+        if found and time.monotonic() - stamp < TARGET_TTL:
             return found
         found = set()
-        for host in ("discord.com", "gateway.discord.gg", "cdn.discordapp.com", "media.discordapp.net",
-                     "www.youtube.com", "youtube.com", "redirector.googlevideo.com", "i.ytimg.com", "yt3.ggpht.com"):
-            try:
-                found |= {info[4][0].split("%")[0] for info in socket.getaddrinfo(host, 443)}
-            except OSError:
-                continue
-        self._target_cache = (time.monotonic(), found)
+        pool = ThreadPoolExecutor(max_workers=len(TARGET_HOSTS))
+        futures = [pool.submit(_resolve, host) for host in TARGET_HOSTS]
+        try:
+            for fut in as_completed(futures, timeout=RESOLVE_TIMEOUT):
+                found |= fut.result()
+        except TimeoutError:
+            log.info("DNS не ответил за %.0f с — адреса Discord и YouTube известны не все", RESOLVE_TIMEOUT)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        if found:   # пустой ответ (DNS ещё не поднялся) не держим: следующий запуск спросит снова
+            self._target_cache = (time.monotonic(), found)
         return found
 
     @property
@@ -360,55 +475,112 @@ class ZapretManager:
 
     def _ensure_not_testing(self) -> None:
         if self.paused_for_test:
-            raise ZapretError("Идёт подбор стратегии — дождитесь окончания или остановите его")
+            raise ZapretError(TESTING_ERROR)
 
     def start(self) -> None:
         with self.lock:
             self._check_ready()
             self._ensure_not_testing()
+            self.guard_paused = False
             if self.mode == "service":
                 self.status, self.error = "starting", None
-                self._service_apply(start=True)
+                self._service_apply(start=True)   # не вышло — статус «ошибка» ставит сама
                 self._remember_running(True)
                 return
-            if self.process and self.process.alive():
+            current = self.process
+            if current and current.alive():
                 self.status = "running"
                 return
-            strategy = self.strategy()
             self.status, self.error = "starting", None
             try:
+                strategy = self.strategy()
                 self._prestart_cleanup()
                 self.prepare_pack()
                 if self.settings.get("zapret", "tcp_timestamps"):
                     netcfg.ensure_tcp_timestamps()
                 holder: dict = {}
-                proc = WinwsProcess(self.winws_exe, self.runtime_args(strategy), label=strategy.label,
+                args = self.runtime_args(strategy)
+                online = self._probe_online()
+                proc = WinwsProcess(self.winws_exe, args, label=strategy.label,
                                     on_exit=lambda code, tail: self._on_crash(holder.get("proc"), code, tail))
                 holder["proc"] = proc
                 proc.start()
             except (RunnerError, ZapretError, OSError, ValueError) as exc:
-                self.status, self.error = "error", str(exc)
-                self.process = None
+                self._start_failed(str(exc), refused=isinstance(exc, FilterRefused))
                 raise ZapretError(str(exc)) from exc
+            except Exception as exc:
+                # Неожиданное — тоже ошибка запуска: «запускается» навсегда не нажать (кнопка ждёт конца).
+                self._start_failed(repr(exc))
+                raise
             self.process = proc
             self.status = "running"
+            self._filter_retries = 0
             self._remember_running(True)
+            self._started(online)
 
-    def stop(self, remember: bool = True) -> None:
+    def _start_failed(self, error: str, refused: bool = False) -> None:
+        self.status, self.error = "error", error
+        self.process = None
+        if refused and self._filter_retries < FILTER_RETRIES:
+            # Фильтр совместимости не собрался (файл занят, DLL не загрузилась) — бывает на секунды.
+            self._filter_retries += 1
+            log.info("Повторю запуск обхода через %.0f с (попытка %d из %d)", FILTER_RETRY_DELAY,
+                     self._filter_retries, FILTER_RETRIES)
+            timer = threading.Timer(FILTER_RETRY_DELAY, self._auto_restart)
+            timer.daemon = True
+            timer.start()
+
+    def _probe_online(self) -> bool | None:
+        """Есть ли связь, пока новый winws ещё не запущен (страховка Core); None — не проверяли."""
+        if self.guard_probe is None:
+            return None
+        try:
+            return self.guard_probe()
+        except Exception:  # noqa: BLE001 — проверка связи не мешает запуску обхода
+            log.debug("Связь перед запуском обхода не проверена", exc_info=True)
+            return None
+
+    def _started(self, online: bool | None) -> None:
+        """winws запущен Лазейкой — страховке Core пора смотреть, не пропал ли интернет."""
+        if self.on_started is None:
+            return
+        try:
+            self.on_started(online)
+        except Exception:  # noqa: BLE001
+            log.exception("Страховка связи не взведена")
+
+    def stop(self, remember: bool = True, hold: bool | None = None) -> None:
+        """remember=False — временно (перезапуск, подбор, страховка связи): включённым обход остаётся
+        в настройках, а служба — в автозапуске Windows. hold — снять службу с автозапуска и без запоминания
+        (страховка связи: с обходом пропадал интернет, а без Лазейки службу проверить некому)."""
         with self.lock:
+            self.guard_paused = False
             if self.mode == "service":
                 if self.is_admin:
-                    try:
-                        winutil.service_stop(SERVICE_NAME)
-                    except winutil.ServiceError as exc:
-                        raise ZapretError(str(exc)) from exc
-            elif self.process:
-                self.status = "stopping"
-                self.process.stop()
-                self.process = None
+                    self._stop_service(hold=remember if hold is None else hold)
+            else:
+                current = self.process
+                if current:
+                    self.status = "stopping"
+                    current.stop()
+                    self.process = None
             self.status, self.error = "stopped", None
             if remember:
                 self._remember_running(False)
+
+    def _stop_service(self, hold: bool) -> None:
+        """hold — выключил человек: служба больше не стартует вместе с Windows (до «Включить»)."""
+        try:
+            stopped = winutil.service_stop(SERVICE_NAME)
+        except winutil.ServiceError as exc:
+            raise ZapretError(str(exc)) from exc
+        if not stopped:
+            raise ZapretError(SERVICE_STOP_ERROR)
+        if hold and winutil.service_query(SERVICE_NAME) is not None:
+            try:
+                winutil.service_set_start(SERVICE_NAME, auto=False)
+            except winutil.ServiceError as exc:
+                log.warning("Служба обхода остановлена, но запуск вместе с Windows не выключен: %s", exc)
 
     def restart(self) -> None:
         with self.lock:
@@ -419,16 +591,20 @@ class ZapretManager:
         if self.mode == "service":
             info = winutil.service_query(SERVICE_NAME)
             return info is not None and info.state == "running"
-        return bool(self.process and self.process.alive())
+        current = self.process
+        return bool(current and current.alive())
 
     def _remember_running(self, value: bool) -> None:
         self.settings.update(lambda d: d["zapret"].__setitem__("was_running", value))
 
     def _prestart_cleanup(self) -> None:
-        own = {self.process.pid} if self.process and self.process.pid else set()
+        current = self.process
+        own = {current.pid} if current and current.pid else set()
         own_service = winutil.service_query(SERVICE_NAME)
         if own_service and own_service.state == "running" and self.mode == "app":
-            winutil.service_stop(SERVICE_NAME)
+            # Осталась служба от режима «служба Windows»: два winws с одним фильтром не уживаются.
+            if not winutil.service_stop(SERVICE_NAME):
+                raise ZapretError(SERVICE_STOP_ERROR)
         others = foreign_winws(own)
         if others:
             raise ZapretError("Уже работает другой winws.exe (оригинальный zapret или другая программа). "
@@ -439,7 +615,7 @@ class ZapretManager:
         with self.lock:
             if proc is None or self.process is not proc:
                 return  # запоздалое сообщение о процессе, который уже заменён новым
-            ran_for = time.time() - (self.process.started_at or time.time())
+            ran_for = time.time() - (proc.started_at or time.time())
             self.process = None
             self.status, self.error = "error", explain_failure(code, tail)
         log.error("Обход остановился: %s", self.error)
@@ -449,7 +625,7 @@ class ZapretManager:
         # ошибка), Core снимет её, когда обход снова заработает.
         if ran_for > 60 and len(self._restarts) < 3:
             self._restarts.append(now)
-            self._alert("zapret-down", "warn", "winws неожиданно остановился — перезапускаю.", page=None)
+            self._alert("zapret-down", "warn", "winws неожиданно остановился — перезапускаем.", page=None)
             threading.Timer(3.0, self._auto_restart).start()
         else:
             self._alert("zapret-down", "error", f"Обход остановился: {self.error}", action=_RETRY, page=None)
@@ -458,14 +634,20 @@ class ZapretManager:
         try:
             if self.status == "error" and not self.paused_for_test:
                 self.start()
-        except ZapretError as exc:
+        except Exception as exc:  # noqa: BLE001 — поток таймера: ошибку видно только плашкой
+            if not isinstance(exc, ZapretError):
+                log.exception("Обход не перезапустился сам")
             self._alert("zapret-down", "error", f"Обход остановился, а перезапуск не удался: {exc}", action=_RETRY,
                         page=None)
 
     # ------------------------------------------------------------ настройки
 
+    # Пока идёт подбор, настройки обхода не меняются: пробы оцениваются при одних и тех же условиях,
+    # а служба Windows не перенастраивается у подбора за спиной.
+
     def set_strategy(self, strategy_id: str) -> None:
         with self.lock:
+            self._ensure_not_testing()
             self.strategy(strategy_id)
             self.settings.update(lambda d: d["zapret"].__setitem__("strategy", strategy_id))
             self._apply_if_running()
@@ -483,6 +665,7 @@ class ZapretManager:
         if errors:
             return errors
         with self.lock:
+            self._ensure_not_testing()
             self.settings.update(lambda d: d["zapret"].__setitem__(
                 "game_filter", {"mode": mode, "tcp": tcp_v, "udp": udp_v}))
             self._apply_if_running()
@@ -493,6 +676,7 @@ class ZapretManager:
             raise ZapretError("Неизвестный режим IPSet")
         with self.lock:
             self._check_ready()
+            self._ensure_not_testing()
             lists.set_ipset_mode(self.pack.path / "lists", mode)
             self.settings.update(lambda d: d["zapret"].__setitem__("ipset_mode", mode))
             self._apply_if_running()
@@ -500,9 +684,15 @@ class ZapretManager:
     def store_ipset(self, text: str) -> int:
         with self.lock:
             self._check_ready()
+            self._ensure_not_testing()
+            # Сначала в пакет: пустой или испорченный список store_full_ipset отвергает — тогда своя
+            # копия не пишется вовсе и при следующем запуске не сломает подготовку пакета.
+            lists_dir = self.pack.path / "lists"
+            count = lists.store_full_ipset(lists_dir, text)
             paths.USER_LISTS_DIR.mkdir(parents=True, exist_ok=True)
-            (paths.USER_LISTS_DIR / FULL_IPSET_FILE).write_text(text, encoding="utf-8")
-            count = lists.store_full_ipset(self.pack.path / "lists", text)
+            # Копия — в том же виде, что в пакете: prepare_pack сравнивает их как есть.
+            (paths.USER_LISTS_DIR / FULL_IPSET_FILE).write_bytes(
+                (lists.read_full_ipset(lists_dir) or lists.normalize_text(text)).encode("utf-8"))
             self.settings.update(lambda d: d["zapret"].__setitem__("ipset_custom", True))
             if lists.detect_ipset_mode(self.pack.path / "lists") == "loaded":
                 self._apply_if_running()
@@ -521,10 +711,11 @@ class ZapretManager:
             return True
 
     def _apply_if_running(self) -> None:
+        current = self.process
         if self.mode == "service":
             if winutil.service_query(SERVICE_NAME):
                 self._service_apply(start=self.running())
-        elif self.process and self.process.alive():
+        elif current and current.alive():
             self.stop(remember=False)
             self.start()
 
@@ -538,30 +729,58 @@ class ZapretManager:
                 return
             was_running = self.running() or self.settings.get("zapret", "was_running")
             if mode == "service":
-                if self.process:
-                    self.process.stop()
+                current = self.process
+                if current:
+                    current.stop()
                     self.process = None
                 self.settings.update(lambda d: d["zapret"].__setitem__("mode", "service"))
                 self._service_apply(start=was_running)
             else:
                 try:
+                    # Неостановленная служба после удаления работала бы дальше рядом с winws Лазейки.
+                    if not winutil.service_stop(SERVICE_NAME):
+                        raise ZapretError(f"{SERVICE_STOP_ERROR}; режим не изменён")
                     winutil.service_delete(SERVICE_NAME)
                 except winutil.ServiceError as exc:
                     raise ZapretError(f"Служба не удалена: {exc}") from exc
+                self._alert(SERVICE_ALERT, None)
                 self.settings.update(lambda d: d["zapret"].__setitem__("mode", "app"))
                 self.status = "stopped"
                 if was_running:
                     self.start()
 
     def _service_apply(self, start: bool) -> None:
-        """Создаёт или перенастраивает службу под текущие стратегию и пакет."""
+        """Создаёт или перенастраивает службу под текущие стратегию и пакет. Не вышло — статус «ошибка»
+        (не «запускается» навсегда) и ZapretError."""
+        try:
+            self._service_configure(start)
+        except ZapretError as exc:
+            self._service_failed(str(exc), start, refused=isinstance(exc, FilterRefused))
+            raise
+        except (winutil.ServiceError, RunnerError, OSError, ValueError) as exc:
+            self._service_failed(str(exc), start)
+            raise ZapretError(str(exc)) from exc
+        except Exception as exc:
+            self._service_failed(repr(exc), start)
+            raise
+
+    def _service_failed(self, error: str, start: bool, refused: bool = False) -> None:
+        """Запускали — статус «ошибка» (с повтором, если не собрался фильтр совместимости). Только
+        перенастраивали остановленную службу — она так и стоит, ошибку увидит тот, кто настраивал."""
+        if start:
+            self._start_failed(error, refused=refused)
+        elif self.status == "starting":
+            self.status, self.error = "error", error
+
+    def _service_configure(self, start: bool) -> None:
         self._check_ready()
         strategy = self.strategy()
         self.prepare_pack()
         if self.settings.get("zapret", "tcp_timestamps"):
             netcfg.ensure_tcp_timestamps()
-        if self.process:
-            self.process.stop()
+        current = self.process
+        if current:
+            current.stop()
             self.process = None
         others = foreign_winws(set())
         own = winutil.service_query(SERVICE_NAME)
@@ -569,22 +788,43 @@ class ZapretManager:
         if any(p.pid != own_pid for p in others):
             raise ZapretError("Уже работает другой winws.exe — сначала устраните конфликт.")
         binary = strategies.command_line(self.winws_exe, self.runtime_args(strategy))
-        try:
-            if own and own.state != "stopped" and not winutil.service_stop(SERVICE_NAME):
-                raise ZapretError("Служба обхода не остановилась за 10 секунд — перенастройка отменена")
-            winutil.service_create_or_update(SERVICE_NAME, SERVICE_DISPLAY, binary, SERVICE_DESCRIPTION,
-                                             depends_on=("BFE",), restart_on_failure=True)
-            self._save_service_filter()
-            if start:
-                winutil.service_start(SERVICE_NAME)
-                self.status, self.error = "running", None
-            else:
-                self.status = "stopped"
-        except winutil.ServiceError as exc:
-            self.status, self.error = "error", str(exc)
-            raise ZapretError(str(exc)) from exc
+        if own and own.state != "stopped" and not winutil.service_stop(SERVICE_NAME):
+            raise ZapretError("Служба обхода не остановилась за 10 секунд — перенастройка отменена")
+        # Вместе с Windows служба стартует, только пока обход должен работать: выключенный человеком
+        # обход после перезагрузки не включается сам.
+        auto = start or bool(self.settings.get("zapret", "was_running"))
+        winutil.service_create_or_update(SERVICE_NAME, SERVICE_DISPLAY, binary, SERVICE_DESCRIPTION,
+                                         auto_start=auto, depends_on=("BFE",), restart_on_failure=True)
+        self._save_service_filter()
+        self._alert(SERVICE_ALERT, None)
+        if start:
+            self._start_service()
+        else:
+            self.status = "stopped"
         log.info("Служба %s настроена на стратегию «%s»%s", SERVICE_NAME, strategy.label,
                  " и запущена" if start else "")
+
+    def _start_service(self) -> None:
+        online = self._probe_online()
+        winutil.service_start(SERVICE_NAME)
+        self.status, self.error = "running", None
+        self._filter_retries = 0
+        self._started(online)
+
+    def resume_service(self) -> None:
+        """Подбор закончился (или был прерван вместе с Лазейкой) — снова запустить службу. Её настройки
+        подбор не менял; списки, отложенные на время подбора, переносятся сейчас."""
+        with self.lock:
+            try:
+                self.prepare_pack()
+                self._start_service()
+            except (winutil.ServiceError, OSError, ValueError) as exc:
+                self.status, self.error = "error", str(exc)
+                raise ZapretError(str(exc)) from exc
+
+    def report_down(self, text: str) -> None:
+        """Обход лежит не по воле человека (подбор не вернул его) — плашка с «Включить снова»."""
+        self._alert("zapret-down", "error", text, action=_RETRY, page=None)
 
     def switch_pack(self, info: pack.PackInfo) -> None:
         """Переключение на только что установленный пакет (из обновлений или отката)."""
@@ -615,8 +855,10 @@ class ZapretManager:
                 self.status = "stopping"
             elif self.status != "error":
                 self.status = "stopped"
-        elif self.status == "running" and not (self.process and self.process.alive()):
-            self.status = "stopped" if self.error is None else "error"
+        else:
+            current = self.process
+            if self.status == "running" and not (current and current.alive()):
+                self.status = "stopped" if self.error is None else "error"
 
     def ipset_info(self) -> dict:
         """Режим IPSet и число подсетей; файл на 0,5 МБ перечитывается только при изменении."""
@@ -658,7 +900,8 @@ class ZapretManager:
             else:
                 text = f"Найдена служба {name} — другой обход блокировок, он конфликтует с zapret."
             found.append({"id": f"service:{name}", "text": text, "fix_label": "Удалить службу"})
-        own_pids = {self.process.pid} if self.process and self.process.pid else set()
+        current = self.process
+        own_pids = {current.pid} if current and current.pid else set()
         own = winutil.service_query(SERVICE_NAME)
         if own and own.pid:
             own_pids.add(own.pid)
@@ -679,7 +922,8 @@ class ZapretManager:
             raise ZapretError("Нужны права администратора")
         self._ensure_not_testing()
         if conflict_id == "process:winws":
-            own = {self.process.pid} if self.process and self.process.pid else set()
+            current = self.process
+            own = {current.pid} if current and current.pid else set()
             procs = foreign_winws(own)
             kill_processes(procs)
             return f"Остановлено процессов: {len(procs)}"
@@ -719,6 +963,7 @@ class ZapretManager:
         if len(text) > 2_000_000:
             raise ZapretError("Список слишком большой")
         with self.lock:
+            self._ensure_not_testing()
             lists.save_user_list(paths.USER_LISTS_DIR, name, text)
             if self.pack:
                 lists.sync_user_lists(paths.USER_LISTS_DIR, self.pack.path / "lists", self._extra())
@@ -739,6 +984,7 @@ class ZapretManager:
             raise ZapretError("Такого файла нет в пакете")
         with self.lock:
             self._check_ready()
+            self._ensure_not_testing()
             self.settings.update(lambda d: d["zapret"]["fakes"].__setitem__(slot, name))
             self._apply_fakes(self.settings.get("zapret", "fakes"))
             self._apply_if_running()
@@ -759,6 +1005,13 @@ class ZapretManager:
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _resolve(host: str) -> set[str]:
+    try:
+        return {info[4][0].split("%")[0] for info in socket.getaddrinfo(host, 443)}
+    except OSError:
+        return set()
 
 
 def _original_zapret_strategy() -> str | None:

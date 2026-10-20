@@ -393,7 +393,7 @@ class RunPlan:
     tls_fragment: bool = False
     mux: bool = False
     noises: bool = False
-    fingerprint: str | None = None                    # свой uTLS-отпечаток (None — из ссылки)
+    fingerprint: str | None = None                    # общий uTLS-отпечаток — серверам без своего fp
     lazeyka_exe: str = ""                             # путь exe Лазейки (в разработке — python.exe)
     xray_exe: str | None = None                       # путь xray.exe помощника
     physical_interface: str | None = None             # имя физического адаптера для sockopt.interface помощника

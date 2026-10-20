@@ -1,4 +1,4 @@
-import os
+import hashlib
 
 import pytest
 
@@ -6,12 +6,11 @@ from app import paths
 from app.updates import github
 from app.updates.manager import remove_component_dirs
 
-NETWORK = os.environ.get("LAZEYKA_NO_NETWORK") != "1"
-
 
 def test_git_blob_sha1_matches_git():
-    # git hash-object для "hello\n"
+    # git hash-object для "hello\n" и для пустого файла
     assert github.git_blob_sha1(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+    assert github.git_blob_sha1(b"") == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 
 
 def test_remove_component_dirs_keeps_only_wanted(tmp_path, monkeypatch):
@@ -35,7 +34,7 @@ def test_remove_component_dirs_without_folder_is_noop(tmp_path, monkeypatch):
     remove_component_dirs({"1.0.0"})  # не должно падать, если папки ещё нет
 
 
-@pytest.mark.skipif(not NETWORK, reason="без сети")
+@pytest.mark.network
 def test_vendored_proxy_matches_upstream_tag():
     entries = {e["path"]: e["sha"] for e in github.tree("Flowseal/tg-ws-proxy", "v1.11.2")
                if e.get("type") == "blob" and e["path"].startswith("proxy/") and e["path"].endswith(".py")}
@@ -47,7 +46,7 @@ def test_vendored_proxy_matches_upstream_tag():
         assert github.git_blob_sha1(local.read_bytes()) == sha, path
 
 
-@pytest.mark.skipif(not NETWORK, reason="без сети")
+@pytest.mark.network
 def test_latest_releases_have_checksums():
     zapret = github.latest_release("Flowseal/zapret-discord-youtube")
     zips = [a for a in zapret["assets"] if a["name"].endswith(".zip")]
@@ -102,10 +101,10 @@ def test_install_app_replaces_exe_and_keeps_backup(tmp_path, monkeypatch):
 
     monkeypatch.setattr(github, "download", fake_download)
     m = _mgr(tmp_path)
-    m.releases["app"] = {"version": "1.2.0",
-                         "assets": [{"name": "Lazeyka.exe", "url": "http://x", "sha256": "DEADBEEF"}]}
+    m.releases["app"] = {"version": "99.0.0", "assets": [{"name": "Lazeyka.exe", "sha256": "DEADBEEF",
+                         "url": "https://github.com/wxsqseen/Lazeyka/releases/download/v99.0.0/Lazeyka.exe"}]}
     msg = m._install_app()
-    assert exe.read_bytes() == b"NEWVERSION" and "1.2.0" in msg
+    assert exe.read_bytes() == b"NEWVERSION" and "99.0.0" in msg
     backup = m.settings.get("updates", "app_backup")
     assert backup and Path(backup).read_bytes() == b"OLD"
     assert not list(tmp_path.glob(".Lazeyka-*.new"))   # временный файл убран
@@ -432,3 +431,31 @@ def test_explicit_route_uses_given_opener(local_server):
 
     assert github.http_get(local_server, timeout=5, opener=Recording()) == b"direct"
     assert used == [local_server]
+
+
+# ------------------------------------------------------------ сверка SHA-256 скачанного
+
+def test_download_with_wrong_checksum_is_refused_and_removed(local_server, tmp_path):
+    """На эту сверку полагаются самообновление Лазейки и пакеты zapret: не тот файл — ошибка, на диске его нет."""
+    target = tmp_path / "Lazeyka.exe.new"
+    with pytest.raises(github.IntegrityError, match="Контрольная сумма"):
+        github.download(local_server, target, "0" * 64, timeout=5)
+    assert not target.exists()
+    good = hashlib.sha256(b"direct").hexdigest()
+    assert github.download(local_server, target, good.upper(), timeout=5) == good   # регистр хеша не важен
+    assert target.read_bytes() == b"direct"
+
+
+def test_install_app_with_wrong_checksum_keeps_running_exe(local_server, tmp_path, monkeypatch):
+    exe = _frozen_exe(tmp_path, monkeypatch, b"OLD")
+    # Сервер — свой, на 127.0.0.1: проверку «файл из релизов GitHub» здесь пропускаем, сверяется хеш.
+    monkeypatch.setattr("app.updates.manager._require_release_url", lambda url, repo: None)
+    m = _mgr(tmp_path)
+    m.releases["app"] = {"version": "99.0.0",
+                         "assets": [{"name": "Lazeyka.exe", "url": local_server, "sha256": "0" * 64}]}
+    with pytest.raises(github.IntegrityError):
+        m._install_app()
+    assert exe.read_bytes() == b"OLD", "работающий exe не заменён"
+    assert m.settings.get("updates", "app_backup") is None
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name != "s.json") == ["Lazeyka.exe"], \
+        "ни скачанного файла, ни отодвинутой копии"

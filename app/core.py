@@ -4,6 +4,7 @@ from __future__ import annotations
 import itertools
 import logging
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -16,8 +17,9 @@ from .settings import Settings, import_tgwsproxy_config
 from .tgproxy.manager import TgError, TgProxyManager
 from .updates.manager import UpdateManager
 from .zapret import diagnostics, hosts, migrate
-from .zapret.manager import ZapretError, ZapretManager
-from .zapret.tester import StrategyTester
+from .zapret.guard import GUARD_ALERT, GUARD_OFF_ALERT, ConnectivityGuard
+from .zapret.manager import TESTING_ERROR, ZapretError, ZapretManager
+from .zapret.tester import NoDirectPath, StrategyTester
 
 log = logging.getLogger("lazeyka.core")
 
@@ -33,13 +35,22 @@ _LOG_EVERY = 60.0          # повторяющуюся ошибку своег�
 ALERT_RANK = {"error": 3, "warn": 2, "info": 1, "success": 0}
 _ALERT_LOG = {"error": logging.ERROR, "warn": logging.WARNING}
 WATCHDOG_ALERT = "watchdog"        # сторож: Discord или YouTube перестали открываться
-GUARD_ALERT = "zapret-guard"       # после включения обхода не открывается даже проверочный сайт
+# GUARD_ALERT, GUARD_OFF_ALERT — плашки страховки связи (zapret/guard.py)
 ZAPRET_DOWN = "zapret-down"        # обход упал или не включился сам (снимается, когда снова работает)
+VPN_CONFIRM_SCANS = 2              # о подключённом VPN — только если его видно два осмотра подряд
 TG_DOWN = "tg-down"                # Telegram-прокси не включился сам (запуск, сон, смена сети)
 VC_DOWN = "vpnclient-autostart"    # свой VPN не включился при запуске Лазейки
 FILTER_ALERT = "zapret-filter"     # фильтр обхода не перестроился под сеть или свой VPN
 COMPAT_ALERT = "compat-off"        # подключён VPN, а совместимость с VPN выключена
+VPN_NOTE_WAIT = 90.0               # столько ждём фильтра под VPN, чтобы сказать «обход его не трогает»
 GUARD_RECHECK = 60.0               # «пропал интернет» висит — проверочный сайт раз в минуту, без сторожа
+UPDATE_CHECK_DELAY = 8.0           # проверка обновлений после запуска — когда всё уже включилось
+DEFENDER_CHECK_DELAY = 3.0
+SLEEP_GAP = 30.0                   # компьютер спал дольше — соединения мертвы, перезапускаем
+TG_REVIVE_PAUSE = 3.0              # прокси упал сам — перезапуск через столько секунд
+TG_REVIVE_EVERY = 60.0             # и не чаще: падает снова и снова — плашка «остановился»
+TG_START_WAIT = 15.0               # «Подключить Telegram»: столько ждём, пока прокси включится
+UPDATES_STOP_WAIT = 10.0           # выход: столько ждём, пока установка обновления доделает замену файлов
 ZAPRET_RETRY = {"label": "Включить снова", "call": "zapret_start", "args": []}
 TG_RETRY = {"label": "Включить снова", "call": "tg_start", "args": []}
 
@@ -55,6 +66,15 @@ def fail(message: str, **extra: Any) -> Result:
 def _stopped(what: str) -> str:
     """«Discord перестал открываться», но «Discord и YouTube перестали»."""
     return "перестали открываться" if " и " in what else "перестал открываться"
+
+
+def _sites_ok(results: list[dict]) -> bool | None:
+    """Открываются ли Discord и YouTube по результатам проверки: True/False — по тем из них, что
+    проверялись; None — ни одного нет (проверка упала с одной строкой «ошибка»)."""
+    sites = [r for r in results if r.get("id") in ("discord", "youtube")]
+    if not sites:
+        return None
+    return all(r.get("ok") for r in sites)
 
 
 class VpnClientUnavailable(UserError):
@@ -82,8 +102,9 @@ def vpnclient_placeholder(settings: dict, reason: str) -> dict:
     return {
         "available": False, "unavailable_reason": reason,
         "cores": {"sing-box": core(), "xray": core()},
-        "status": "stopped", "verified": False, "error": None, "error_kind": None,
-        "mode": vc.get("mode", "tun"), "started_at": None, "listen": None, "exit": None, "selected": None,
+        "status": "stopped", "verified": False, "error": None, "error_kind": None, "diagnosis": None,
+        "mode": vc.get("mode", "tun"), "started_at": None, "listen": None, "config_servers": None,
+        "exit": None, "selected": None,
         "stats": {"up": 0, "down": 0, "up_rate": 0.0, "down_rate": 0.0, "connections": 0},
         "history": [], "subscriptions": [], "groups": [], "servers": [],
         "latency": {"running": False, "done": 0, "total": 0},
@@ -103,8 +124,13 @@ def vpnclient_placeholder(settings: dict, reason: str) -> dict:
 
 
 class Core:
-    def __init__(self, autostarted: bool = False, log_dir: Path | None = None):
+    def __init__(self, autostarted: bool = False, log_dir: Path | None = None,
+                 startup_alerts: list[tuple[str, str, str]] | None = None, resume_service: bool = False):
+        """startup_alerts — (id, level, текст) плашек, найденных до Core (папка данных отложена и т. п.);
+        resume_service — служба обхода работала из недоверенной папки и остановлена перед её разбором."""
         self.autostarted = autostarted
+        self._startup_alerts = list(startup_alerts or [])
+        self._resume_service = resume_service
         self.is_admin = winutil.is_admin()
         self.log_dir = log_dir or paths.logs_dir(allow_create_data=self.is_admin)
         self.settings = Settings(paths.SETTINGS_FILE, allow_create=self.is_admin)
@@ -123,6 +149,9 @@ class Core:
         self.tester = StrategyTester(self.zapret, self.notify)
         self.zapret.extra_lists = self._tg_extra_lists
         self.tg = TgProxyManager(self.settings, self.notify)
+        self.tg.alert = self.alert
+        self.tg.on_crash = self._tg_crashed
+        self._tg_crash_at: float | None = None   # monotonic() — секунды с загрузки Windows, не с нуля
         self.updates = UpdateManager(self.settings, self.zapret, self.tg, self.notify, self.is_admin)
         self.diag_state: dict = {"running": False, "at": None, "items": []}
         self.busy: str | None = None
@@ -142,7 +171,8 @@ class Core:
         self._wd_next = 0.0
         self._wd_fails = 0
         self._wd_busy = False
-        self._last_wall = time.time()
+        self._sleep_mark: tuple[float, float] | None = None   # winutil.sleep_clock() на прошлом тике
+        self._tick_log_at: dict[str, float] = {}              # раздел тикера → когда его ошибку писали в журнал
         self._net_fp: frozenset | None = None
         self._best_id: str | None = None
         self._best_at: float | None = None
@@ -158,8 +188,15 @@ class Core:
         self.vpn_routes: dict | None = None
         self._vpn_scan_at = 0.0
         self._vpn_was_active: bool | None = None
+        self._vpn_seen: tuple[bool, int] = (False, 0)   # что видел последний осмотр и сколько осмотров подряд
         self.zapret.vpn_plan = self._vpn_plan
         self.tester.source = self._direct_source
+        self._wd_fix_failed: tuple | None = None    # сторож (auto) уже подбирал при этих настройках и сети — зря
+        # Страховка связи: после любого запуска winws Лазейкой — не пропал ли из-за него интернет.
+        self.guard = ConnectivityGuard(self.zapret, online=self._online, alert=self.alert,
+                                       busy=self._tester_busy, hint=lambda: self._vpn_conflict_hint().strip())
+        self.zapret.guard_probe = self.guard.probe
+        self.zapret.on_started = self.guard.started
         self._last_tray_key: tuple | None = None
         # Свой VPN (app/vpnclient). Везде — getattr(self, "vpnclient", None): тесты собирают Core.__new__.
         self.vpnclient_error: str | None = None
@@ -207,14 +244,19 @@ class Core:
                                 "недоступен, настройки не сохраняются. Telegram-прокси работает.",
                         "action": {"label": "Перезапустить с правами", "call": "relaunch_admin", "args": []},
                         "dismissible": False})
-        count = self.updates.available_count()
-        if count:
-            versions = ",".join(f"{key}:{rel['version']}" for key, rel in self.updates.releases.items()
-                                if rel and self.updates.is_available(key) and not self.updates.is_skipped(key))
+        pending = self.updates.pending_keys()
+        if pending:
+            # id — по тем же пунктам, что и счётчик: иначе автообновление ядра VPN «воскрешало» бы скрытую плашку.
+            versions = ",".join(f"{key}:{self.updates.releases[key]['version']}" for key in pending)
             out.append({"id": f"update:{versions}", "level": "info",
-                        "text": "Доступно обновление" + ("" if count == 1 else f"ий: {count}") +
-                                ". Скачается только если вы нажмёте «Установить».",
+                        "text": ("Доступно обновление" if len(pending) == 1 else f"Доступно обновлений: {len(pending)}") +
+                                ". Скачается, только если вы нажмёте «Установить».",
                         "action": {"label": "Посмотреть", "page": "updates"}, "dismissible": True})
+        restart = self.updates.app_restart_text()
+        if restart:
+            out.append({"id": "app-restart", "level": "info", "text": restart,
+                        "action": {"label": "Перезапустить", "call": "app_restart", "args": []},
+                        "dismissible": True})
         if self._conflicts:
             first = self._conflicts[0]
             out.append({"id": f"conflict:{first['id']}", "level": "warn", "text": first["text"],
@@ -378,6 +420,7 @@ class Core:
         down = not busy and z.status in ("stopped", "error")   # обход выключили или он упал — сторожить нечего
         if z.status == "running":
             self.clear_alert(ZAPRET_DOWN)
+            self.clear_alert(GUARD_OFF_ALERT)
         elif not busy and z.status == "stopped" and not self.settings.get("zapret", "was_running"):
             self.clear_alert(ZAPRET_DOWN)   # выключил человек — например, пока перестраивался фильтр
         if down or self.settings.get("zapret", "watchdog") == "off":
@@ -402,7 +445,7 @@ class Core:
 
     def _reconcile_fix(self) -> None:
         """«Найти и включить» закончился: удача снимает плашку сторожа, неудача подбора, запущенного
-        самим сторожем (режим auto), меняет текст «подбираю…» на итог."""
+        самим сторожем (режим auto), меняет текст «подбираем…» на итог."""
         tester = self.tester
         fix = getattr(tester, "fix_state", None) or {}
         finished = fix.get("finished_at")
@@ -413,11 +456,18 @@ class Core:
         with lock:
             since = (book.get(WATCHDOG_ALERT) or {}).get("since")
         what, self._wd_fixing = getattr(self, "_wd_fixing", None), None
+        if fix.get("stage") == "done" and fix.get("results"):
+            # Проверка «Найти и включить» — свежая проверка обхода: свой VPN узнает, что обход снова работает.
+            self.tester.check_state = {"running": False, "at": finished, "results": list(fix["results"]),
+                                       "direct": bool(fix.get("direct"))}
+            self._check_fp = self._zapret_fingerprint()
         if since is None or finished < since:
             return                  # подбор закончился раньше, чем сторож заметил поломку, — не про неё
         if fix.get("stage") == "done":
             self.clear_alert(WATCHDOG_ALERT)
         elif what and self.has_alert(WATCHDOG_ALERT):
+            # Сторож сам не повторяет подбор, пока не сменятся стратегия, фильтры, пакет или сеть.
+            self._wd_fix_failed = self._autofix_key()
             reason = str(fix.get("message") or "Подходящей стратегии не нашлось.")
             self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)}, а подобрать стратегию не вышло. "
                                                    f"{reason}",
@@ -433,10 +483,8 @@ class Core:
         self._guard_busy, self._guard_next = True, now + GUARD_RECHECK
 
         def check() -> None:
-            from .zapret.tester import control_ok
             try:
-                bind = self._direct_source()
-                if control_ok(bind=bind) or (bind and control_ok()):
+                if self._online():
                     self.clear_alert(GUARD_ALERT)
             except Exception:  # noqa: BLE001 — не вышло проверить: плашка остаётся, повтор через минуту
                 log.debug("Проверочный сайт не проверен", exc_info=True)
@@ -458,11 +506,18 @@ class Core:
         if check.get("running") or not results:
             return
         at = check.get("at") or 0
-        if since[WATCHDOG_ALERT] is not None and at > since[WATCHDOG_ALERT] and all(
-                r.get("ok") for r in results if r.get("id") in ("discord", "youtube")):
+        if since[WATCHDOG_ALERT] is not None and at > since[WATCHDOG_ALERT] and _sites_ok(results):
             self.clear_alert(WATCHDOG_ALERT)
         if since[GUARD_ALERT] is not None and at > since[GUARD_ALERT] and any(r.get("ok") for r in results):
             self.clear_alert(GUARD_ALERT)
+
+    def _bypass_ok(self) -> bool | None:
+        """Работает ли обход по последней проверке (сторож, «Проверить», «Найти и включить»), сделанной
+        при нынешних стратегии, фильтрах, процессе winws и сети. Устарела, не было или упала — None."""
+        check = self._fresh_check()
+        if check.get("running"):
+            return None
+        return _sites_ok(check.get("results") or [])
 
     def _alerts_key(self) -> tuple:
         return tuple((n["id"], n["level"], n["text"]) for n in self.active_alerts())
@@ -471,20 +526,27 @@ class Core:
 
     def startup(self) -> None:
         log.info("%s %s, администратор: %s, данные: %s", APP_NAME, __version__, self.is_admin, paths.DATA)
+        for alert_id, level, text in getattr(self, "_startup_alerts", []):
+            self.set_alert(alert_id, level, text)
+        if self.settings.recovered:
+            self.set_alert("settings-broken", "warn", self.settings.recovered)
         from .updates.manager import settle_app_files
-        settle_app_files(self.settings)   # прежняя версия — в backups, рядом с exe ничего лишнего
-        if self.first_launch and self.is_admin:
-            self._first_launch_import()
-        self.zapret.init()
         try:
-            self.tg.load_core()
+            settle_app_files(self.settings)   # прежняя версия — в backups, рядом с exe ничего лишнего
+        except Exception:  # noqa: BLE001 — уборка копий exe не должна мешать запуску
+            log.exception("Копии прежней версии Лазейки не разобраны")
+        try:
+            self.tg.load_core()               # до переноса настроек TG WS Proxy: их проверяет ядро
         except Exception as exc:  # noqa: BLE001
             log.exception("Ядро Telegram-прокси не загрузилось")
             self.set_alert("tg-core", "error", f"Ядро Telegram-прокси не загрузилось: {exc}", page="telegram")
+        if self.first_launch and self.is_admin:
+            self._first_launch_import()
+        self.zapret.init()
         vc = getattr(self, "vpnclient", None)
         if vc is not None:
             try:
-                vc.init()   # профили, системный прокси после аварии, осиротевший адаптер
+                vc.init()   # секреты профилей — в фильтр журнала, системный прокси после аварии
             except Exception as exc:  # noqa: BLE001 — обход и Telegram работают и без своего VPN
                 log.exception("Свой VPN не подготовлен")
                 self.set_alert("vpnclient-init", "error", f"Свой VPN не подготовлен: {exc}", page="vpnclient")
@@ -492,18 +554,46 @@ class Core:
         threading.Thread(target=self._autostart_components, name="autostart-components", daemon=True).start()
         threading.Thread(target=self._ticker, name="ticker", daemon=True).start()
         if self.settings.get("updates", "check"):
-            threading.Timer(8.0, lambda: self.updates.check_async(quiet=True)).start()
+            self._later(UPDATE_CHECK_DELAY, lambda: self.updates.check_async(quiet=True))
         if self.is_admin and self.zapret.av_removal_seen:
             # Файлы уже удаляли — выясним про Defender, чтобы предложить исключение.
-            threading.Timer(3.0, self.defender_check).start()
+            self._later(DEFENDER_CHECK_DELAY, self.defender_check)
+        self._startup_path_alerts()
         if self.is_admin and self.settings.get("startup", "autostart"):
+            problem = autostart.refusal()
+            if problem:
+                self.set_alert("autostart", "warn", problem,
+                               action={"label": "Выключить автозапуск", "call": "save_settings",
+                                       "args": [{"autostart": False}]})
             try:
-                autostart.sync()
+                autostart.sync(guard=self.updates.replacing)   # копию в Program Files выход дожидается
             except Exception as exc:  # noqa: BLE001
                 log.warning("Задание автозапуска не обновлено: %s", exc)
 
+    def _later(self, delay: float, fn: Callable[[], Any]) -> None:
+        """Отложенный запуск при старте: фоновым потоком (выход его не ждёт) и не после выхода."""
+        def run() -> None:
+            if not self._stop.is_set():
+                fn()
+        timer = threading.Timer(delay, run)
+        timer.daemon = True
+        timer.start()
+
+    def _startup_path_alerts(self) -> None:
+        """Переносной режим: путь к папке данных выбирает человек, а кириллицу и пробелы winws не любит."""
+        data = paths.DATA
+        if paths.is_portable() and (paths.has_non_ascii(data) or " " in str(data)):
+            self.set_alert("data-path", "warn",
+                           f"В пути к папке данных {data} есть кириллица или пробелы — обход (winws) может не "
+                           "запуститься. Перенесите Лазейку в папку с латинским путём без пробелов, например "
+                           r"C:\Lazeyka.", page="zapret")
+
     def _first_launch_import(self) -> None:
-        if import_tgwsproxy_config(self.settings):
+        # Под чужой учёткой (при запуске ввели пароль администратора) %APPDATA% — её, а не того, кто за
+        # компьютером: чужой конфиг переносить незачем.
+        if winutil.other_account():
+            log.info("Настройки TG WS Proxy не переносятся: Лазейка запущена от имени другой учётной записи")
+        elif import_tgwsproxy_config(self.settings, self._validate_tg):
             self.notify("success", "Перенесены настройки TG WS Proxy — ссылка в Telegram остаётся прежней.")
         try:
             root = migrate.find_original()
@@ -513,26 +603,63 @@ class Core:
         except Exception as exc:  # noqa: BLE001
             log.warning("Перенос настроек zapret не удался: %r", exc)
 
+    def _validate_tg(self, values: dict) -> tuple[dict, dict]:
+        try:
+            return self.tg.validate(values)
+        except TgError as exc:   # ядро не загрузилось: формат DC и доменов проверить нечем
+            log.warning("Настройки TG WS Proxy не проверены: %s", exc)
+            return {}, {"core": str(exc)}
+
     def _autostart_components(self) -> None:
+        """Каждый компонент — сам по себе: сбой одного (даже непредвиденный) не мешает остальным."""
         first = self.settings.get("first_run")
         start = self.settings.get("startup")
         if start["tg"] and (first or self.settings.get("tg", "was_running")):
             try:
                 self.tg.start()
-            except TgError as exc:   # включался сам — плашка, а не уведомление
+            except Exception as exc:  # noqa: BLE001 — включался сам: плашка, а не уведомление
+                if not isinstance(exc, UserError):
+                    log.exception("Telegram-прокси не включился при запуске")
                 self.set_alert(TG_DOWN, "error", f"Telegram-прокси не включился при запуске Лазейки: {exc}",
                                action=TG_RETRY)
         if (self.zapret.available and start["zapret"] and not first
                 and self.settings.get("zapret", "was_running")):
             try:
                 if self.zapret.mode == "app":
-                    self.zapret.start()
-                    self._arm_connectivity_guard()  # и при автозапуске: вдруг оборвёт интернет при входе
-            except ZapretError as exc:
+                    self.zapret.start()   # страховку связи взводит сам запуск (и при входе в Windows)
+            except Exception as exc:  # noqa: BLE001
+                if not isinstance(exc, (ZapretError, UserError)):
+                    log.exception("Обход не включился при запуске")
                 self.set_alert(ZAPRET_DOWN, "error", f"Обход не включился при запуске Лазейки: {exc}",
                                action=ZAPRET_RETRY)
+        if getattr(self, "_resume_service", False) and self.zapret.available and self.zapret.mode == "service":
+            # Служба работала из недоверенной папки и остановлена перед её разбором (security.stop_own_service):
+            # пакет поставлен заново — служба запускается снова уже из него, как была до разбора.
+            try:
+                self.zapret.start()
+            except Exception as exc:  # noqa: BLE001
+                if not isinstance(exc, (ZapretError, UserError)):
+                    log.exception("Служба обхода не запустилась после переустановки пакета")
+                self.set_alert(ZAPRET_DOWN, "error", f"Служба обхода не запустилась после переустановки пакета: {exc}",
+                               action=ZAPRET_RETRY)
+        self._guard_running_service()
         self._autostart_vpnclient(first, start)
         self._status_changed()
+
+    def _guard_running_service(self) -> None:
+        """Служба Windows запустила winws вместе с системой, без Лазейки: страховка проверяет связь и её —
+        иначе стратегия, рвущая интернет, рвала бы его при каждом старте Windows без присмотра."""
+        z, guard = self.zapret, getattr(self, "guard", None)
+        if guard is None or not self.is_admin or z.mode != "service":
+            return
+        try:
+            running = z.running()
+        except Exception:  # noqa: BLE001 — состояние службы не прочитано: проверять нечего
+            log.debug("Состояние службы обхода не прочитано", exc_info=True)
+            return
+        if running:
+            z.status = "running"
+            guard.started(None)
 
     def _autostart_vpnclient(self, first: bool, start: dict) -> None:
         """Свой VPN — после обхода (фильтр zapret уже собран) и не в первый запуск. Рядом с чужим
@@ -560,25 +687,51 @@ class Core:
         tick = 0
         while not self._stop.wait(1.0):
             tick += 1
-            try:
-                self._check_resume()
-                self.tg.sample()
-                self.zapret.refresh_status()
-                self._vpnclient_tick()
-                if tick % 5 == 1:
-                    self._conflicts = self.zapret.conflicts() if self.is_admin else []
-                    self._original_tgws = self.tg.original_running()
-                    self.tg.refresh_client()
-                    self._best_id, self._scores, self._best_at = self.tester.best_known()
-                    self._check_network()
-                self._watchdog_tick()
-                self._sync_bypass()
-                self._watch_own_vpn()
-                self._reconcile_alerts()
-                # Подсказка значка показывает скорость своего VPN — обновляем её и без смены статуса.
-                self._status_changed(force=tick % 5 == 0 and self._vpnclient_status() == "running")
-            except Exception:  # noqa: BLE001
-                log.exception("Ошибка фонового обновления состояния")
+            self._tick_once(tick)
+
+    def _tick_once(self, tick: int) -> None:
+        """Один тик. Каждый раздел — сам по себе: исключение в одном (например, чужое ядро прокси без
+        нужного счётчика) не останавливает сторожа, плашки и свой VPN."""
+        step = self._tick_step
+        step("сон", self._check_resume)
+        step("прокси", self.tg.sample)
+        step("обход", self.zapret.refresh_status)
+        step("свой VPN", self._vpnclient_tick)
+        if tick % 5 == 1:
+            step("конфликты", self._refresh_conflicts)
+            step("TG WS Proxy", self._refresh_original_tgws)
+            step("клиент Telegram", self.tg.refresh_client)
+            step("подбор", self._refresh_best)
+            step("сеть", self._check_network)
+        step("сторож", self._watchdog_tick)
+        step("маршрут обхода", self._sync_bypass)
+        step("сеть своего VPN", self._watch_own_vpn)
+        step("плашки", self._reconcile_alerts)
+        step("уведомление о VPN", self._vpn_note_tick)
+        # Подсказка значка показывает скорость своего VPN — обновляем её и без смены статуса.
+        step("значок", lambda: self._status_changed(force=tick % 5 == 0 and self._vpnclient_status() == "running"))
+
+    def _tick_step(self, name: str, fn: Callable[[], Any]) -> None:
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            # Раз в секунду одно и то же — в журнал не чаще раза в минуту на раздел.
+            book = getattr(self, "_tick_log_at", None)
+            if book is None:
+                book = self._tick_log_at = {}
+            now = time.monotonic()
+            if now - book.get(name, -_LOG_EVERY) >= _LOG_EVERY:
+                book[name] = now
+                log.exception("Ошибка фонового обновления состояния (%s)", name)
+
+    def _refresh_conflicts(self) -> None:
+        self._conflicts = self.zapret.conflicts() if self.is_admin else []
+
+    def _refresh_original_tgws(self) -> None:
+        self._original_tgws = self.tg.original_running()
+
+    def _refresh_best(self) -> None:
+        self._best_id, self._scores, self._best_at = self.tester.best_known()
 
     # ------------------------------------------------------------ свой VPN: связка
 
@@ -722,8 +875,9 @@ class Core:
                 ipset_mode = z.ipset_info().get("mode")
             except Exception:  # noqa: BLE001
                 log.debug("Режим IPSet для своего VPN не получен", exc_info=True)
+        # Итог проверки — только свежий: сменились стратегия, winws или сеть — прежний итог не про них.
         return ZapretView(running=z.status == "running", paused_for_test=bool(z.paused_for_test),
-                          last_ok=self.watchdog_state.get("last_ok"), strategy_args=args,
+                          last_ok=self._bypass_ok(), strategy_args=args,
                           pack_dir=pack_dir, ipset_mode=ipset_mode)
 
     def _sync_bypass(self, force: bool = False) -> None:
@@ -738,15 +892,16 @@ class Core:
             return
         cfg = self.settings.get("zapret")
         gf = cfg["game_filter"]
-        key = (z.status, bool(z.paused_for_test), self.watchdog_state.get("last_ok"), cfg["strategy"],
+        key = (z.status, bool(z.paused_for_test), self._bypass_ok(), cfg["strategy"],
                gf["mode"], gf["tcp"], gf["udp"], cfg["ipset_mode"], z.pack.version if z.pack else None)
         if key == getattr(self, "_bypass_key", None) and not force:
             return
-        self._bypass_key = key
         try:
             vc.set_bypass(self._zapret_view())
-        except Exception:  # noqa: BLE001
-            log.exception("Своему VPN не передано состояние обхода")
+        except Exception:  # noqa: BLE001 — ключ не запоминаем: следующий тик передаст снова
+            self._vc_log("Своему VPN не передано состояние обхода")
+            return
+        self._bypass_key = key
 
     @staticmethod
     def _check_vc_result(result: Any) -> Any:
@@ -790,13 +945,20 @@ class Core:
     # ------------------------------------------------------------ сон, сеть, сторож
 
     def _check_resume(self) -> None:
-        """Разрыв между тиками больше 30 с — компьютер спал: соединения мертвы, перезапускаем."""
-        now = time.time()
-        gap = now - self._last_wall
-        self._last_wall = now
-        if gap < 30:
+        """Компьютер спал дольше SLEEP_GAP — соединения мертвы, перезапускаем. Сон меряется часами Windows
+        с ним и без него (winutil.sleep_clock): перевод часов и подвисший на полминуты тикер — не сон."""
+        now = winutil.sleep_clock()
+        mark = getattr(self, "_sleep_mark", None)
+        self._sleep_mark = now
+        if mark is None:
             return
-        log.info("Похоже, компьютер выходил из сна (пауза %.0f с) — перезапускаю обход и прокси", gap)
+        slept = (now[0] - mark[0]) - (now[1] - mark[1])
+        if slept < SLEEP_GAP:
+            return
+        log.info("Компьютер выходил из сна (спал %.0f с) — перезапускаю обход и прокси", slept)
+        self._after_sleep()
+
+    def _after_sleep(self) -> None:
         vc = getattr(self, "vpnclient", None)
 
         def work() -> None:
@@ -847,6 +1009,8 @@ class Core:
                 self.background("vpn-net-change", self._alerting("vpnclient-net", on_error, vc.on_network_change,
                                                                  page="vpnclient"), on_error)
         self._net_fp = fp
+        if changed and getattr(self, "guard", None) is not None:
+            self.guard.network_changed()   # обход включали без связи — проверить его теперь
         if first or changed or time.monotonic() - self._vpn_scan_at > 30:
             self._vpn_watch(announce=not first)
 
@@ -869,7 +1033,14 @@ class Core:
     def _watchdog_check(self, mode: str) -> None:
         from .zapret.tester import control_ok, quick_check
         try:
-            bind = self._direct_source()
+            try:
+                bind = self._direct_source()
+            except NoDirectPath:
+                # Туннель в интернет есть, а пути мимо него нет: весь трафик — через VPN, обход не участвует.
+                self.watchdog_state.update(last_at=time.time(), last_ok=None, failing=[], vpn=True)
+                self._wd_fails = 0
+                self.clear_alert(WATCHDOG_ALERT)
+                return
             watch = {"discord", "youtube"}
             snap = self.vpn_snapshot
             if snap is not None and snap.foreign_active:
@@ -892,6 +1063,8 @@ class Core:
                 return
             if not control_ok(bind=bind):
                 log.info("Сторож: нет интернета — проверку пропускаю")
+                # Прежний итог больше не про сейчас: свой VPN не должен опираться на него.
+                self.watchdog_state.update(last_at=time.time(), last_ok=None, failing=[])
                 return
             self.clear_alert(GUARD_ALERT)       # проверочный сайт открывается — интернет есть
             fp = self._zapret_fingerprint()
@@ -911,8 +1084,14 @@ class Core:
             self._wd_fails = 0
             # Решение владельца: не уведомление раз в 10 минут, а плашка, пока не откроется снова.
             what = " и ".join(failing)
-            if mode == "auto":
-                self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)} — подбираю рабочую стратегию.",
+            repeat = (getattr(self, "_wd_fix_failed", None) == self._autofix_key()
+                      and self.has_alert(WATCHDOG_ALERT))
+            if mode == "auto" and repeat:
+                # Подбор при этих настройках и этой сети уже не помог: каждые 10 минут рвать обход новым
+                # перебором незачем — плашка с итогом висит, повтор — после перемен или по кнопке.
+                log.info("Сторож: %s по-прежнему не открывается, подбор при тех же условиях не повторяю", what)
+            elif mode == "auto":
+                self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)} — подбираем рабочую стратегию.",
                                page="zapret")
                 self._wd_fixing = what
                 self.tester.start_fix()
@@ -945,6 +1124,9 @@ class Core:
 
     def shutdown(self) -> None:
         self._stop.set()
+        guard = getattr(self, "guard", None)
+        if guard is not None:
+            guard.close()   # страховка не включит обход обратно посреди выхода
         # Сначала свой VPN: он возвращает системный прокси — даже если дальше что-то зависнет
         # (подбор ждём до 15 с), браузер не останется с прокси на мёртвый порт.
         vc = getattr(self, "vpnclient", None)
@@ -953,8 +1135,21 @@ class Core:
                 vc.shutdown()
             except Exception:  # noqa: BLE001
                 log.exception("Свой VPN не остановился")
+        try:
+            # Загрузки обновлений прерываются, а замена файлов (exe, ядро прокси) доделывается: иначе
+            # выход между двумя переименованиями оставил бы Лазейку без exe.
+            self.updates.shutdown(UPDATES_STOP_WAIT)
+        except Exception:  # noqa: BLE001
+            log.exception("Обновления не остановились")
         self.tester.cancel()
         self.tester.join(15)  # подбор сам вернёт обход и IPSet; иначе это сделает следующий запуск
+        if self.zapret.mode == "service" and self.zapret.guard_paused:
+            # Страховка выключила службу посреди проверки, вердикта нет: служба работает и без Лазейки —
+            # вернуть её, как было. До перезагрузки Windows её больше никто бы не запустил.
+            try:
+                self.zapret.resume_service()
+            except Exception:  # noqa: BLE001
+                log.exception("Служба обхода не возвращена после проверки связи")
         try:
             self.tg.stop(remember=False)
         except Exception:  # noqa: BLE001
@@ -971,6 +1166,7 @@ class Core:
     def state(self) -> dict:
         s = self.settings.snapshot()
         z = self.zapret
+        process = z.process   # одно чтение: параллельный stop() обнуляет поле
         vc_state = self._vpnclient_snapshot(s)
         updates = self.updates.snapshot(cores=vc_state.get("cores"))
         return {
@@ -983,7 +1179,7 @@ class Core:
                 "status": z.status, "error": z.error, "mode": s["zapret"]["mode"],
                 "strategy": s["zapret"]["strategy"],
                 "strategies": [{"id": st.id, "label": st.label} for st in z.strategies if st.usable],
-                "started_at": z.process.started_at if z.process else None,
+                "started_at": process.started_at if process else None,
                 "pack": {"version": z.pack.version if z.pack else None},
                 "game_filter": s["zapret"]["game_filter"],
                 "ipset": z.ipset_info(),
@@ -1028,7 +1224,7 @@ class Core:
         if not self.is_admin:
             raise PermissionError("Нужны права администратора — перезапустите Лазейку с ними")
 
-    def background(self, name: str, fn: Callable[[], Any], on_error: str) -> None:
+    def background(self, name: str, fn: Callable[[], Any], on_error: str) -> threading.Thread:
         def run() -> None:
             try:
                 fn()
@@ -1040,7 +1236,9 @@ class Core:
                 self.notify("error", f"{on_error}: {exc!r}")
             finally:
                 self._status_changed()
-        threading.Thread(target=run, name=name, daemon=True).start()
+        thread = threading.Thread(target=run, name=name, daemon=True)
+        thread.start()
+        return thread
 
     def finish_onboarding(self, opts: dict) -> Result:
         opts = opts or {}
@@ -1052,12 +1250,12 @@ class Core:
             d["updates"]["check"] = check
 
         self.settings.update(mutate)
+        if check:
+            self.updates.check_async(quiet=True)   # и при отказе автозапуска: остальные настройки сохранены
         if want_autostart:
             result = self.save_settings({"autostart": True})
             if not result["ok"]:
                 return result
-        if check:
-            self.updates.check_async(quiet=True)
         return ok()
 
     def save_settings(self, partial: dict) -> Result:
@@ -1084,7 +1282,7 @@ class Core:
             try:
                 self._require_admin()
                 if partial["autostart"]:
-                    target = autostart.enable()
+                    target = autostart.enable(guard=self.updates.replacing)   # копию выход дожидается
                     if paths.IS_FROZEN and target != paths.exe_path():
                         self.notify("info", f"Для автозапуска Лазейка скопирована в {target.parent} — "
                                             "туда может писать только администратор.")
@@ -1093,6 +1291,8 @@ class Core:
             except Exception as exc:  # noqa: BLE001
                 return fail(f"Автозапуск не изменён: {exc}")
             self.settings.update(lambda d: d["startup"].__setitem__("autostart", bool(partial["autostart"])))
+            if not partial["autostart"]:
+                self.clear_alert("autostart")   # кнопка плашки «Выключить автозапуск» сделала своё
 
         def mutate(d: dict) -> None:
             for key, (section, field) in mapping.items():
@@ -1103,7 +1303,8 @@ class Core:
         if "theme" in partial and self.on_theme:
             self.on_theme(partial["theme"])
         if not self.settings.writable:
-            return fail("Настройки не сохранены: нет прав на запись в " + str(paths.DATA))
+            return fail("Настройки не сохранены: " + (self.settings.write_blocked
+                                                      or f"нет прав на запись в {paths.DATA}"))
         return ok()
 
     def open_url(self, url: str) -> Result:
@@ -1138,6 +1339,21 @@ class Core:
             return fail("Запрос прав администратора отклонён")
         return fail("Не удалось перезапуститься с правами администратора")
 
+    def app_restart(self) -> Result:
+        """«Перезапустить» после самообновления или отката: новый exe (на месте прежнего) с --replace
+        дождётся, пока этот экземпляр выйдет, и запустится сам — с теми же правами."""
+        if not paths.IS_FROZEN:
+            return fail("Перезапуск после обновления работает только в собранном приложении")
+        command = paths.launch_command() + ["--replace"]
+        try:
+            subprocess.Popen(command, cwd=str(Path(command[0]).parent), close_fds=True,
+                             creationflags=winutil.CREATE_NEW_PROCESS_GROUP)
+        except OSError as exc:
+            return fail(f"Не удалось запустить Лазейку заново: {exc}")
+        log.info("Перезапуск: запущена %s, этот экземпляр выходит", command[0])
+        self.quit()
+        return ok()
+
     def show(self) -> None:
         if self.on_show:
             self.on_show()
@@ -1155,45 +1371,37 @@ class Core:
     # ------------------------------------------------------------ zapret
 
     def zapret_start(self, quiet: bool = False) -> Result:
-        """quiet — включили после окна «Работает VPN»: человек уже всё прочитал."""
+        """quiet — включили после окна «Работает VPN»: человек уже всё прочитал. Страховку связи взводит
+        сам запуск winws (ZapretManager.on_started)."""
         self._require_admin()
         self.clear_alert(ZAPRET_DOWN)   # человек включает сам — неудачу покажет ответ на нажатие
+        self.clear_alert(GUARD_OFF_ALERT)
         self.background("zapret-start", self.zapret.start, "Обход не запустился")
-        self._arm_connectivity_guard()
         if not quiet:
             self._vpn_note_on_start()
         return ok()
 
-    def _arm_connectivity_guard(self) -> None:
-        """После включения обхода проверяет, не пропал ли интернет вовсе (бывает при жёстком
-        конфликте с VPN или антивирусом). Если пропал — предлагает выключить обход, сам ничего
-        не переключает: вдруг человек как раз этого и хотел."""
-        def guard() -> None:
-            from .zapret.tester import control_ok
-            time.sleep(2)
-            bind = self._direct_source()
-            for _ in range(4):
-                if self.zapret.mode != "app" or self.zapret.status != "running" or self.zapret.paused_for_test:
-                    return
-                if control_ok(bind=bind):
-                    return  # контрольный сайт открывается — всё в порядке
-                time.sleep(2)
-            # Прямой путь мёртв. Если без привязки к прямому интерфейсу сайт открывается — это не
-            # «пропал интернет», а особенность VPN (kill switch глушит обход мимо туннеля): не пугаем.
-            if bind and control_ok():
-                return
-            via = (" Возможно, конфликт с VPN." if self.vpn_snapshot and self.vpn_snapshot.foreign_active else "")
-            self.set_alert(GUARD_ALERT, "error", "После включения обхода не открывается даже проверочный сайт — "
-                                                 f"похоже, пропал интернет.{via} Можно выключить обход и вернуть "
-                                                 "всё как было.",
-                           action={"label": "Выключить обход", "call": "zapret_stop", "args": []}, page="zapret")
-            self._guard_next = time.monotonic() + GUARD_RECHECK   # снова проверит тикер, пока плашка висит
+    def _online(self) -> bool:
+        """Для страховки связи: открылся ли хоть один проверочный адрес — мимо VPN, а если VPN не пускает
+        мимо себя (kill switch глушит прямой путь), то через него: это не «пропал интернет»."""
+        from .zapret.tester import control_ok
+        bind = self._direct_bind()
+        return control_ok(bind=bind) or (bind is not None and control_ok())
 
-        threading.Timer(1.0, lambda: self.background("zapret-guard", guard, "Проверка связи не удалась")).start()
+    def _direct_bind(self) -> str | None:
+        """Адрес прямого подключения или None — и когда VPN нет, и когда пути мимо него нет."""
+        try:
+            return self._direct_source()
+        except NoDirectPath:
+            return None
+
+    def _tester_busy(self) -> bool:
+        tester = self.tester
+        return bool(getattr(tester, "running", False) or getattr(tester, "fix_running", False))
 
     def zapret_stop(self) -> Result:
         self._require_admin()
-        for alert_id in (ZAPRET_DOWN, GUARD_ALERT, WATCHDOG_ALERT):   # выключили — тревожить незачем
+        for alert_id in (ZAPRET_DOWN, GUARD_ALERT, GUARD_OFF_ALERT, WATCHDOG_ALERT):   # выключили — тревожить незачем
             self.clear_alert(alert_id)
         self.background("zapret-stop", self.zapret.stop, "Обход не остановился")
         return ok()
@@ -1201,11 +1409,14 @@ class Core:
     def zapret_restart(self) -> Result:
         self._require_admin()
         self.clear_alert(ZAPRET_DOWN)
+        self.clear_alert(GUARD_OFF_ALERT)
         self.background("zapret-restart", self.zapret.restart, "Обход не перезапустился")
         return ok()
 
     def zapret_set_strategy(self, strategy_id: str) -> Result:
         self._require_admin()
+        if self.zapret.paused_for_test:
+            return fail(TESTING_ERROR)   # сразу, а не уведомлением из фона
         self.zapret.strategy(strategy_id)
         self.background("zapret-strategy", lambda: self.zapret.set_strategy(strategy_id),
                         "Стратегия не применена")
@@ -1276,12 +1487,18 @@ class Core:
         return {"list-general-user.txt": general, "list-exclude-user.txt": exclude}
 
     def _zapret_fingerprint(self) -> tuple:
-        """Всё, от чего зависит результат проверки доступности."""
+        """Всё, от чего зависит результат проверки доступности: настройки, процесс winws и сеть."""
+        process = self.zapret.process   # одно чтение: параллельный stop() обнуляет поле
+        return (self.zapret.status, *self._autofix_key(), process.started_at if process else None)
+
+    def _autofix_key(self) -> tuple:
+        """Условия, при которых подбор что-то решает: стратегия, фильтры, IPSet, пакет и сеть. Пока они те же,
+        сторож в режиме auto не повторяет неудачный подбор."""
         z = self.zapret
         cfg = self.settings.get("zapret")
         gf = cfg["game_filter"]
-        return (z.status, cfg["strategy"], gf["mode"], gf["tcp"], gf["udp"], cfg["ipset_mode"],
-                z.pack.version if z.pack else None, z.process.started_at if z.process else None)
+        return (cfg["strategy"], gf["mode"], gf["tcp"], gf["udp"], cfg["ipset_mode"],
+                z.pack.version if z.pack else None, getattr(self, "_net_fp", None))
 
     def _fresh_check(self) -> dict:
         """Результат проверки, только если с тех пор обход не менялся: старые «✓» не обманывают."""
@@ -1346,8 +1563,35 @@ class Core:
 
     def tg_start(self) -> Result:
         self.clear_alert(TG_DOWN)   # человек включает сам — неудачу покажет ответ на нажатие
-        self.background("tg-start", self.tg.start, "Telegram-прокси не запустился")
+        self._tg_start_job = self.background("tg-start", self.tg.start, "Telegram-прокси не запустился")
         return ok()
+
+    def _tg_crashed(self, error: str) -> None:
+        """Прокси работал и остановился сам (порт закрылся, ядро упало) — из потока прокси. Как у обхода:
+        плашка «перезапускаем» и одна попытка через TG_REVIVE_PAUSE; падает снова чаще раза в минуту или
+        не включается — плашка «остановился» с «Включить снова»."""
+        now = time.monotonic()
+        last = getattr(self, "_tg_crash_at", None)
+        recent, self._tg_crash_at = last is not None and now - last < TG_REVIVE_EVERY, now
+        if recent or self._stop.is_set():
+            self.set_alert(TG_DOWN, "error", f"Telegram-прокси остановился: {error}", action=TG_RETRY)
+            return
+        self.set_alert(TG_DOWN, "warn", f"Telegram-прокси остановился сам ({error}) — перезапускаем.")
+
+        def revive() -> None:
+            if self._stop.wait(TG_REVIVE_PAUSE) or self.tg.status != "error":
+                return              # выход или человек уже включил или выключил прокси сам
+            try:
+                self.tg.start()
+            except Exception as exc:  # noqa: BLE001
+                if not isinstance(exc, UserError):
+                    log.exception("Telegram-прокси не перезапустился после падения")
+                self.set_alert(TG_DOWN, "error", f"Telegram-прокси остановился и не перезапустился: {exc}",
+                               action=TG_RETRY)
+            finally:
+                self._status_changed()
+
+        threading.Thread(target=revive, name="tg-revive", daemon=True).start()
 
     def tg_stop(self) -> Result:
         self.clear_alert(TG_DOWN)
@@ -1360,13 +1604,20 @@ class Core:
         return ok()
 
     def tg_open_in_telegram(self) -> Result:
+        """Ссылку Telegram получает, только когда прокси уже слушает порт: «Подключить Telegram» включает
+        прокси и сразу зовёт этот метод — дожидаемся включения, а не отдаём ссылку на пустой адрес."""
+        job = getattr(self, "_tg_start_job", None)
+        if job is not None and job.is_alive():
+            job.join(TG_START_WAIT)
+        if self.tg.status != "running":
+            reason = f" ({self.tg.error})" if self.tg.status == "error" and self.tg.error else ""
+            return fail(f"Прокси не работает{reason} — Telegram через него не подключится. "
+                        "Включите прокси и нажмите «Подключить Telegram» снова.")
         link = self.tg.link()
         if not winutil.open_unelevated(link):
             winutil.set_clipboard(link)
             return fail("Не получилось открыть Telegram автоматически. Ссылка скопирована — "
                         "вставьте её в «Избранное» в Telegram и нажмите на неё.")
-        if self.tg.status not in ("running", "starting"):
-            return ok(warning="Прокси сейчас выключен — включите его, иначе Telegram не подключится.")
         return ok()
 
     def tg_copy_link(self) -> Result:
@@ -1409,7 +1660,9 @@ class Core:
             items: list[dict] = []
             try:
                 items = diagnostics.run_all(self.zapret.pack.path if self.zapret.pack else None,
-                                            self.zapret.running(), own=self._own_vpn())
+                                            self.zapret.running(), own=self._own_vpn(),
+                                            compat=bool(self.settings.get("vpn", "compat")),
+                                            overrides=self.settings.get("vpn", "overrides"))
             finally:
                 self.diag_state = {"running": False, "at": time.time(), "items": items}
 
@@ -1430,6 +1683,8 @@ class Core:
         except Exception:  # noqa: BLE001
             log.exception("Сетевые адаптеры не прочитаны")
             return self.vpn_snapshot
+        # Прямой маршрут пропал на время (Wi-Fi, сон) — VPN, который был, остаётся VPN.
+        vpn.keep_roles(snap, self.vpn_snapshot)
         self.vpn_snapshot, self._vpn_scan_at = snap, time.monotonic()
         return snap
 
@@ -1446,8 +1701,14 @@ class Core:
         return snap.own_plan()
 
     def _vpn_plan(self) -> dict | None:
-        """Для обхода: что исключить из перехвата. Вызывается при каждом запуске winws."""
-        plan = self._wanted_plan(self._vpn_scan())
+        """Для обхода: что исключить из перехвата. Вызывается при каждом запуске winws. own_servers —
+        свои серверы (исключаются всегда, даже совпав с адресом Discord); strict — рядом VPN в интернет
+        или свой VPN: не собрался фильтр — обход не запускается обычным перехватом, он задел бы VPN."""
+        snap = self._vpn_scan()
+        plan = self._wanted_plan(snap)
+        if plan and snap is not None:
+            plan = dict(plan, own_servers=list(snap.own_servers),
+                        strict=bool(snap.internet or snap.own_servers))
         self._handed_plan = dict(plan) if plan else None
         return plan
 
@@ -1509,18 +1770,22 @@ class Core:
     def _direct_source(self) -> str | None:
         """Для проверок обхода: адрес прямого подключения, если работает туннель VPN в интернет —
         полный или для части адресов (тогда неизвестно, каких именно). У VPN в режиме системного
-        прокси проверки и так идут мимо него: curl запускается с --noproxy."""
+        прокси проверки и так идут мимо него: curl запускается с --noproxy. Туннель есть, а прямого
+        адреса нет — NoDirectPath: проверка без привязки ушла бы в VPN и показала бы не обход, а VPN."""
         snap = self.vpn_snapshot
         if snap is None or not snap.internet:
             return None
-        return snap.source_ip()
+        source = snap.source_ip()
+        if source is None:
+            raise NoDirectPath()
+        return source
 
     def _vpn_watch(self, announce: bool) -> None:
         """Появился или пропал VPN, сменились интерфейсы — обновить фильтр работающего обхода."""
         snap = self._vpn_scan()
         if snap is None:
             return
-        active = snap.foreign_active   # объявляем только чужой VPN: свой включил сам человек
+        active = self._confirmed_vpn(snap.foreign_active)   # только чужой VPN: свой включил сам человек
         was = getattr(self, "_vpn_was_active", None)
         if announce and was is False and active:
             self._announce_vpn(snap)
@@ -1533,14 +1798,27 @@ class Core:
             return
         if self._filter_stale(snap):
             self._reapply_zapret("vpn-reapply", "Обход не перезапустился под новую сеть")
+        self._vpn_note_tick()
+
+    def _confirmed_vpn(self, seen: bool) -> bool:
+        """Работает ли чужой VPN — по VPN_CONFIRM_SCANS осмотрам подряд. Один осмотр мог застать пропавший
+        на секунду маршрут прямого подключения, и Radmin выглядел бы «VPN в интернет»: объявлять такое и
+        включать из-за него плашки незачем. Первый осмотр после запуска принимается сразу."""
+        last, streak = getattr(self, "_vpn_seen", (seen, 0))
+        streak = streak + 1 if seen == last else 1
+        self._vpn_seen = (seen, streak)
+        confirmed = getattr(self, "_vpn_was_active", None)
+        if confirmed is None or streak >= VPN_CONFIRM_SCANS:
+            return seen
+        return confirmed
 
     def _announce_vpn(self, snap: vpn.Snapshot) -> None:
         if self.zapret.status != "running" or not snap.foreign_active:
             return
         name = snap.foreign_label
         if self.settings.get("vpn", "compat"):
-            self.notify("info", f"Подключён VPN ({name}). Обход его не трогает: интерфейс и сервер VPN "
-                                "исключены из перехвата.", action={"label": "Что куда идёт", "page": "zapret"})
+            # Что обход VPN не трогает, скажем, когда фильтр под этот VPN соберётся (_vpn_note_tick).
+            self._vpn_note = ("connected", time.monotonic())
         else:
             # Плашка висит, пока VPN подключён и совместимость выключена: переподключения VPN не дёргают.
             self.set_alert(COMPAT_ALERT, "warn", f"Подключён VPN ({name}), а совместимость с VPN выключена — "
@@ -1549,14 +1827,71 @@ class Core:
                            page="zapret")
 
     def _vpn_note_on_start(self) -> None:
+        """Обход включают рядом с чужим VPN: сказать, как они уживаются, — когда обход запустится."""
         snap = self.vpn_snapshot
         if snap is None or not snap.foreign_active:
             return
-        if self.settings.get("vpn", "compat"):
-            self.notify("info", f"Обход включён рядом с VPN ({snap.foreign_label}): трафик VPN он не трогает.",
-                        action={"label": "Что куда идёт", "page": "zapret"})
-        else:
+        self._vpn_note = ("start", time.monotonic())
+
+    def _vpn_note_tick(self) -> None:
+        """Отложенное уведомление о чужом VPN рядом с обходом. «Обход его не трогает» — только когда обход
+        работает с фильтром, собранным под этот VPN: до этого оно было бы неправдой. Фильтр не собрался —
+        об этом говорит плашка zapret-vpnfilter, уведомления нет. Совместимость выключена — плашка compat-off."""
+        pending = getattr(self, "_vpn_note", None)
+        if pending is None:
+            return
+        kind, since = pending
+        snap, z = self.vpn_snapshot, self.zapret
+        if snap is None or not snap.foreign_active or time.monotonic() - since > VPN_NOTE_WAIT:
+            self._vpn_note = None
+            return
+        if (z.status != "running" or z.paused_for_test or self.tester.running or self.tester.fix_running
+                or (self.settings.get("vpn", "compat") and self._filter_stale(snap))):
+            return   # обход ещё запускается, идёт подбор или фильтр под VPN ещё не перестроен
+        self._vpn_note = None
+        if not self.settings.get("vpn", "compat"):
             self._announce_vpn(snap)
+            return
+        text = self._vpn_compat_text(snap, kind)
+        if text:
+            self.notify("info", text, action={"label": "Что куда идёт", "page": "zapret"})
+
+    def _vpn_compat_text(self, snap: vpn.Snapshot, kind: str) -> str | None:
+        """Что именно совместимость сделала с этим VPN — по применённому фильтру, а не по намерению."""
+        applied = self._applied_filter()
+        if applied.get("mode") == "error":
+            return None
+        name = snap.foreign_label
+        head = f"Подключён VPN ({name})." if kind == "connected" else f"Обход включён рядом с VPN ({name})."
+        filtered = applied.get("mode") == "vpn"
+        server = filtered and bool(set(applied.get("servers") or []) & set(snap.foreign_servers))
+        if snap.foreign_internet:
+            if not filtered:
+                return None
+            if server:
+                return f"{head} Обход его не трогает: интерфейс и сервер VPN исключены из перехвата."
+            return f"{head} Обход не трогает его туннель: интерфейс VPN исключён из перехвата."
+        if server:
+            return (f"{head} Он работает как системный прокси; соединение VPN с сервером исключено из перехвата "
+                    "обхода.")
+        return (f"{head} Он работает как системный прокси: браузер и программы, которые его слушают, идут через "
+                "VPN. Сервер VPN определить не удалось, поэтому обход может задевать соединение с ним — если VPN "
+                "начнёт рваться, выключите обход или включите в VPN-программе режим TUN.")
+
+    def _vpn_conflict_hint(self) -> str:
+        """Совет в плашке «обход выключен: с ним пропадал интернет» — по тому, что известно о VPN сейчас:
+        «включите совместимость» — только если она выключена."""
+        snap = self.vpn_snapshot
+        if snap is None or not snap.foreign_active:
+            return " Скорее всего, стратегия не подходит вашему провайдеру — попробуйте другую."
+        name = snap.foreign_label
+        if not self.settings.get("vpn", "compat"):
+            return f" Похоже на конфликт с VPN ({name}) — включите «Совместимость с VPN»."
+        if not snap.foreign_internet and not snap.foreign_servers:
+            return (f" Похоже на конфликт с VPN ({name}): он работает как системный прокси, и отделить его "
+                    "соединение от обхода не удалось — попробуйте другую стратегию или режим TUN в VPN-программе.")
+        return (f" Похоже на конфликт с VPN ({name}): совместимость с VPN включена, но не помогла — попробуйте "
+                "другую стратегию.")
 
     @staticmethod
     def _vpn_known(snap: vpn.Snapshot | None, known: list[str]) -> bool:
@@ -1710,15 +2045,23 @@ class Core:
         if not name:
             return fail("Некорректный адрес сайта")
         current = next((x["text"] for x in self.zapret.lists_get() if x["id"] == "list-general-user.txt"), "")
-        entries = [ln.strip() for ln in current.splitlines() if ln.strip() and not ln.strip().startswith("#")]
-        if name in entries:
+        lines = current.splitlines()
+        if name in (ln.strip() for ln in lines):
             return ok(message=f"{name} уже в «Моих сайтах»")
-        kept = [e for e in entries if e != zlists.PLACEHOLDER_DOMAIN]
+        # Дописываем в конец: пометки и заголовок, которые человек вёл в списке, остаются как были.
+        kept = [ln for ln in lines if ln.strip() != zlists.PLACEHOLDER_DOMAIN]
+        while kept and not kept[-1].strip():
+            kept.pop()
         self.zapret.lists_save("list-general-user.txt", "\n".join(kept + [name]) + "\n")
         self._sync_bypass(force=True)
         return ok(message=f"{name} добавлен в «Мои сайты»")
 
     def discord_clear_cache(self) -> Result:
+        if winutil.other_account():
+            # %APPDATA% — той учётной записи, чей пароль ввели при запуске, а Discord — того, кто за компьютером.
+            return fail("Лазейка запущена от имени другой учётной записи Windows (при запуске вводили пароль "
+                        "администратора) — кэш вашего Discord ей не виден. Очистите кэш вручную или запустите "
+                        "Лазейку из своей учётной записи.")
         report = diagnostics.clear_discord_cache()
         return ok(message="; ".join(report))
 
@@ -1831,29 +2174,55 @@ class Core:
 
     def _own_conflict(self, snap: vpn.Snapshot | None) -> dict | None:
         """Чужой VPN, с которым своему не ужиться: два TUN ломают маршруты друг другу, а в режиме
-        прокси Лазейка заменит чужой системный прокси (и вернёт его, когда выключится)."""
+        прокси Лазейка заменит чужой системный прокси (и вернёт его, когда выключится). Чужой туннель, через
+        который идёт интернет, а доказать «VPN в интернет» нечем (OpenVPN снял прямой маршрут и вывел сервер
+        маршрутом к /24, vpn.Snapshot.unproven), — тоже повод спросить: неопределённость — не повод молчать."""
         if snap is None:
             return None
         mode = self.settings.get("vpnclient", "mode")
         label = snap.foreign_label
-        if mode == "tun" and snap.foreign_internet:
+        unproven = getattr(snap, "unproven", None) or []
+        if mode == "tun" and (snap.foreign_internet or unproven):
+            lead = f"Уже работает {label}"
+            if not snap.foreign_internet:
+                label = snap.unproven_label()
+                lead = f"Интернет сейчас идёт через {label}"
+            denied = self._vc_proxy_denied()
+            if denied:
+                # Оба факта: чужой туннель и недоступный системный прокси — уйти в прокси не предлагаем.
+                return {"kind": "tunnel", "label": label, "proxy_denied": denied,
+                        "text": f"{lead} — два VPN мешают друг другу: выключите {label}."}
             return {"kind": "tunnel", "label": label,
-                    "text": f"Уже работает {label} — два VPN мешают друг другу: выключите {label} "
+                    "text": f"{lead} — два VPN мешают друг другу: выключите {label} "
                             "или включите Лазейку как системный прокси."}
         if mode == "proxy" and snap.proxy:
             return {"kind": "proxy", "label": label,
                     "text": f"Лазейка заменит системный прокси {label} и вернёт его, когда выключится."}
         return None
 
+    def _vc_proxy_denied(self) -> str | None:
+        """Почему режим «Системный прокси» своего VPN недоступен (чужая учётная запись UAC), или None."""
+        check = getattr(getattr(self, "vpnclient", None), "proxy_unavailable", None)
+        if not callable(check):
+            return None
+        try:
+            reason = check()
+        except Exception:  # noqa: BLE001 — зовётся и из снимка: не знаем — не мешаем
+            log.debug("Доступность системного прокси не проверена", exc_info=True)
+            return None
+        return str(reason) if reason else None
+
     def vpnclient_preflight(self) -> Result:
-        """Перед включением своего VPN: {ok, ask, conflict} — по образцу окна «Работает VPN»."""
+        """Перед включением своего VPN: {ok, ask, conflict} — по образцу окна «Работает VPN». Менеджер
+        спрашиваем всегда: он помнит свой отказ (uac_user) до следующего preflight — и снимает устаревший."""
         vc = self._vc()
         conflict = self._own_conflict(self._vpn_scan())
         check = getattr(vc, "preflight", None)
-        if conflict is None and callable(check):
-            extra = check()   # то, что видит только менеджер (например, чужая учётная запись UAC)
-            if isinstance(extra, dict) and extra.get("conflict"):
-                conflict = extra["conflict"]
+        extra = check() if callable(check) else None   # то, что видит только менеджер (чужая учётная запись UAC)
+        own = extra.get("conflict") if isinstance(extra, dict) else None
+        # Прокси под чужой учётной записью не включится вовсе — это важнее, чем «заменим чужой прокси».
+        if own and (conflict is None or conflict.get("kind") == "proxy"):
+            conflict = own
         return ok(ask=conflict is not None, conflict=conflict)
 
     def vpnclient_start(self, quiet: bool = False) -> Result:

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.vpnclient import config, routeprofile
+from app.vpnclient import config
 from app.vpnclient.routeprofile import RouteProfile, RouteProfileError, from_xray_routing, parse_happ, summary, to_rules
 
 # Пример из документации Happ (заголовок routing подписки).
@@ -69,8 +69,6 @@ def test_parse_refusals(text, kind, url, auto):
     with pytest.raises(RouteProfileError) as exc:
         parse_happ(text)
     assert (exc.value.kind, exc.value.url, exc.value.auto) == (kind, url, auto)
-    if kind == "url":
-        assert routeprofile.profile_url(text) == url
 
 
 def test_to_rules_happ():

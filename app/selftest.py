@@ -33,17 +33,6 @@ PINNED_CORES = {
              "url": "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip"},
 }
 
-
-def pinned_cores() -> dict[str, dict]:
-    """Закреплённые zip ядер, которые Лазейка скачивает при запуске: из vpnclient/engines.py (CORES),
-    иначе — константы плана."""
-    try:
-        from .vpnclient import engines
-    except ImportError:
-        return {name: dict(core) for name, core in PINNED_CORES.items()}
-    return {name: {"asset": s.asset, "size": s.zip_size, "sha256": s.zip_sha256, "url": s.release_url()}
-            for name, s in engines.CORES.items()}
-
 # Тестовые данные: адреса из диапазонов для документации, ключи — не настоящие.
 SAMPLE_UUID = "00000000-0000-4000-8000-00000000c0de"
 SAMPLE_PBK = "Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw"
@@ -182,6 +171,39 @@ def check_core_pins(frozen: bool) -> str:
     return "закреплены " + ", ".join(found) + "; адреса — релизы GitHub; текст GPL-3.0 на месте"
 
 
+def check_webp() -> str:
+    """QR своего VPN принимается и из .webp (vpnclient/qr.py): Pillow в сборке обязан её открыть.
+    Импорта библиотеки для этого мало — в 1.2.2 расширение _webp было исключено из exe."""
+    import io
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 255, 255)).save(buffer, format="WEBP")
+    buffer.seek(0)
+    with Image.open(buffer) as image:
+        image.load()
+        if image.format != "WEBP" or image.size != (8, 8):
+            raise ValueError(f"WebP прочитан неверно: {image.format} {image.size}")
+    return "WebP записывается и читается"
+
+
+# Оглавление папки licenses (build/third_party.py): «Название версия — лицензия: папка/файл, папка/файл».
+_LICENSE_LINE = re.compile(r"^.+ — .+: (?P<files>[^:]+)$")
+
+
+def check_licenses(root: Path, frozen: bool) -> str:
+    """Тексты лицензий сторонних компонентов (папка licenses сборки): оглавление на месте, и каждый
+    названный в нём файл — тоже. Из исходников папки нет: её собирает сборка."""
+    index = root / "README.txt"
+    if not frozen and not index.is_file():
+        return "запуск из исходников: папку licenses собирает сборка"
+    lines = [m for m in map(_LICENSE_LINE.match, index.read_text(encoding="utf-8").splitlines()) if m]
+    files = [name.strip() for m in lines for name in m.group("files").split(",")]
+    missing = [name for name in files if not (root / name).is_file()]
+    if not lines or missing:
+        raise FileNotFoundError(f"в {root} нет текстов лицензий: {missing[:5] or 'оглавление пустое'}")
+    return f"компонентов: {len(lines)}, текстов лицензий: {len(files)}"
+
+
 def _check(results: list, name: str, fn) -> None:
     started = time.perf_counter()
     try:
@@ -220,11 +242,12 @@ def run(report_path: str) -> int:
         return str(paths.ui_dir())
 
     def bundled_pack():
+        from .filehash import sha256_file
         from .zapret import pack, strategies
         manifest = pack.bundled_manifest()
         if manifest is None:
             raise FileNotFoundError("bundled.json")
-        digest = pack.sha256_file(manifest["zip"])
+        digest = sha256_file(manifest["zip"])
         if digest != manifest["sha256"]:
             raise ValueError("контрольная сумма встроенного пакета не совпала")
         with tempfile.TemporaryDirectory() as tmp:
@@ -296,6 +319,9 @@ def run(report_path: str) -> int:
     def vpnclient_cores():
         return check_core_pins(frozen=bool(getattr(sys, "frozen", False)))
 
+    def licenses():
+        return check_licenses(paths.resource_dir() / "licenses", frozen=bool(getattr(sys, "frozen", False)))
+
     _check(results, "Библиотеки", imports)
     _check(results, "Сертификаты", certifi_bundle)
     _check(results, "Файлы интерфейса", ui_files)
@@ -304,9 +330,11 @@ def run(report_path: str) -> int:
     _check(results, "Помощь и проверки", helpers)
     _check(results, "Сеть и VPN", network)
     _check(results, "Значок", icon)
+    _check(results, "Картинки WebP (QR)", check_webp)
     _check(results, "Свой VPN: модули", vpnclient_modules)
     _check(results, "Свой VPN: разбор и конфиг", vpnclient_parsing)
     _check(results, "Свой VPN: закреплённые ядра", vpnclient_cores)
+    _check(results, "Лицензии сторонних компонентов", licenses)
 
     report = {"version": __version__, "frozen": bool(getattr(sys, "frozen", False)),
               "ok": all(r["ok"] for r in results), "checks": results}

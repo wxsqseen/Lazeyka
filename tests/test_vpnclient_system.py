@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -207,20 +206,8 @@ class FakeRegistry:
             self.keys.setdefault("\\".join(parts[:count]), {})
         return self.Key(path)
 
-    def OpenKey(self, root, path):
-        assert root == self.HKEY_CURRENT_USER
-        if path not in self.keys:
-            raise FileNotFoundError(path)
-        return self.Key(path)
-
     def SetValueEx(self, key, name, reserved, kind, value):
         self.keys[key.path][name] = (value, kind)
-
-    def QueryValueEx(self, key, name):
-        try:
-            return self.keys[key.path][name]
-        except KeyError:
-            raise FileNotFoundError(name)
 
     def DeleteKey(self, root, path):
         assert root == self.HKEY_CURRENT_USER
@@ -242,18 +229,16 @@ def test_register_unregister_fake_only(monkeypatch):
         real_guard(action)
 
     monkeypatch.setattr(guard, "ensure_allowed", allowed)
-    assert not deeplink.registered()
+    key = r"Software\Classes\lazeyka"
+    assert not any(k.startswith(key) for k in registry.keys)
     exe = r"C:\Лазейка App\Lazeyka.exe"
     deeplink.register(exe)
-    assert deeplink.registered()
-    key = r"Software\Classes\lazeyka"
     assert registry.keys[key][""] == ("URL:Лазейка", 1)
     assert registry.keys[key]["URL Protocol"] == ("", 1)
     assert registry.keys[key + r"\DefaultIcon"][""] == (f'"{exe}",0', 1)
     assert registry.keys[key + r"\shell\open\command"][""] == (f'"{exe}" "%1"', 1)
     deeplink.unregister()
     deeplink.unregister()
-    assert not deeplink.registered()
     assert calls == ["регистрация ссылок lazeyka://"] * 3
     assert all(not k.startswith(key) for k in registry.keys)
 
@@ -292,6 +277,47 @@ def test_pipe_roundtrip_and_stop(pipe_name):
     assert not server._thread.is_alive()
     server.stop()
     assert not deeplink.send_to_running("text", timeout=0.05, pipe_name=pipe_name)
+
+
+def test_pipe_name_carries_windows_session():
+    """Имена каналов общие на компьютер, а Лазейка — одна на сеанс Windows: номер сеанса — в имени."""
+    assert deeplink.session_pipe_name(SimpleNamespace(session_id=lambda: 3)) == r"\\.\pipe\Lazeyka.Links.3"
+    session = ctypes.c_ulong()
+    kernel = ctypes.WinDLL("kernel32")
+    assert kernel.ProcessIdToSessionId(kernel.GetCurrentProcessId(), ctypes.byref(session))
+    assert deeplink.session_pipe_name() == rf"\\.\pipe\Lazeyka.Links.{session.value}"
+
+
+def test_default_pipe_of_receiver_and_sender_is_the_same(monkeypatch):
+    """Получатель и отправитель без явного имени вычисляют одно и то же имя канала своего сеанса. Префикс —
+    свой у теста: канал работающей Лазейки этого компьютера тест не трогает."""
+    monkeypatch.setattr(deeplink, "PIPE_NAME", rf"\\.\pipe\Lazeyka.Tests.{uuid.uuid4().hex}")
+    texts, received = [], threading.Event()
+    server = deeplink.LinkServer()
+    server.start(lambda text: (texts.append(text), received.set()))
+    try:
+        assert server.pipe_name == deeplink.session_pipe_name()
+        assert deeplink.send_to_running("lazeyka://import/https://vpn.test/a")
+        assert received.wait(3) and texts == ["lazeyka://import/https://vpn.test/a"]
+    finally:
+        server.stop()
+
+
+def test_sender_refuses_pipe_served_from_another_session(pipe_name, monkeypatch):
+    """Имя канала другой пользователь мог занять раньше Лазейки (имена общие на компьютер): ссылка с секретом
+    подписки уходит только процессу своего сеанса Windows."""
+    texts, received = [], threading.Event()
+    server = deeplink.LinkServer(pipe_name=pipe_name)
+    server.start(lambda text: (texts.append(text), received.set()))
+    try:
+        own = deeplink._PipeApi().session_id()
+        monkeypatch.setattr(deeplink._PipeApi, "server_session", lambda self, handle: own + 1)
+        assert not deeplink.send_to_running("lazeyka://import/https://vpn.test/secret", pipe_name=pipe_name)
+        monkeypatch.undo()
+        assert deeplink.send_to_running("valid", pipe_name=pipe_name)
+        assert received.wait(3) and texts == ["valid"], "чужому сеансу ничего не ушло, своему — ушло"
+    finally:
+        server.stop()
 
 
 def _open_pipe(pipe_name):
@@ -527,7 +553,7 @@ def test_killswitch_failure_rolls_back(stage):
     api = FakeWfp(fail=stage)
     switch = ks.KillSwitch(backend=api)
     with pytest.raises(ks.KillSwitchError, match="права администратора"):
-        switch.enable(tun_luid=None, allow_apps=[r"C:\VPN\core.exe"], allow_nets=[])
+        switch.enable(tun_luid=7, allow_apps=[r"C:\VPN\core.exe"], allow_nets=[])
     assert not switch.active and not api.rules and not api.allocations
     if stage not in ("open", "begin"):
         assert "abort" in api.calls
@@ -556,7 +582,7 @@ def test_killswitch_reconfigure_is_atomic():
 def test_killswitch_close_failure_keeps_state():
     api = FakeWfp()
     switch = ks.KillSwitch(backend=api)
-    switch.enable(tun_luid=None, allow_apps=[], allow_nets=[])
+    switch.enable(tun_luid=7, allow_apps=[], allow_nets=[])
     api.fail = "close"
     with pytest.raises(ks.KillSwitchError):
         switch.disable()
@@ -566,18 +592,35 @@ def test_killswitch_close_failure_keeps_state():
     assert not switch.active
 
 
+def test_killswitch_refuses_without_own_tun_and_keeps_previous_filters():
+    """Без LUID своего TUN фильтры закрыли бы интернет и самому VPN — включать нельзя; прежние фильтры
+    (перезапуск ядра) остаются, снимает их менеджер."""
+    api = FakeWfp()
+    switch = ks.KillSwitch(backend=api)
+    with pytest.raises(ks.KillSwitchError, match="адаптер своего VPN не найден"):
+        switch.enable(tun_luid=None, allow_apps=[], allow_nets=[])
+    assert not switch.active and api.calls == []
+    switch.enable(tun_luid=10, allow_apps=[], allow_nets=[])
+    before = copy.deepcopy(api.rules)
+    with pytest.raises(ks.KillSwitchError, match="адаптер своего VPN не найден"):
+        switch.enable(tun_luid=None, allow_apps=[], allow_nets=[])
+    assert switch.active and api.rules == before
+    switch.disable()
+
+
 def test_killswitch_guard_and_bad_inputs(monkeypatch):
     monkeypatch.setenv("LAZEYKA_NO_CORE", "1")
     real = ks.KillSwitch()
     with pytest.raises(guard.CoreBlocked, match="kill switch"):
-        real.enable(tun_luid=None, allow_apps=[], allow_nets=[])
+        real.enable(tun_luid=7, allow_apps=[], allow_nets=[])
     assert not real.active
     real.disable()
     api = FakeWfp()
     fake = ks.KillSwitch(backend=api)
     for options in [dict(tun_luid=-1, allow_apps=[], allow_nets=[]),
-                    dict(tun_luid=None, allow_apps=["core.exe"], allow_nets=[]),
-                    dict(tun_luid=None, allow_apps=[], allow_nets=["broken"]),
+                    dict(tun_luid=None, allow_apps=[], allow_nets=[]),
+                    dict(tun_luid=7, allow_apps=["core.exe"], allow_nets=[]),
+                    dict(tun_luid=7, allow_apps=[], allow_nets=["broken"]),
                     dict(tun_luid=2**64, allow_apps=[], allow_nets=[])]:
         with pytest.raises(ks.KillSwitchError):
             fake.enable(**options)
@@ -608,7 +651,7 @@ def fake_main(monkeypatch, tmp_path):
     tray = SimpleNamespace(start=lambda: calls.append("tray-start"), refresh=lambda: None,
                            stop=lambda: calls.append("tray-stop"), notify=lambda *a: None,
                            icon=SimpleNamespace())
-    instance = SimpleNamespace(already_running=False, signal_existing=lambda: calls.append("signal"),
+    instance = SimpleNamespace(already_running=False, signal_existing=lambda: calls.append("signal") or True,
                                listen=lambda show: calls.append("listen"), close=lambda: None,
                                wait_for_previous=lambda timeout: True)
 
@@ -656,7 +699,31 @@ def test_main_forwards_to_existing_instance(fake_main):
     env.instance.already_running = True
     link = "lazeyka://import/https://vpn.test/private"
     assert env.main.main([link, "--no-elevate"]) == 0
-    assert env.calls == [("send", link), "signal"]
+    assert env.calls == ["signal", ("send", link)]
+
+
+def test_main_waits_for_quitting_instance_instead_of_silent_exit(fake_main):
+    """Запуск сразу после «Выхода»: прежний экземпляр уже не принимает «покажи окно» — новый ждёт его
+    выхода и запускается, а не молча завершается."""
+    env = fake_main
+    env.instance.already_running = True
+    env.instance.signal_existing = lambda: env.calls.append("signal") or False
+    env.instance.wait_for_previous = lambda timeout: env.calls.append("wait") or True
+    assert env.main.main(["--no-elevate", "--hidden"]) == 0
+    assert env.calls[:2] == ["signal", "wait"] and "startup" in env.calls
+
+
+def test_main_link_before_window_waits_for_it(fake_main):
+    """Ссылка, пришедшая во время долгого запуска (до окна), не теряется: канал открыт до Core.startup,
+    а импорт — после загрузки окна."""
+    env = fake_main
+    early = "lazeyka://import/early"
+    env.core.vpnclient_deeplink = lambda text: env.calls.append(("import", text))
+    env.core.startup = lambda: (env.calls.append("startup"), env.server.on_text(early))
+    assert env.main.main(["--no-elevate", "--hidden"]) == 0
+    assert env.calls.index("link-start") < env.calls.index("startup")
+    assert env.calls.index("webview-start") < env.calls.index(("import", early))
+    assert env.calls.count(("import", early)) == 1
 
 
 def test_main_pending_and_incoming_links(fake_main):
@@ -671,7 +738,7 @@ def test_main_pending_and_incoming_links(fake_main):
 
     env.webview.start = run
     assert env.main.main(["--no-elevate", pending, "--hidden"]) == 0
-    assert env.calls.index("startup") < env.calls.index("link-start")
+    assert env.calls.index("link-start") < env.calls.index("startup"), "канал ссылок — до долгого запуска"
     assert env.calls.index("webview-start") < env.calls.index(("import", pending))
     assert env.calls.count(("import", pending)) == 1
     assert env.calls.count(("import", incoming)) == 1

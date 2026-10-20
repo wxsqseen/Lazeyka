@@ -1,8 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 # Сборка: powershell -ExecutionPolicy Bypass -File build\build.ps1
 import os
+import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+
+sys.path.insert(0, SPECPATH)
+import third_party  # noqa: E402 — build/third_party.py: лицензии того, что попало в exe
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 
@@ -46,7 +51,11 @@ hiddenimports = [
     "secrets", "hmac", "ipaddress", "zlib", "gzip", "uuid", "statistics", "selectors",
     "concurrent.futures", "http.client", "email.utils", "dataclasses", "enum", "heapq", "bisect",
     # QR: zxingcpp — пакет-обёртка над расширением; qrcode выбирает фабрику картинок по имени.
-    "zxingcpp", "zxingcpp.zxingcpp", *collect_submodules("qrcode"),
+    # Тесты qrcode (qrcode.tests) в exe не нужны: они тянут pytest и unittest.
+    "zxingcpp", "zxingcpp.zxingcpp",
+    *collect_submodules("qrcode", filter=lambda name: not name.startswith("qrcode.tests")),
+    # QR из картинки .webp (vpnclient/qr.py её принимает): модуль формата Pillow и его расширение.
+    "PIL.WebPImagePlugin", "PIL._webp",
 ]
 
 a = Analysis(
@@ -55,9 +64,25 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["setuptools", "distutils", "_distutils_hack", "tkinter", "pytest", "unittest.mock",
-              "PIL._avif", "PIL._webp", "PIL._imagingtk", "PIL.ImageTk"],
+    # httpx._main — консольная утилита httpx (тянет pygments, rich, click); без неё httpx работает сам.
+    excludes=["setuptools", "distutils", "_distutils_hack", "tkinter", "pytest", "_pytest", "unittest.mock",
+              "httpx._main", "pygments", "PIL._avif", "PIL._imagingtk", "PIL.ImageTk"],
 )
+# Сборка — только для 64-битной Windows: Android-часть pywebview и библиотеки под x86/arm64 не нужны.
+_FOREIGN = ("pywebview-android.jar", "\\win-arm64\\", "\\win-x86\\", "webbrowserinterop.x86.dll",
+            "\\ffi\\dlls\\x86\\", "\\ffi\\dlls\\arm64\\")
+
+
+def _ours(entry):
+    name = entry[0].replace("/", "\\").lower()
+    return not any(mark in name for mark in _FOREIGN)
+
+
+a.datas = [entry for entry in a.datas if _ours(entry)]
+a.binaries = [entry for entry in a.binaries if _ours(entry)]
+# Тексты лицензий всего стороннего, что попало в exe, — папкой licenses/ (build/third_party.py).
+a.datas += third_party.license_datas(a.scripts + a.pure + a.binaries + a.datas, project_root=Path(ROOT),
+                                     third_party_md=Path(p("THIRD_PARTY.md")), work_dir=Path(workpath))
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, a.binaries, a.datas, [],

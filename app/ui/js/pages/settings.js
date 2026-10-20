@@ -36,7 +36,7 @@
     },
     {
       key: 'tg_on_start',
-      title: 'Включать прокси Telegram при запуске',
+      title: 'Включать Telegram-прокси при запуске',
       description: 'Telegram подключится к прокси, как только Лазейка запустится.',
     },
     {
@@ -56,7 +56,7 @@
     {
       key: 'check_updates',
       title: 'Проверять обновления при запуске',
-      description: 'Только уведомление о новой версии — ничего не скачивается без вас.',
+      description: 'Только уведомление о новой версии: Лазейку, стратегии и Telegram-прокси обновляем лишь по вашей кнопке. Ядра своего VPN Лазейка скачивает и обновляет сама — это выключается на странице «Свой VPN».',
     },
   ];
 
@@ -81,7 +81,7 @@
     },
     {
       name: 'Flowseal/tg-ws-proxy',
-      text: 'Прокси для Telegram через WebSocket',
+      text: 'Telegram-прокси через WebSocket',
       url: 'https://github.com/Flowseal/tg-ws-proxy',
     },
     {
@@ -104,7 +104,7 @@
       .then((result) => Boolean(result && result.ok));
   }
 
-  function toggleList(definitions, rows) {
+  function toggleList(definitions, rows, rowsByKey) {
     return h('div', { class: 'settings-list' }, definitions.map((definition) => {
       const row = ui.switchRow({
         title: definition.title,
@@ -112,9 +112,17 @@
         onChange: (value) => saveSetting(definition.key, value),
       });
       rows[definition.key] = row.sw;
+      if (rowsByKey) rowsByKey[definition.key] = row;
       return row.el;
     }));
   }
+
+  /*
+   * Автозапуск здесь не работает (переносной режим, Лазейка под чужой учётной записью): ядро отказывает при
+   * включении (ответ — тостом), а если он был включён раньше — ставит плашку autostart. Её текст — и под
+   * переключателем: выключить его по-прежнему можно, включить снова ядро не даст.
+   */
+  const AUTOSTART_NOTICE = 'autostart';
 
   function kvRow(key, valueEl, action) {
     return h('div', { class: 'kv' }, h('span', { class: 'kv__key', text: key }), valueEl, action || null);
@@ -131,6 +139,7 @@
 
   function create() {
     const rows = {};
+    const launchRows = {};
 
     const themeSeg = ui.segmented({
       label: 'Тема оформления',
@@ -182,13 +191,13 @@
       kind: 'ghost',
       confirm: {
         title: 'Выйти из Лазейки?',
-        text: 'Обход для Discord и YouTube и прокси для Telegram выключатся. Служба Windows, если вы её установили, продолжит работать.',
+        text: 'Обход для Discord и YouTube, Telegram-прокси и свой VPN выключатся. Служба Windows, если вы её установили, продолжит работать.',
         confirmLabel: 'Выйти',
         tone: 'danger',
         icon: 'power',
       },
     });
-    launch.body.append(toggleList(LAUNCH_TOGGLES, rows), h('div', { class: 'button-row' }, hideBtn.el, quitBtn.el));
+    launch.body.append(toggleList(LAUNCH_TOGGLES, rows, launchRows), h('div', { class: 'button-row' }, hideBtn.el, quitBtn.el));
 
     const watchdogTitleId = uid('watchdog-title');
     const watchdogSeg = ui.segmented({
@@ -261,6 +270,10 @@
         if (settings.ui_scale != null) scaleSeg.set(Number(settings.ui_scale));
         watchdogSeg.set(settings.watchdog || 'ask');
         for (const key of Object.keys(rows)) rows[key].set(Boolean(settings[key]));
+        const notices = Array.isArray(state.notices) ? state.notices : [];
+        const refused = notices.find((notice) => notice && notice.id === AUTOSTART_NOTICE && notice.text);
+        const autostartInfo = LAUNCH_TOGGLES.find((item) => item.key === 'autostart');
+        launchRows.autostart.setDescription(refused ? String(refused.text) : autostartInfo.description);
         const app = state.app || {};
         const zapret = state.zapret || {};
         const tg = state.tg || {};

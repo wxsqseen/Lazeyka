@@ -581,3 +581,28 @@
     width: 220px;
   }
 }
+
+/* Совсем узко: описание автора не помещалось рядом с именем и обрезалось — оно строкой ниже, кнопка справа. */
+@container app (max-width: 760px) {
+  .kv--credit {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+    padding: 8px 0;
+  }
+
+  .kv--credit .kv__key {
+    width: auto;
+  }
+
+  .kv--credit .kv__value {
+    grid-column: 1;
+    white-space: normal;
+  }
+
+  .kv--credit .btn {
+    grid-row: 1 / span 2;
+    grid-column: 2;
+    align-self: center;
+  }
+}

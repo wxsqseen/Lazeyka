@@ -3,7 +3,6 @@
 Новых релизов может не быть, поэтому «обновляемся» до текущих версий: путь тот же —
 скачивание, проверка хешей, установка рядом, переключение, откат.
 """
-import os
 import shutil
 
 import pytest
@@ -15,8 +14,6 @@ from app.updates import github
 from app.updates.manager import UpdateManager
 from app.zapret import pack
 from app.zapret.manager import ZapretManager
-
-NETWORK = os.environ.get("LAZEYKA_NO_NETWORK") != "1"
 
 
 @pytest.fixture
@@ -35,7 +32,7 @@ def managers(tmp_path):
     tg.stop()
 
 
-@pytest.mark.skipif(not NETWORK, reason="без сети")
+@pytest.mark.network
 def test_zapret_update_downloads_verifies_installs_and_rolls_back(managers):
     settings, zapret, tg, updates, notes = managers
     # Делаем активной «старую» версию, чтобы настоящий релиз был обновлением.
@@ -59,7 +56,7 @@ def test_zapret_update_downloads_verifies_installs_and_rolls_back(managers):
     assert zapret.pack.version == "1.0.0"
 
 
-@pytest.mark.skipif(not NETWORK, reason="без сети")
+@pytest.mark.network
 def test_tgws_update_verifies_every_file_and_switches_core(managers):
     settings, zapret, tg, updates, notes = managers
     updates.releases["tgws"] = github.latest_release("Flowseal/tg-ws-proxy")

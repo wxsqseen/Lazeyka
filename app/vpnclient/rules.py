@@ -3,7 +3,7 @@
 Источники — данными (SOURCES): у каждого способ проверки. Файл из ветки репозитория — git-blob
 SHA-1 (`sha` из contents API GitHub), ассет релиза — SHA-256 из поля `digest` releases API. Это
 сверка с API GitHub по TLS, не подпись. Дальше — заголовок `SRS` и версия формата (не новее
-понимаемой ядром), атомарная замена с сохранением прошлой версии и запись в rules.json
+понимаемой ядром), атомарная замена файла и запись в rules.json
 (источник, хеш, даты). Сбой одного источника не ломает пресет: остальные файлы обновляются,
 прежний файл остаётся (final_rules.md, 2–3).
 
@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import threading
 import time
 from dataclasses import dataclass
@@ -115,10 +114,6 @@ def source_for(set_id: str) -> Source | None:
     return None
 
 
-def git_blob_sha1(data: bytes) -> str:
-    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
-
-
 def srs_version(data: bytes) -> int | None:
     """Версия формата SRS по заголовку; None — не файл rule-set."""
     if len(data) < 4 or data[:3] != SRS_MAGIC:
@@ -127,7 +122,7 @@ def srs_version(data: bytes) -> int | None:
 
 
 class RulesManager:
-    """Файлы правил в папке dir: <id>.srs, <id>.srs.prev (прошлая версия) и rules.json."""
+    """Файлы правил в папке dir: <id>.srs и rules.json."""
 
     def __init__(self, dir: Path, *, opener_for: Callable[[str], Opener | None]):
         self.dir = Path(dir)
@@ -162,21 +157,6 @@ class RulesManager:
     def missing(self, ids: Iterable[str]) -> list[str]:
         have = self.paths(ids)
         return [i for i in dict.fromkeys(ids) if i not in have]
-
-    def rollback(self, set_id: str) -> bool:
-        """Вернуть прошлую версию набора (если её сохраняли)."""
-        prev = self.path(set_id).with_name(f"{set_id}.srs.prev")
-        if not self._usable(prev):
-            return False
-        with self._lock:
-            tmp = prev.with_name(prev.name + ".tmp")
-            shutil.copyfile(prev, tmp)
-            os.replace(tmp, self.path(set_id))
-            meta = self._meta()
-            entry = meta.setdefault(set_id, {})
-            entry.update({"hash": None, "rolled_back_at": time.time()})
-            self._save_meta(meta)
-        return True
 
     # ---------------------------------------------------------------- rules.json
 
@@ -247,17 +227,15 @@ class RulesManager:
     @staticmethod
     def _actual(expected: str, data: bytes) -> str:
         if expected.startswith("sha1:"):
-            return f"sha1:{git_blob_sha1(data)}"
+            return f"sha1:{github.git_blob_sha1(data)}"
         return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
     def _install(self, set_id: str, data: bytes) -> None:
-        """Атомарная замена: новый файл — во временный рядом, прежний — в .prev, затем os.replace."""
+        """Атомарная замена: новый файл — во временный рядом, затем os.replace."""
         self.dir.mkdir(parents=True, exist_ok=True)
         target = self.path(set_id)
         tmp = target.with_name(target.name + ".tmp")
         tmp.write_bytes(data)
-        if self._usable(target):
-            shutil.copyfile(target, target.with_name(f"{set_id}.srs.prev"))
         os.replace(tmp, target)
 
     def _update_one(self, source: Source, meta: dict[str, dict[str, Any]], force: bool) -> str:

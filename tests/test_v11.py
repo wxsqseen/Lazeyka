@@ -29,11 +29,13 @@ class _FakeZapret:
         self.mode = "app"
         self.lock = threading.RLock()
         self.paused_for_test = False
+        self.guard_paused = False
         self.strategies = [_Strategy(s) for s in ("general", "general (ALT)", "general (ALT2)", "general (ALT5)")]
         self.working = working          # с какой стратегией «всё открывается»
         self.active: str | None = None  # что сейчас «запущено»
         self.marks = 0
         self.winws_exe = "winws.exe"
+        self.process = None
 
     def running(self):
         return self.active is not None
@@ -168,6 +170,161 @@ def test_second_fix_is_refused(fake):
         t.start("standard", None)
     gate.set()
     t.join(5)
+
+
+def test_fix_cancelled_after_winner_found_returns_previous(fake, monkeypatch):
+    """Отмена пришла сразу после удачной пробы — обход возвращается как был, а не остаётся выключенным."""
+    z, t, _ = fake
+
+    def check(cancel=None, bind=None):
+        ok = z.active == z.working
+        if ok:
+            t.cancel_event.set()
+        return [{"id": "discord", "label": "Discord", "ok": ok, "detail": ""},
+                {"id": "youtube", "label": "YouTube", "ok": ok, "detail": ""}]
+    monkeypatch.setattr(tester, "quick_check", check)
+    t.start_fix()
+    _wait(t)
+    assert t.fix_state["stage"] == "failed" and t.fix_state["message"] == "Остановлено."
+    assert z.active == "general" and z.settings.get("zapret", "strategy") == "general"
+    assert not z.paused_for_test and z.marks == 0
+
+
+def test_fix_winner_that_does_not_start_returns_previous(fake):
+    from app.zapret.manager import ZapretError
+    z, t, _ = fake
+    real_start = z.start
+
+    def start():
+        if z.settings.get("zapret", "strategy") == z.working:
+            raise ZapretError("winws не запустился")
+        real_start()
+    z.start = start
+    t.start_fix()
+    _wait(t)
+    st = t.fix_state
+    assert st["stage"] == "failed" and "прошла пробу, но не включилась" in st["message"]
+    assert "Вернули «general»" in st["message"]
+    assert z.settings.get("zapret", "strategy") == "general" and z.active == "general"
+
+
+def test_fix_reports_bypass_down_when_previous_does_not_start_either(fake):
+    from app.zapret.manager import ZapretError
+    z, t, _ = fake
+    downs = []
+    z.report_down = downs.append
+    started = {"n": 0}
+
+    def start():
+        started["n"] += 1
+        if started["n"] > 1:            # первый запуск (обход был выключен) — удачный, дальше — нет
+            raise ZapretError("драйвер WinDivert не загрузился")
+        z.active = z.settings.get("zapret", "strategy")
+    z.active = None
+    z.start = start
+    t.start_fix()
+    _wait(t)
+    assert "Прежняя стратегия тоже не включилась" in t.fix_state["message"]
+    assert downs and "драйвер WinDivert" in downs[0], "обход лежит — плашка с «Включить снова»"
+
+
+def test_pick_returns_bypass_when_stop_fails(fake):
+    """Остановка обхода перед пробами упала — пауза подбора снимается, метка убирается, обход на месте."""
+    from app.zapret.manager import ZapretError
+    z, t, _ = fake
+    z.start()
+    real_stop = z.stop
+
+    def stop(remember=True):
+        z.stop = real_stop
+        raise ZapretError("Служба обхода не остановилась за 10 секунд — обход ещё работает")
+    z.stop = stop
+    t.start_fix()
+    _wait(t)
+    assert t.fix_state["stage"] == "failed" and "не остановилась" in t.fix_state["message"]
+    assert not z.paused_for_test and z.marks == 0 and z.active == "general"
+
+
+def test_pick_returns_bypass_even_if_marker_is_stuck(fake):
+    z, t, _ = fake
+    z.working = "nothing"
+
+    def stuck():
+        raise PermissionError("метку держит антивирус")
+    z.unmark_test = stuck
+    t.start_fix()
+    _wait(t)
+    assert not z.paused_for_test and z.active == "general", "метка не удалилась — обход всё равно вернулся"
+
+
+def test_fix_and_test_refuse_without_direct_path(full_run):
+    """Туннель VPN есть, а пути мимо него нет — проверка шла бы через VPN и признала бы любую стратегию."""
+    z, t, notes = full_run
+    z.start()
+
+    def no_direct():
+        raise tester.NoDirectPath()
+    t.source = no_direct
+    t.start_fix()
+    _wait(t)
+    assert t.fix_state["stage"] == "failed" and "прямого подключения" in t.fix_state["message"]
+    assert z.marks == 0 and z.active == "general"
+    t.start("standard", None)
+    t.join(5)
+    assert "прямого подключения" in t.state["error"] and z.marks == 0 and z.active == "general"
+
+
+@pytest.fixture
+def full_run(fake, monkeypatch):
+    """Полный подбор на подделках: цели, отчёт и проверка конфликтов — без сети и системы."""
+    z, t, notes = fake
+    monkeypatch.setattr(tester, "foreign_winws", lambda own: [])
+    monkeypatch.setattr(tester.winutil, "service_query", lambda name, with_config=False: None)
+    monkeypatch.setattr(tester.netcfg, "ensure_tcp_timestamps", lambda: None)
+    monkeypatch.setattr(tester, "_save_report", lambda *a: None)
+    monkeypatch.setattr(tester, "load_targets", lambda pack: [tester.Target("Discord Main", "https://discord.com",
+                                                                            "discord.com")])
+    z.prepare_pack = lambda: None
+    return z, t, notes
+
+
+def test_cancelled_test_is_flagged_not_an_error(full_run, monkeypatch):
+    z, t, notes = full_run
+
+    def targets(targets, cancel, timeout=4, bind=None):
+        t.cancel_event.set()                          # человек нажал «Остановить»
+        return [{"name": "Discord Main", "url": "https://discord.com", "http": "ok", "tls12": "ok",
+                 "tls13": "ok", "ping": 5}]
+    monkeypatch.setattr(tester, "check_targets", targets)
+    t.start("standard", None)
+    t.join(5)
+    assert t.state["cancelled"] is True and t.state["error"] is None
+    assert t.state["done"] == 1
+    assert not any("завершён" in text for _, text in notes), "остановленный подбор — не «завершён»"
+
+
+def test_test_started_while_guard_holds_bypass_off_returns_it(full_run, monkeypatch):
+    """Страховка связи выключила обход посреди проверки (guard_paused), и тут человек нажал «Подобрать»: обход
+    работал — подбор вернёт его сам. Иначе страховка уходит (подбор вмешался), а подбор считает обход
+    выключенным — и он остаётся лежать без плашки."""
+    z, t, _ = full_run
+    z.guard_paused = True                              # z.active is None: сейчас обход выключен
+    monkeypatch.setattr(tester, "check_targets", lambda targets, cancel, timeout=4, bind=None: [])
+    t.start("standard", ["general"])
+    t.join(5)
+    assert z.active == "general" and not z.guard_paused
+
+
+def test_service_mode_test_resumes_through_manager(full_run, monkeypatch):
+    z, t, _ = full_run
+    z.mode = "service"
+    resumed = []
+    z.resume_service = lambda: resumed.append(1)
+    z.start()
+    monkeypatch.setattr(tester, "check_targets", lambda targets, cancel, timeout=4, bind=None: [])
+    t.start("standard", ["general"])
+    t.join(5)
+    assert resumed == [1], "служба возвращается через менеджер — со страховкой связи"
 
 
 # ------------------------------------------------------------ согласование с Telegram

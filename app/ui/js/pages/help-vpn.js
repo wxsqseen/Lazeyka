@@ -1,6 +1,6 @@
 'use strict';
 /*
- * «Помощь» → «VPN»: как Лазейка уживается с VPN, что куда идёт сейчас и как пустить Discord
+ * «Помощь» → «Другой VPN»: как Лазейка уживается с VPN, что куда идёт сейчас и как пустить Discord
  * и YouTube мимо VPN в популярных программах (тексты инструкций — js/vpn-clients.js).
  * «Помощь» → «Свой VPN»: почему не подключается свой VPN Лазейки и что с этим сделать.
  */
@@ -198,7 +198,20 @@
       case 'port':
         return [vcButton('Сменить порт', 'sliders', go('more'), { kind: 'primary' })];
       case 'admin':
+        /*
+         * Права уже есть, а адаптер Windows не дала (diagnose._LOCAL["admin"]): режим «Системный прокси» обходится без
+         * него. Без прав свой VPN не включается вовсе — тогда помогает только перезапуск с ними.
+         */
+        if (!data.admin) {
+          return [vcButton('Перезапустить с правами администратора', 'shieldCheck',
+            () => Lz.api.run({ method: 'relaunch_admin' }), { kind: 'primary', busyKey: 'relaunch_admin' })];
+        }
+        if (data.proxyDenied) return [vcButton('Открыть журнал', 'list', () => Lz.nav.go('logs'))];
+        return [vcButton('Включить как системный прокси', 'globe', toProxy, { kind: 'primary', busyKey: 'vpnclient_set_mode' }),
+          vcButton('Открыть журнал', 'list', () => Lz.nav.go('logs'))];
       case 'conflict':
+        /* Под чужой учётной записью UAC системный прокси недоступен — не предлагаем то, что откажет. */
+        if (data.proxyDenied) return [vcButton('Открыть журнал', 'list', () => Lz.nav.go('logs'))];
         return [vcButton('Включить как системный прокси', 'globe', toProxy, { kind: 'primary', busyKey: 'vpnclient_set_mode' })];
       case 'timeout':
         return [fastestButton(data.fastest), latencyButton()];
@@ -223,17 +236,25 @@
       ];
     }
     if (data.status === 'locked') return note('Свой VPN сейчас недоступен — причина написана выше.');
+    /* Есть причина ядра (diagnosis) — почему, чья сторона и что сделать; общий совет по error_kind тогда не нужен. */
     if (data.status === 'error') {
       const kind = texts.vpncError(data.kind);
       return [
-        ui.callout({ tone: 'err', title: kind.title, text: data.error || kind.title }),
-        note(kind.advice),
+        ui.callout({ tone: 'err', title: kind.title, text: data.why ? null : (data.error || kind.title) }),
+        data.why ? Lz.vcView.reasonList(data.why) : note(kind.advice),
         actions(...errorActions(data)),
+      ];
+    }
+    if (data.status === 'running' && !data.verified && data.error) {
+      return [
+        ui.callout({ tone: 'warn', title: 'Ядро включено, но через сервер ничего не открывается', text: data.why ? null : data.error }),
+        data.why ? Lz.vcView.reasonList(data.why) : null,
+        actions(fastestButton(data.fastest), latencyButton()),
       ];
     }
     if (data.status === 'running' && !data.verified) {
       return [
-        lead('Ядро запущено, но выход через сервер ещё не подтверждён. Обычно проверка занимает пару секунд; если она идёт дольше минуты — сервер не пропускает трафик.'),
+        lead('Ядро запущено, Лазейка проверяет выход через сервер — обычно это пара секунд. Не выйдет — здесь появятся причина и что с ней сделать.'),
         actions(fastestButton(data.fastest), latencyButton()),
       ];
     }
@@ -351,8 +372,11 @@
         const line = texts.vpncLine(source);
         conn.dataset.tone = vc ? line.tone : 'off';
         setText(connText, vc ? line.text : 'Свой VPN недоступен в этой версии');
-        /* При ошибке её текст — в плашке ниже: строка состояния его бы повторила. */
-        setHidden(conn, Boolean(vc) && source.status === 'error');
+        /* При ошибке и «нет выхода» их текст — в плашке ниже: строка состояния его бы повторила. */
+        const noExit = source.status === 'running' && !source.verified && Boolean(source.error);
+        setHidden(conn, Boolean(vc) && (source.status === 'error' || noExit));
+        const why = source.error ? texts.vpncReason(source.diagnosis) : null;
+        const conflict = source.conflict && typeof source.conflict === 'object' ? source.conflict : null;
         body.update({
           present: Boolean(vc),
           hasServers: texts.vpncHasServers(source),
@@ -360,6 +384,9 @@
           verified: Boolean(source.verified),
           kind: source.error_kind || null,
           error: source.error ? String(source.error) : null,
+          why,
+          proxyDenied: Boolean(conflict && conflict.proxy_denied),
+          admin: Boolean(state.app && state.app.admin),
           fastest: vc ? fastestId(source) : null,
         });
         routes.update(Lz.vpn.ownActive(state.vpn) ? Lz.vpn.routesData(state, 'view') : { checked: false });

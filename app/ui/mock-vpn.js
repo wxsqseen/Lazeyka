@@ -94,14 +94,17 @@
     const proxy = proxyMode ? VPN_PROXY : null;
     const active = internet || Boolean(proxy);
     let candidates = [];
-    if (internet) candidates = ['Incy', 'Happ'];
+    /* vpn=noname: программа туннеля не опознана — ядро называет VPN по адаптеру (vpn.Snapshot.label). */
+    if (internet && scenario !== 'noname') candidates = ['Incy', 'Happ'];
     else if (proxy) candidates = ['Happ'];
+    let label = candidates.join(' или ');
+    if (!label && internet) label = `VPN «${list.find((a) => !a.own && a.kind === 'tunnel' && a.role === 'internet').name}»`;
     return {
       active,
       mode: internet ? 'tunnel' : (proxy ? 'proxy' : null),
       full_tunnel: internet,
       proxy,
-      label: active ? candidates.join(' или ') : null,
+      label: active ? label : null,
       candidates,
       apps: ['Radmin VPN', ...candidates],
       servers: internet ? [VPN_SERVER] : [],

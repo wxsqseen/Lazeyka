@@ -1,19 +1,18 @@
-# Картинка пустого «Своего VPN»: генерация в Codex
+# Картинка пустого «Своего VPN»: промпт и обработка
 
-Иллюстрация для страницы «Свой VPN», пока не добавлено ни одного сервера, нарисована встроенным генератором
-изображений Codex (CLI из расширения VS Code). Выбран вариант 3 из трёх: прямой путь к серверу и маленький плюс.
-Рядом с промптом лежал `reference-icon.png` — значок Лазейки, чтобы картинка была из той же семьи.
+Иллюстрация для страницы «Свой VPN», пока не добавлено ни одного сервера. Черновики — три варианта по промпту
+ниже; выбран вариант 3: прямой путь к серверу и маленький плюс. К промпту прикладывался `reference-icon.png` —
+значок Лазейки, чтобы картинка была из той же семьи.
 
-`build/clean_codex_art.py` убирает белый фон и сводит цвета к двум из палитры — серый #7D818A и акцент #5B8DEF.
+`build/clean_art.py` убирает белый фон и сводит цвета к двум из палитры — серый #7D818A и акцент #5B8DEF.
 Покрытие пикселя считается по отклонению от белого, поэтому мягкие края остаются мягкими и на тёмной, и на светлой
 теме. Затем скрипт обрезает поля и уменьшает до ширины 640 px. Результат — `app/ui/img/vpn-empty.png`;
 повторный прогон на `vpn-empty-v3.png` даёт тот же файл байт в байт.
 
-Команда (из папки черновиков):
+Обработка выбранного черновика:
 
 ```
-codex exec -s workspace-write --skip-git-repo-check -i reference-icon.png -o result.md - < prompt.md
-.venv\Scripts\python.exe build\clean_codex_art.py <папка-черновиков>\vpn-empty-v3.png app\ui\img\vpn-empty.png
+.venv\Scripts\python.exe build\clean_art.py <папка-черновиков>\vpn-empty-v3.png app\ui\img\vpn-empty.png
 ```
 
 ## Промпт
@@ -34,7 +33,7 @@ Style requirements (very important — the owner wants strict minimalism, nothin
 Make 3 variants with small differences (for example: globe vs server rack on the right, straight vs gently curved path, with or without the small plus sign) and save them as vpn-empty-v1.png, vpn-empty-v2.png and vpn-empty-v3.png in the current directory. Then reply with one short sentence per file describing it.
 ```
 
-## Ответ Codex
+## Черновики
 
 - `vpn-empty-v1.png` — ноутбук соединён с сервером прямой синей стрелкой через проём в стене.
 - `vpn-empty-v2.png` — ноутбук соединён с глобусом плавно изогнутым синим путём.

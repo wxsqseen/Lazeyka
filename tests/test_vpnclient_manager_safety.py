@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import log as applog
+from app.vpnclient import diagnose
 from app.vpnclient import manager as mgr
 from app.vpnclient.model import BypassProfile, Subscription
 from tests.fakes.vpn_world import FakeStore, basic_store, make_manager, server, wait_for
@@ -50,6 +51,136 @@ def test_failed_restart_keeps_kill_switch_and_says_so(tmp_path):
     m.stop()
     assert not w.killswitch.active and m.status == "stopped"
     m.shutdown()
+
+
+def _ks_world(tmp_path):
+    m, w = make_manager(tmp_path, basic_store())
+    w.settings.update(lambda d: d["vpnclient"].__setitem__("kill_switch", True))
+    asked = []
+    luid = {"value": 42}
+    m.deps.tun_luid = lambda address: (asked.append(address), luid["value"])[1]
+    return m, w, asked, luid
+
+
+def test_kill_switch_finds_own_tun_by_its_address(tmp_path):
+    """LUID своего TUN — по адресу своей /30: имя «Lazeyka» мог занять осиротевший адаптер."""
+    m, w, asked, _luid = _ks_world(tmp_path)
+    m.start()
+    assert asked == ["100.127.255.253"] and w.killswitch.enabled_with[0] == 42
+    m.shutdown()
+
+
+def test_kill_switch_without_own_tun_is_not_enabled(tmp_path):
+    """Свой TUN не нашёлся — фильтры не ставятся (они закрыли бы и сам VPN), VPN работает, плашка."""
+    m, w, _asked, luid = _ks_world(tmp_path)
+    luid["value"] = None
+    m.start()
+    snap = m.snapshot()
+    assert snap["status"] == "running" and snap["verified"] and not w.killswitch.active
+    assert "адаптер своего VPN не найден" in w.alerts["vpn-killswitch"]["text"]
+    assert "Kill switch: " not in w.alerts["vpn-killswitch"]["text"], "без повтора «Kill switch» в тексте"
+    m.shutdown()
+
+
+def test_failed_reenable_on_restart_drops_stale_filters(tmp_path):
+    """Перезапуск: под новый TUN фильтры не встали — прежние (с LUID прежнего TUN) сняты, иначе они
+    закрыли бы интернет и новому сеансу, а страница показывала бы «Подключено»."""
+    m, w, _asked, luid = _ks_world(tmp_path)
+    m.start()
+    assert w.killswitch.active
+    luid["value"] = None
+    m.restart()
+    assert m.status == "running" and not w.killswitch.active and "vpn-killswitch" in w.alerts
+    luid["value"] = 43
+    m.restart()
+    assert m.status == "running" and w.killswitch.active and w.killswitch.enabled_with[0] == 43
+    assert "vpn-killswitch" not in w.alerts
+    m.shutdown()
+
+
+def test_new_lan_networks_reuse_own_tun_and_keep_filters(tmp_path):
+    """Включили Radmin после VPN: фильтры того же TUN переставляются с тем же LUID — адаптер заново не ищется,
+    и миг, когда таблица адаптеров его не отдала, не снимает защиту от утечек."""
+    m, w, asked, luid = _ks_world(tmp_path)
+    m.start()
+    assert w.killswitch.active and asked == ["100.127.255.253"]
+    luid["value"] = None                                   # таблица адаптеров своего TUN сейчас не отдаёт
+    m.deps.lan_networks = lambda: [(7, ["26.0.0.0/8"])]
+    m._after_network_change()
+    assert w.killswitch.active and w.killswitch.enabled_with[0] == 42 and w.killswitch.lan == [(7, ["26.0.0.0/8"])]
+    assert asked == ["100.127.255.253"] and "vpn-killswitch" not in w.alerts
+    m.shutdown()
+
+
+def test_failed_refresh_for_new_lan_keeps_previous_filters(tmp_path):
+    """Перестановка под новые локальные сети не удалась (WFP не ответила): прежние фильтры того же TUN
+    остаются — VPN не работает без защиты, а плашка говорит, что не открыты только новые сети. Проверка
+    здоровья повторяет перестановку."""
+    from app.vpnclient.killswitch import KillSwitchError
+    m, w, _asked, _luid = _ks_world(tmp_path)
+    m.start()
+    disabled = []
+    real_enable, real_disable = w.killswitch.enable, w.killswitch.disable
+    w.killswitch.disable = lambda: (disabled.append(True), real_disable())
+
+    def refused(**kw):
+        raise KillSwitchError("Kill switch: не удалось применить фильтры (0x80320009)")
+
+    w.killswitch.enable = refused
+    m.deps.lan_networks = lambda: [(7, ["26.0.0.0/8"])]
+    m._after_network_change()
+    assert w.killswitch.active and not disabled and w.killswitch.lan == []
+    text = w.alerts["vpn-killswitch"]["text"]
+    assert "не открыл новые локальные сети" in text and "Защита от утечек работает" in text
+    assert "Kill switch: " not in text
+    w.killswitch.enable = real_enable
+    m._check_health()
+    assert w.killswitch.lan == [(7, ["26.0.0.0/8"])] and "vpn-killswitch" not in w.alerts
+    m.shutdown()
+
+
+def test_stale_filters_that_stay_fail_the_restart(tmp_path):
+    """Прежние фильтры не снялись — запуск не удался: интернет закрыт, и страница говорит об этом."""
+    from app.vpnclient.killswitch import KillSwitchError
+    m, w, _asked, luid = _ks_world(tmp_path)
+    m.start()
+    luid["value"] = None
+
+    def stuck():
+        raise KillSwitchError("Kill switch: не удалось снять фильтры — служба базовой фильтрации Windows недоступна")
+
+    w.killswitch.disable = stuck
+    with pytest.raises(mgr.VpnClientError):
+        m.restart()
+    snap = m.snapshot()
+    assert snap["status"] == "error" and w.killswitch.active
+    assert "Kill switch держит интернет закрытым" in snap["error"]
+    m.shutdown()
+
+
+def test_tun_luid_needs_exactly_one_live_adapter_with_own_address():
+    def adapter(name, index, ipv4, up=True):
+        return SimpleNamespace(name=name, index=index, ipv4=ipv4, up=up)
+
+    own = "100.127.255.253"
+    luid_of = lambda index: 1000 + index  # noqa: E731
+    orphan = adapter("Lazeyka", 7, [own], up=False)             # осиротевший адаптер прошлого сеанса
+    fresh = adapter("Lazeyka 2", 9, [own])
+    assert mgr.tun_luid(own, 0, lambda: [orphan, fresh, adapter("Ethernet", 3, ["192.168.1.5"])], luid_of) == 1009
+    assert mgr.tun_luid(own, 0, lambda: [fresh, adapter("Другой", 11, [own])], luid_of) is None, "не понять, какой свой"
+    assert mgr.tun_luid(own, 0, lambda: [orphan], luid_of) is None
+
+    def broken():
+        raise OSError(1, "GetAdaptersAddresses")
+
+    assert mgr.tun_luid(own, 0, broken, luid_of) is None
+    calls = []
+
+    def appears():                                            # адрес появился не сразу после старта ядра
+        calls.append(1)
+        return [fresh] if len(calls) > 1 else []
+
+    assert mgr.tun_luid(own, 5, appears, luid_of) == 1009 and len(calls) == 2
 
 
 # ------------------------------------------------------------ системный прокси
@@ -180,12 +311,12 @@ def test_failed_auto_restart_alerts_and_retries_with_pauses(tmp_path):
     m.set_bypass(w.view)
     assert m.wait_idle(10) and m.status == "error"
     crash = w.alerts["vpn-crash"]
-    assert "не перезапустился" in crash["text"] and "Повторю через 30 с" in crash["text"]
+    assert "не перезапустился" in crash["text"] and "Повторим через 30 с" in crash["text"]
     assert crash["action"]["call"] == "vpnclient_start" and w.notices == [], "плашка, а не уведомление"
     _tick_after(m, w, 29)
     assert m.status == "error" and len(_main(w)) == 1, "раньше паузы не повторяет"
     _tick_after(m, w, 1)                                  # повтор тоже не удался — следующий через 2 минуты
-    assert m.status == "error" and "Повторю через 2 мин" in w.alerts["vpn-crash"]["text"]
+    assert m.status == "error" and "Повторим через 2 мин" in w.alerts["vpn-crash"]["text"]
     w.resolver.fail.clear()
     _tick_after(m, w, 119)
     assert m.status == "error" and len(_main(w)) == 1
@@ -205,7 +336,7 @@ def test_failed_auto_restart_with_kill_switch_waits_for_stop(tmp_path):
     assert m.wait_idle(10) and m.status == "error"
     assert w.killswitch.active, "VPN не выключали — интернет закрыт и между попытками"
     crash = w.alerts["vpn-crash"]
-    assert "Kill switch держит интернет закрытым" in crash["text"] and "Повторю" in crash["text"]
+    assert "Kill switch держит интернет закрытым" in crash["text"] and "Повторим" in crash["text"]
     assert crash["action"]["call"] == "vpnclient_stop" and crash["page"] == "vpnclient"
     m.stop()
     assert not w.killswitch.active and m.status == "stopped" and "vpn-crash" not in w.alerts
@@ -297,8 +428,9 @@ def _stuck_exit_check(m, w, stuck_at):
         raise OSError("timed out")
 
     m.deps.exit_check = exit_check
-    m.deps.tcp_reach = lambda *a: reach.append(a) or 12.0
-    w.advance(mgr.UNVERIFIED_RETRY)
+    m.deps.tcp_probe = lambda *a: reach.append(a) or diagnose.TcpProbe("ok", 12.0)
+    # Причина прошлой неудачи годится DIAGNOSIS_REUSE — дальше разбор снова пробует сервер напрямую.
+    w.advance(max(mgr.UNVERIFIED_RETRY, mgr.DIAGNOSIS_REUSE))
     m.tick()                                              # проверка здоровья: выход ещё не подтверждён
     assert entered.wait(5)
     return calls, reach, release
@@ -373,3 +505,43 @@ def test_latency_outside_config_with_kill_switch(tmp_path):
     assert wait_for(lambda: not m.snapshot()["latency"]["running"])
     assert w.store.latency()[helper_only.id]["ms"] == 50
     m.shutdown()
+
+
+# ------------------------------------------------------------ помощник Xray и чужой VPN
+
+def test_helper_binds_to_physical_adapter_only_in_tun(tmp_path):
+    """В режимах прокси своего TUN нет: помощник идёт по маршрутам Windows, как sing-box, — при чужом
+    VPN трафик серверов через помощника не уходит мимо него."""
+    for mode, expected in (("tun", "Ethernet"), ("proxy", None), ("local", None)):
+        m, w = make_manager(tmp_path / mode, basic_store(xhttp=True))
+        w.settings.update(lambda d, mode=mode: d["vpnclient"].__setitem__("mode", mode))
+        m.select(next(s.id for s in w.store.servers() if s.network == "xhttp"))
+        m.start()
+        assert w.config.plans[-1].physical_interface == expected, mode
+        m.shutdown()
+
+
+# ------------------------------------------------------------ очередь действий при выходе
+
+def test_worker_close_finishes_queued_and_ends_thread():
+    worker = mgr._Worker("vpnclient-ops-test")
+    gate, done = threading.Event(), []
+    worker.submit(lambda: (gate.wait(5), done.append("first")))
+    worker.submit(lambda: done.append("second"))
+    worker.close()
+    assert worker.submit(lambda: done.append("late")) is False, "после close() задачи не принимаются"
+    with pytest.raises(mgr.VpnClientError, match="завершает работу"):
+        worker.call(lambda: "late")
+    gate.set()
+    worker._thread.join(5)
+    assert not worker._thread.is_alive() and done == ["first", "second"], "поставленное до close() доработало"
+
+
+def test_shutdown_ends_ops_thread_and_repeats_quietly(tmp_path):
+    m, _w = make_manager(tmp_path, basic_store())
+    m.start()
+    m.shutdown()
+    m._ops._thread.join(5)
+    assert not m._ops._thread.is_alive(), "поток очереди не переживает выход"
+    m.shutdown()                                          # второй выход ничего не ждёт и не падает
+    assert m.status == "stopped"

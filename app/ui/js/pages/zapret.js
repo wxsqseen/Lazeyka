@@ -74,9 +74,14 @@
       pill.set(available ? status : 'locked');
       setText(header.subtitleEl, subtitle(zapret));
       const running = status === 'running' || status === 'starting';
+      /* Во время подбора и «Найти и включить» обходом управляет ядро — оно отказало бы «Идёт подбор…». */
+      const managed = Boolean((zapret.test && zapret.test.running) || (zapret.fix && zapret.fix.running));
       powerBtn.setLabel(running ? 'Выключить' : 'Включить');
-      powerBtn.setDisabled(!available || status === 'stopping');
-      restartBtn.setDisabled(!available || status !== 'running');
+      powerBtn.setDisabled(!available || status === 'stopping' || managed);
+      restartBtn.setDisabled(!available || status !== 'running' || managed);
+      const busyTitle = managed ? 'Идёт подбор стратегии — дождитесь окончания или остановите его' : null;
+      powerBtn.el.title = busyTitle || '';
+      restartBtn.el.title = busyTitle || '';
       banner.update({
         locked: !available,
         admin: Boolean(state.app && state.app.admin),

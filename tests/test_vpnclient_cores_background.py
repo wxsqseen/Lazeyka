@@ -85,7 +85,7 @@ def test_failed_fetch_retries_with_pauses_and_keeps_an_alert(world):
     _tick(world)
     alert = world.alerts["vpn-core:sing-box"]
     assert alert["level"] == "error" and alert["page"] == "vpnclient"
-    assert alert["text"].startswith("Ядро VPN не скачалось: Нет связи с GitHub") and "Повторю в" in alert["text"]
+    assert alert["text"].startswith("Ядро VPN не скачалось: Нет связи с GitHub") and "Повторим в" in alert["text"]
     assert alert["action"] == {"label": "Скачать ещё раз", "call": "vpnclient_core_install", "args": ["sing-box"]}
     assert _no_core_notices(world), "о фоновой неудаче — только плашка, без уведомлений"
     core = world.manager.snapshot()["cores"]["sing-box"]

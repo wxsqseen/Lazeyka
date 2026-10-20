@@ -1,10 +1,12 @@
 """Свой VPN: клиент clash API и сэмплер трафика — на поддельном HTTP-сервере 127.0.0.1."""
-import time
+import itertools
 
 import pytest
 
+from app.vpnclient import clash
 from app.vpnclient.clash import ClashClient, ClashError, TrafficSampler
 from tests.fakes.fake_clash import FakeClash
+from tests.fakes.vpn_world import wait_for
 
 URL = "https://www.gstatic.com/generate_204"
 
@@ -18,15 +20,6 @@ def api():
 
 def _client(api, secret=None) -> ClashClient:
     return ClashClient(api.port, secret or api.secret)
-
-
-def _wait(cond, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if cond():
-            return True
-        time.sleep(0.02)
-    return False
 
 
 def test_version_with_bearer_and_without(api):
@@ -109,10 +102,10 @@ def test_sampler_rates_totals_history_and_connections(api):
     sampler = TrafficSampler(_client(api), groups=("auto",))
     sampler.start()
     try:
-        assert _wait(lambda: sampler.snapshot()["stats"]["connections"] == 2)
+        assert wait_for(lambda: sampler.snapshot()["stats"]["connections"] == 2)
         api.traffic.put({"up": 100, "down": 2000})
         api.traffic.put({"up": 50, "down": 1000})
-        assert _wait(lambda: len(sampler.snapshot()["history"]) == 2)
+        assert wait_for(lambda: len(sampler.snapshot()["history"]) == 2)
         snap = sampler.snapshot()
         assert snap["stats"]["up_rate"] == 50.0 and snap["stats"]["down_rate"] == 1000.0
         assert snap["stats"]["up"] == 700 + 150 and snap["stats"]["down"] == 5000 + 3000
@@ -124,10 +117,30 @@ def test_sampler_rates_totals_history_and_connections(api):
     assert not sampler.running
 
 
-def test_sampler_survives_dead_api():
-    sampler = TrafficSampler(ClashClient(9, "x"))
+class _DeadApi:
+    """API ядра не отвечает: каждый запрос сразу падает так, как падают ClashClient, сокет и разбор ответа."""
+
+    def __init__(self):
+        self.failures = itertools.cycle([ClashError("ядро не отвечает"), ConnectionRefusedError(10061, "refused"),
+                                         ValueError("не JSON")])
+        self.attempts = 0
+
+    def connections(self):
+        self.attempts += 1
+        raise next(self.failures)
+
+    def open_traffic(self):
+        raise AssertionError("до /traffic сэмплер доходит только после /connections")
+
+
+def test_sampler_survives_dead_api(monkeypatch):
+    monkeypatch.setattr(clash, "RETRY_PAUSE", 0.01)
+    dead = _DeadApi()
+    sampler = TrafficSampler(dead)
     sampler.start()
-    time.sleep(0.3)
-    assert sampler.running and sampler.snapshot()["stats"]["up_rate"] == 0.0
-    sampler.stop(wait=5)
+    try:
+        assert wait_for(lambda: dead.attempts >= 4), f"поток сэмплера не повторяет попытки: {dead.attempts}"
+        assert sampler.running and sampler.snapshot()["stats"]["up_rate"] == 0.0
+    finally:
+        sampler.stop(wait=5)
     assert not sampler.running

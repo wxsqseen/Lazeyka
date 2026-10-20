@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -49,10 +50,20 @@ def test_caret_bang_becomes_builtin_fake(pack_dir):
     assert "--dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com" in args
 
 
+def _referenced_files(args: list[str]) -> list[Path]:
+    """Файлы с абсолютным путём в аргументах winws: --hostlist=C:\\…, --dpi-desync-fake-tls=@C:\\…"""
+    files = []
+    for arg in args:
+        value = arg.split("=", 1)[1].removeprefix("@") if "=" in arg else ""
+        if re.match(r"^[A-Za-z]:\\", value):
+            files.append(Path(value))
+    return files
+
+
 def test_every_referenced_file_exists(pack_dir):
     found, _ = st.discover(pack_dir)
     for strategy in found:
-        for path in st.referenced_files(strategy.args(pack_dir)):
+        for path in _referenced_files(strategy.args(pack_dir)):
             if path.name.endswith("-user.txt"):
                 continue  # создаются при первом запуске
             assert path.exists(), f"{strategy.id}: {path}"

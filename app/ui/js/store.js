@@ -19,6 +19,8 @@
   let refreshQueued = false;
   let failures = 0;
   let online = true;
+  /* Что показано в плашке «нет связи»: причина меняется — плашка обновляется. */
+  let offlineKey = null;
   /* Растёт после каждого действия: снимок, запрошенный до действия, уже устарел. */
   let mutationSeq = 0;
 
@@ -64,10 +66,13 @@
     }
   }
 
-  function setOnline(next, error) {
-    if (next === online) return;
+  /** refused — ядро ответило, но отказом ({ok: false}); иначе ответа нет вовсе. */
+  function setOnline(next, error, refused) {
+    const key = next ? null : `${refused ? 'refused' : 'silent'}:${error || ''}`;
+    if (next === online && key === offlineKey) return;
     online = next;
-    for (const listener of connectionListeners) listener({ online, error });
+    offlineKey = key;
+    for (const listener of connectionListeners) listener({ online, error, refused: Boolean(refused) });
   }
 
   function schedule(delayMs) {
@@ -85,7 +90,8 @@
     refreshQueued = false;
     const requestedAtSeq = mutationSeq;
     try {
-      const next = await Lz.api.callWithTimeout('get_state', STATE_TIMEOUT_MS);
+      /* Отказ ядра ({ok: false, error}) — не снимок: прежний остаётся, а после трёх подряд — плашка. */
+      const next = await Lz.api.query('get_state', STATE_TIMEOUT_MS);
       if (!next || typeof next !== 'object') {
         throw new Error(`get_state вернул ${next === null ? 'null' : typeof next} вместо объекта`);
       }
@@ -100,7 +106,7 @@
     } catch (err) {
       failures += 1;
       console.warn(`get_state не удался (${failures} раз подряд):`, err);
-      if (failures >= OFFLINE_AFTER_FAILURES) setOnline(false, Lz.api.describeError(err));
+      if (failures >= OFFLINE_AFTER_FAILURES) setOnline(false, Lz.api.describeError(err), Boolean(err && err.refusal));
     } finally {
       polling = false;
       schedule(refreshQueued ? 0 : (needsFastPolling(state) ? FAST_POLL_INTERVAL_MS : POLL_INTERVAL_MS));

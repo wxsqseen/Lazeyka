@@ -97,7 +97,6 @@ TEST_RESULTS_DIR = DATA / "test-results"
 # Свой VPN: ключи и подписки — в папке, закрытой на чтение для обычных пользователей
 # (security.secure_private_dir); ядра — в components/<ядро>/<версия>.
 VPNCLIENT_DIR = DATA / "vpnclient"
-VPNCLIENT_RUN_DIR = VPNCLIENT_DIR / "run"
 VPNCLIENT_RULES_DIR = VPNCLIENT_DIR / "rules"
 PROFILES_FILE = VPNCLIENT_DIR / "profiles.json"
 # Резервная копия системного прокси — вне закрытой папки: секретов в ней нет, а вернуть

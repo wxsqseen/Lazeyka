@@ -19,7 +19,7 @@
     { value: 'game', label: 'Игра', icon: 'gamepad' },
     { value: 'telegram', label: 'Telegram', icon: 'send' },
     { value: 'site', label: 'Сайт', icon: 'globe' },
-    { value: 'vpn', label: 'VPN', icon: 'shieldCheck', title: 'У меня включён VPN' },
+    { value: 'vpn', label: 'Другой VPN', icon: 'shieldCheck', title: 'У меня включена другая VPN-программа' },
     { value: 'vpnclient', label: 'Свой VPN', icon: 'vpn', title: 'Свой VPN не подключается' },
   ];
   const SERVICE_TEXT = {
@@ -77,18 +77,47 @@
     }).el, 'symptom-test');
   }
 
+  /*
+   * Ядро отвечает отчётом через «; » (diagnostics.clear_discord_cache): «Discord закрыт; Discord: очищен «Cache»…»,
+   * «Discord не найден», «…не удалось удалить «Cache»», а если папок кэша нет — пустым отчётом (или одним
+   * «Discord закрыт»). Что вышло — показываем им, а не обещаем «очищен» вслепую.
+   */
+  const CACHE_MISSING = /не найден/i;
+  const CACHE_FAILED = /не удалось/i;
+  const CACHE_CLEARED = /очищен/i;
+  const DISCORD_CLOSED = /закрыт/i;
+
+  /** Тост по отчёту ядра: { kind, text }. Discord закрыли — его нужно запустить заново, даже если что-то не удалилось. */
+  function cacheReport(report) {
+    const restart = DISCORD_CLOSED.test(report) ? ' Запустите Discord заново.' : '';
+    if (CACHE_MISSING.test(report)) return { kind: 'warn', text: Lz.fmt.sentence(report) };
+    if (CACHE_FAILED.test(report)) return { kind: 'warn', text: `${Lz.fmt.sentence(report)}${restart}` };
+    if (!CACHE_CLEARED.test(report)) {
+      const closed = restart ? `${Lz.fmt.sentence(report)} ` : '';
+      return { kind: 'info', text: `${closed}Кэша Discord не нашлось — чистить нечего.${restart}` };
+    }
+    return { kind: 'success', text: `${Lz.fmt.sentence(report)}${restart}` };
+  }
+
+  async function clearCache() {
+    const confirmed = await ui.confirm({
+      title: 'Очистить кэш Discord?',
+      text: 'Discord будет закрыт, а его кэш удалён — это помогает, если он завис на подключении или не грузит картинки. Аккаунт, сообщения и настройки останутся.',
+      confirmLabel: 'Закрыть Discord и очистить',
+      icon: 'eraser',
+    });
+    if (!confirmed) return;
+    const result = await Lz.api.run({ method: 'discord_clear_cache' });
+    if (!result || !result.ok) return;
+    ui.toast(cacheReport(String(result.message || '').trim()));
+  }
+
   function clearCacheButton() {
-    return withKey(ui.actionButton({
-      method: 'discord_clear_cache',
+    return withKey(ui.button({
       label: 'Очистить кэш Discord',
       icon: 'eraser',
-      success: 'Кэш Discord очищен. Запустите Discord заново.',
-      confirm: {
-        title: 'Очистить кэш Discord?',
-        text: 'Discord будет закрыт, а его кэш удалён — это помогает, если он завис на подключении или не грузит картинки. Аккаунт, сообщения и настройки останутся.',
-        confirmLabel: 'Закрыть Discord и очистить',
-        icon: 'eraser',
-      },
+      busyKey: 'discord_clear_cache',
+      onClick: () => clearCache(),
     }).el, 'symptom-cache');
   }
 
@@ -175,7 +204,7 @@
     let latest = null;
     let activationPending = false;
 
-    const card = ui.card({ title: 'Что не работает?' });
+    const card = ui.card({ title: 'Что не работает?', cls: 'symptoms-card' });
     const chooser = ui.segmented({
       labelledBy: card.titleEl.id,
       value: null,

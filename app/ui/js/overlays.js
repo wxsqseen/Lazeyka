@@ -96,6 +96,8 @@
    * Tab не выходит за пределы окна, при закрытии фокус возвращается на место.
    */
   function openModal({ content, labelledBy, describedBy, onEscape, cls, initialFocus }) {
+    /* Меню «⋯» лежит в body вне inert-узла и выше окна по z-index: открытое окно его закрывает. */
+    if (Lz.ui.closeMenu) Lz.ui.closeMenu(true);
     const returnFocus = document.activeElement;
     const dialog = h('div', {
       class: ['modal', cls],

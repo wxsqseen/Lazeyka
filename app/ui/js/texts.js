@@ -30,6 +30,7 @@
   const CHECK_RESULT = {
     ok: 'работает',
     fail: 'не открывается',
+    dns: 'адрес не нашёлся',
     unsup: 'не поддерживается',
     ssl: 'подмена сертификата',
     none: 'не проверялось',
@@ -91,6 +92,8 @@
     const client = source.client || {};
     const active = Number(source.stats && source.stats.active) || 0;
     if (source.status === 'error') return { tone: 'err', text: 'Прокси не работает' };
+    if (source.status === 'starting') return { tone: 'warn', text: 'Прокси запускается…' };
+    if (source.status === 'stopping') return { tone: 'warn', text: 'Прокси выключается…' };
     if (source.status !== 'running') return { tone: 'off', text: 'Прокси выключен' };
     if (client.connected || active > 0) {
       const count = active > 0 ? ` · ${Lz.fmt.count(active, 'соединение', 'соединения', 'соединений')}` : '';
@@ -140,13 +143,21 @@
     blocked: { label: 'Только заблокированное', text: 'Через сервер — только сайты из списков блокировок, остальное напрямую.' },
   };
 
-  /* Пресеты User-Agent подписки (app/vpnclient/model.py: UA_PRESETS). */
+  /* Пресеты User-Agent подписки (app/vpnclient/model.py: UA_PRESETS): подпись в списке выбора. */
   const VPNC_UA = {
     lazeyka: 'Лазейка (честный)',
     v2rayn: 'как v2rayN',
     happ: 'как Happ',
     incy: 'как Incy',
     custom: 'Свой',
+  };
+  /* Те же пресеты именами — для фраз «Попробовать как …», «Переключить на …», «UA: …». */
+  const VPNC_UA_NAME = {
+    lazeyka: 'Лазейка',
+    v2rayn: 'v2rayN',
+    happ: 'Happ',
+    incy: 'Incy',
+    custom: 'свой',
   };
 
   const VPNC_FORMAT = { links: 'ссылки', 'xray-json': 'JSON Xray с группами', sip008: 'SIP008' };
@@ -168,9 +179,13 @@
       title: 'Порт занят',
       advice: 'Порт локального прокси заняла другая программа. Смените порт в «Подробнее» или закройте программу, которая его держит.',
     },
+    /*
+     * Без прав свой VPN не включается вовсе (core.vpnclient_start): «доступ запрещён» у адаптера бывает, когда права
+     * уже есть (diagnose._LOCAL["admin"]) — адаптер держит другой VPN, мешает антивирус или политика компьютера.
+     */
     admin: {
-      title: 'Нет прав на режим «Весь трафик»',
-      advice: 'Своему сетевому адаптеру нужны права администратора. Перезапустите Лазейку с ними или включите режим «Системный прокси».',
+      title: 'Windows не дала создать адаптер',
+      advice: 'Права администратора у Лазейки есть, но адаптер VPN держит другая VPN-программа или его блокирует антивирус. Закройте другие VPN и включите снова; не помогло — перезагрузите компьютер или включите Лазейку как системный прокси.',
     },
     conflict: {
       title: 'Мешает другой VPN',
@@ -190,7 +205,7 @@
     },
     clock: {
       title: 'Часы компьютера сбиты',
-      advice: 'VMess и REALITY не работают, если часы спешат или отстают больше чем на минуту. Синхронизируйте время в параметрах Windows.',
+      advice: 'VMess и REALITY не работают, если часы спешат или отстают больше чем на полторы минуты. Синхронизируйте время в параметрах Windows.',
     },
     unsupported: {
       title: 'Сервер не поддерживается',
@@ -201,6 +216,49 @@
       advice: 'Ядро завершилось с ошибкой. Если оно проработало дольше минуты, Лазейка перезапустит его сама; подробности — в журнале.',
     },
     other: { title: 'Свой VPN не подключился', advice: 'Подробности — в журнале.' },
+  };
+
+  /* Чья сторона у причины «нет ответа» (reason.side: diagnose.SIDES ядра). */
+  const VPNC_SIDES = {
+    you: 'у вас',
+    isp: 'у интернет-провайдера',
+    provider: 'у VPN-провайдера',
+    lazeyka: 'в Лазейке',
+    unknown: 'не ясно',
+  };
+
+  /* Короткая метка причины по коду (diagnose.explain ядра) — для строки сервера; полный текст — в подсказке. */
+  const VPNC_REASONS = {
+    no_internet: 'нет интернета',
+    dns_missing: 'имя сервера не найдено',
+    dns_blocked: 'блокирует DNS',
+    dns_down: 'DNS не отвечает',
+    dns_retry: 'DNS ответил не сразу',
+    dns_error: 'DNS ответил ошибкой',
+    ipv6_only: 'у сервера только IPv6',
+    port_closed: 'порт закрыт',
+    server_down: 'сервер выключен',
+    all_down: 'не отвечает ни один сервер',
+    tcp_timeout: 'сервер молчит',
+    dpi: 'режет DPI',
+    keys_outdated: 'устарели ключи',
+    bad_params: 'испорчены параметры',
+    auth_rejected: 'ключ не принят',
+    sub_expired: 'подписка закончилась',
+    traffic_out: 'кончился трафик',
+    device_limit: 'лимит устройств',
+    clock: 'сбиты часы',
+    udp_blocked: 'режет UDP',
+    udp_silent: 'UDP-сервер молчит',
+    conflict: 'мешает другой VPN',
+    admin: 'Windows не дала создать адаптер',
+    port_busy: 'порт занят',
+    core_failed: 'ошибка ядра',
+    helper_failed: 'ошибка помощника Xray',
+    unsupported: 'не поддерживается',
+    no_exit: 'не выпускает в интернет',
+    killswitch: 'не проверить при kill switch',
+    unknown: 'причина не ясна',
   };
 
   /* Ядра своего VPN: что сказать перед скачиванием (размер официального zip, лицензия, где исходники). */
@@ -252,6 +310,24 @@
     return VPNC_ERRORS[kind] || VPNC_ERRORS.other;
   }
 
+  /**
+   * Причина «нет ответа» из ядра ({side, code, text, advice}) для страницы: { side, sideLabel, short, text,
+   * advice }; null — причины нет или она неполная. Строки из ядра — только как текст.
+   */
+  function vpncReason(reason) {
+    if (!reason || typeof reason !== 'object' || !reason.text) return null;
+    const side = Object.prototype.hasOwnProperty.call(VPNC_SIDES, reason.side) ? reason.side : 'unknown';
+    const code = String(reason.code || '');
+    return {
+      side,
+      code,
+      sideLabel: VPNC_SIDES[side],
+      short: Object.prototype.hasOwnProperty.call(VPNC_REASONS, code) ? VPNC_REASONS[code] : VPNC_SIDES[side],
+      text: String(reason.text),
+      advice: reason.advice ? String(reason.advice) : '',
+    };
+  }
+
   function countryName(code) {
     const key = String(code || '').toUpperCase();
     return COUNTRY_NAMES[key] || key;
@@ -270,25 +346,33 @@
 
   /**
    * Ядро, без которого не включиться, ещё готовится (Лазейка качает его с GitHub при запуске или по
-   * «Включить»): «Готовлю ядро VPN: 45 %», «Готовлю помощник Xray…». Иначе null. Обновление уже
-   * установленного ядра идёт фоном и строку состояния не занимает (оно видно в «Подробнее → Ядра»).
+   * «Включить»): «Готовим ядро VPN: 45 %», «Готовим помощник Xray…». Иначе null. Обновление уже
+   * установленного ядра идёт фоном и строку состояния не занимает (оно видно в «Подробнее → Ядра»), как и
+   * подкачка помощника, который ни одному серверу не нужен (needed: false): «Включить» его не ждёт.
    * short — без подробностей ядра (message): для подписи под кнопкой питания.
    */
   function vpncCoreProgress(cores, short) {
+    const core = vpncCoreFirstInstall(cores);
+    if (!core) return null;
+    const what = core.name === 'xray' ? 'помощник Xray' : 'ядро VPN';
+    if (core.message && !short) return String(core.message);
+    const pct = core.state === 'downloading' && core.progress != null ? `: ${Lz.fmt.percent(core.progress)}` : '…';
+    return `Готовим ${what}${pct}`;
+  }
+
+  /** Первая подкачка ядра, которое нужно для включения: { name, state, progress, message }; иначе null. */
+  function vpncCoreFirstInstall(cores) {
     const source = cores && typeof cores === 'object' ? cores : {};
     for (const name of Object.keys(VPNC_CORES)) {
       const core = source[name];
-      if (!core || core.installed || !VPNC_CORE_ACTIVE.has(core.state)) continue;
-      const what = name === 'xray' ? 'помощник Xray' : 'ядро VPN';
-      if (core.message && !short) return String(core.message);
-      const pct = core.state === 'downloading' && core.progress != null ? `: ${Lz.fmt.percent(core.progress)}` : '…';
-      return `Готовлю ${what}${pct}`;
+      if (!core || core.installed || core.needed === false || !VPNC_CORE_ACTIVE.has(core.state)) continue;
+      return { name, state: core.state, progress: core.progress == null ? null : core.progress, message: core.message || null };
     }
     return null;
   }
 
   /**
-   * Нужное ядро не скачалось: «Ядро VPN не скачано · повторю в 14:05». Причина и кнопка «Скачать ещё раз» —
+   * Нужное ядро не скачалось: «Ядро VPN не скачано · повторим в 14:05». Причина и кнопка «Скачать ещё раз» —
    * в постоянной плашке вверху страницы, здесь — только состояние. Иначе null.
    */
   function vpncCoreMissing(cores) {
@@ -298,7 +382,7 @@
       if (!core || core.installed || core.state !== 'error' || core.needed === false) continue;
       const what = name === 'xray' ? 'Помощник Xray не скачан' : 'Ядро VPN не скачано';
       const at = Number(core.retry_at) > 0 ? new Date(Number(core.retry_at) * 1000) : null;
-      const when = at ? ` · повторю в ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : '';
+      const when = at ? ` · повторим в ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : '';
       return `${what}${when}`;
     }
     return null;
@@ -318,7 +402,8 @@
 
   /**
    * Строка состояния своего VPN: { tone, text }. «Подключено» — только после проверки выхода
-   * через сервер (verified), до неё — «Проверяем соединение…».
+   * через сервер (verified), до неё — «Проверяем соединение…»; проверка не прошла (error) — так и сказать,
+   * а почему — в блоке причины (vpnclient.diagnosis).
    */
   function vpncLine(vc) {
     const source = vc || {};
@@ -331,7 +416,9 @@
       case 'stopping':
         return { tone: 'warn', text: 'Выключаем…' };
       case 'running': {
-        if (!source.verified) return { tone: 'warn', text: 'Проверяем соединение…' };
+        if (!source.verified) {
+          return { tone: 'warn', text: source.error ? 'Ядро включено, но через сервер ничего не открывается' : 'Проверяем соединение…' };
+        }
         const exit = vpncExit(source.exit);
         return { tone: 'ok', text: exit ? `Подключено · выход ${exit}` : 'Подключено' };
       }
@@ -353,6 +440,12 @@
     return status === 'running' && !source.verified ? 'verifying' : status;
   }
 
+  /** Что писать на пилюле: «Проверяем…», пока проверка идёт, и «Нет выхода», когда она не прошла. */
+  function vpncPillShown(vc) {
+    const status = vpncPillStatus(vc);
+    return status === 'verifying' && vc && vc.error ? 'noexit' : status;
+  }
+
   function vpncRunning(status) {
     return RUNNING_STATES.has(status);
   }
@@ -364,7 +457,7 @@
       case 'running':
         return source.started_at ? `Работает ${Lz.fmt.since(source.started_at)}` : 'Подключено';
       case 'verifying':
-        return 'Проверяем выход через сервер…';
+        return source.error ? 'Нет выхода через сервер' : 'Проверяем выход через сервер…';
       case 'starting':
         return vpncCoreProgress(source.cores, true) || 'Подключаемся…';
       case 'stopping':
@@ -378,6 +471,33 @@
     }
   }
 
+  /**
+   * Подпись под кнопкой питания двумя частями: [то, что зачитывает диктор при смене, тихий хвост]. Хвост —
+   * счётчик «1 ч 12 мин»: он меняется каждую минуту (в первую — каждую секунду) и не должен зачитываться.
+   */
+  function vpncCaptionParts(vc, pillStatus) {
+    const source = vc || {};
+    if (pillStatus === 'running' && source.started_at) return ['Работает', ` ${Lz.fmt.since(source.started_at)}`];
+    return [vpncCaption(source, pillStatus), ''];
+  }
+
+  /*
+   * Что ядро проигнорирует у сервера (servers[].warnings): коды разбора ссылки (links.py, xrayjson.py) —
+   * человеческими словами; незнакомое — как прислало ядро.
+   */
+  const VPNC_WARNING = {
+    legacy_vmess_alterid: 'alterId у VMess устарел — ядро подключается без него',
+  };
+
+  function vpncWarning(code) {
+    const text = String(code || '');
+    if (Object.prototype.hasOwnProperty.call(VPNC_WARNING, text)) return VPNC_WARNING[text];
+    const [kind, key] = text.split(/:(.*)/s);
+    if (kind === 'duplicate' && key) return `параметр «${key}» указан дважды — взят первый`;
+    if (kind === 'bad_value' && key) return `неверное значение «${key}» — пропущено`;
+    return text;
+  }
+
   Lz.texts = {
     GAME_FILTER,
     IPSET,
@@ -387,8 +507,11 @@
     VPNC_MODES,
     VPNC_PRESETS,
     VPNC_UA,
+    VPNC_UA_NAME,
     VPNC_FORMAT,
     VPNC_ERRORS,
+    VPNC_SIDES,
+    VPNC_REASONS,
     VPNC_CORES,
     VPNC_CORE_ACTIVE,
     gameFilter,
@@ -401,15 +524,20 @@
     vpncMode,
     vpncPreset,
     vpncError,
+    vpncReason,
     vpncProto,
     vpncCoreProgress,
+    vpncCoreFirstInstall,
     vpncCoreMissing,
     vpncHasServers,
     vpncExit,
     vpncLine,
     vpncPillStatus,
+    vpncPillShown,
     vpncRunning,
     vpncCaption,
+    vpncCaptionParts,
+    vpncWarning,
     countryName,
   };
 })(window.Lz);

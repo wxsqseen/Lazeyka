@@ -17,9 +17,47 @@ def clean_data():
 
 def test_version_ordering():
     assert pack.version_key("1.10.3") > pack.version_key("1.9.9")
-    assert pack.version_key("1.10.3") > pack.version_key("1.10.3b")
     assert pack.version_key("v1.11.2") == pack.version_key("1.11.2")
     assert pack.version_key("1.10") < pack.version_key("1.10.1")
+    assert pack.version_key("1.10") == pack.version_key("1.10.0"), "хвостовой ноль версию не меняет"
+
+
+def test_flowseal_letter_is_a_later_fix():
+    """У Flowseal буква — более позднее исправление той же версии (настоящие теги релизов)."""
+    tags = ["1.7.2", "1.7.2b", "1.9.8", "1.9.8b", "1.9.8c", "1.9.9", "1.9.9a", "1.9.9d", "1.10.0", "1.10.3",
+            "1.10.3b"]
+    assert sorted(reversed(tags), key=pack.version_key) == tags
+    assert pack.version_key("1.10.3b") > pack.version_key("1.10.3"), "1.10.3b — обновление для 1.10.3"
+
+
+def test_prerelease_is_older_than_release():
+    """Semver: пре-релиз (через дефис или словом rc/beta) раньше окончательного; с беты предлагается релиз."""
+    order = ["1.3.0-alpha.1", "1.3.0-beta", "1.3.0-beta.2", "1.3.0-beta.11", "1.3.0-rc.1", "1.3.0", "1.3.1"]
+    assert sorted(reversed(order), key=pack.version_key) == order
+    assert pack.version_key("1.3.0rc1") < pack.version_key("1.3.0")
+    assert pack.version_key("v1.3.0-rc1") < pack.version_key("1.3.0")
+    assert pack.version_key("1.3.0+build5") == pack.version_key("1.3.0")
+
+
+def test_stale_tmp_is_removed_fresh_is_kept():
+    """Хвосты прерванных установок (в том числе ядра Telegram-прокси) убираются, свежие — нет:
+    их может писать установка, идущая параллельно."""
+    import os
+    import time
+    paths.TMP_DIR.mkdir(parents=True, exist_ok=True)
+    old_dir, fresh_dir = paths.TMP_DIR / "tgws-0badf00d", paths.TMP_DIR / "tgws-11111111"
+    old_file, other = paths.TMP_DIR / "app-0badf00d.exe", paths.TMP_DIR / "task-abc.xml"
+    for d in (old_dir, fresh_dir):
+        (d / "tgws_proxy").mkdir(parents=True)
+    old_file.write_bytes(b"x")
+    other.write_bytes(b"x")
+    hour_ago = time.time() - 2 * pack.STALE_TMP_SECONDS
+    for item in (old_dir, old_file, other):
+        os.utime(item, (hour_ago, hour_ago))
+    pack.remove_stale_tmp()
+    assert not old_dir.exists() and not old_file.exists()
+    assert fresh_dir.is_dir(), "свежая папка — идущая установка"
+    assert other.is_file(), "чужие префиксы не трогаем"
 
 
 def test_ensure_bundled_installs_once():

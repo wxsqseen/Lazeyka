@@ -444,13 +444,12 @@ p {
 /* ===================== Баннеры и загрузка ===================== */
 
 /* Баннеры лежат поверх страницы, чтобы их появление не сдвигало содержимое. */
+/* В потоке, над страницей: поверх неё плашка «нет связи» (бывает в две строки) закрывала бы заголовок. */
 .banners {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
+  position: relative;
   z-index: 5;
   display: flex;
+  flex: none;
   flex-direction: column;
 }
 
@@ -475,11 +474,13 @@ p {
   color: var(--err);
 }
 
+/* Непрозрачный: страницы под ним до первого снимка состояния ещё пустые. */
 .boot {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
+  background: var(--bg);
   color: var(--text-2);
 }
 
@@ -501,6 +502,10 @@ p {
   display: inline-flex;
   align-items: center;
   font-size: 13.5px;
+}
+
+.boot__text.is-error {
+  color: var(--err-text);
 }
 
 .boot__hint {
@@ -1211,7 +1216,13 @@ p {
   cursor: pointer;
 }
 
+.setting--static {
+  flex-wrap: wrap;
+  row-gap: 10px;
+}
+
 .setting--static .setting__text {
+  flex: 1 1 240px;
   cursor: default;
 }
 
@@ -1985,6 +1996,73 @@ p {
 @container app (max-height: 700px) {
   .app {
     --page-pad-top: 26px;
+  }
+}
+
+/*
+ * Совсем узко: тело уже 760 px — крупный масштаб (125–150 %) в небольшом окне. Две колонки оставляли бы тексту
+ * по слову в строке, а кнопкам — место за краем: колонки встают друг под друга, шапка страницы и ряды переносятся.
+ */
+@container app (max-width: 760px) {
+  .page-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .page-head__titles {
+    flex: 1 1 240px;
+  }
+
+  .page-head__actions {
+    flex-wrap: wrap;
+  }
+
+  .grid-2,
+  .form-grid--2,
+  .form-grid--3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .card__head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  /* Подзаголовку — хотя бы 260 px: кнопкам не хватает места рядом — они уходят под него, а не сжимают его в колонку. */
+  .card__titles {
+    flex: 1 1 260px;
+  }
+
+  .card__actions {
+    flex-wrap: wrap;
+  }
+
+  .seg__opt {
+    padding: 0 9px;
+  }
+
+  /* Вкладки не помещаются в строку — переносятся «плитками»: подчёркивание на переносе потеряло бы свою линию. */
+  .tabs {
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: visible;
+    padding-bottom: 10px;
+  }
+
+  .tab {
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+  }
+
+  .tab[aria-selected="true"] {
+    border-color: var(--border-strong);
+    background: var(--seg-on);
+  }
+
+  .tab[aria-selected="true"]::after {
+    display: none;
   }
 }
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import re
@@ -36,6 +37,15 @@ class GitHubError(UserError):
 
 class IntegrityError(GitHubError):
     """Файл скачан, но не тот (хеш, размер): другим маршрутом повторять бессмысленно."""
+
+
+class LocalFileError(IntegrityError):
+    """Скачанное не записалось на диск (нет места, нет прав): другой маршрут тоже не поможет."""
+
+
+# Чем может кончиться чтение ответа: urllib (URLError, HTTPError), сокет (OSError, таймаут), разбор
+# заголовков и тела (http.client: IncompleteRead при обрыве chunked-ответа, BadStatusLine, LineTooLong).
+_NETWORK_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, ValueError)
 
 
 def direct_opener() -> Opener:
@@ -71,7 +81,15 @@ def _explain(exc: Exception, url: str) -> GitHubError:
         return GitHubError(f"Нет связи с GitHub: {reason}")
     if isinstance(exc, TimeoutError):
         return GitHubError("GitHub не ответил вовремя")
+    if isinstance(exc, http.client.IncompleteRead):
+        return GitHubError("Обрыв связи с GitHub: ответ пришёл не целиком")
+    if isinstance(exc, http.client.HTTPException):
+        return GitHubError(f"Обрыв связи с GitHub: испорченный ответ ({type(exc).__name__})")
     return GitHubError(f"Ошибка связи с GitHub: {exc}")
+
+
+def _write_error(dest: Path, exc: OSError) -> LocalFileError:
+    return LocalFileError(f"Не удалось записать файл {dest.name}: {exc.strerror or exc}")
 
 
 def http_get(url: str, timeout: float = 15.0, accept: str | None = None, limit: int = 32 * 1024 * 1024,
@@ -80,7 +98,7 @@ def http_get(url: str, timeout: float = 15.0, accept: str | None = None, limit: 
     try:
         with (opener or direct_opener()).open(_request(url, accept), timeout=timeout) as resp:
             data = resp.read(limit + 1)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except _NETWORK_ERRORS as exc:
         raise _explain(exc, url) from exc
     if len(data) > limit:
         raise GitHubError("Ответ слишком большой")
@@ -163,11 +181,18 @@ def download(url: str, dest: Path, expected_sha256: str | None, *,
              progress: Callable[[int, int], None] | None = None,
              cancel: threading.Event | None = None, timeout: float = 30.0,
              limit: int = 200 * 1024 * 1024, opener: Opener | None = None) -> str:
-    """Скачивает файл и возвращает его SHA-256. При несовпадении хеша файл удаляется."""
+    """Скачивает файл и возвращает его SHA-256. При несовпадении хеша файл удаляется.
+
+    Ошибка записи на диск (LocalFileError) отличается от ошибки сети: «нет связи с GitHub» при
+    переполненном диске увело бы человека не туда."""
     sha = hashlib.sha256()
     done = 0
     try:
-        with (opener or direct_opener()).open(_request(url), timeout=timeout) as resp, open(dest, "wb") as out:
+        out = open(dest, "wb")
+    except OSError as exc:
+        raise _write_error(dest, exc) from exc
+    try:
+        with out, (opener or direct_opener()).open(_request(url), timeout=timeout) as resp:
             total = int(resp.headers.get("Content-Length") or 0)
             while True:
                 if cancel is not None and cancel.is_set():
@@ -178,14 +203,21 @@ def download(url: str, dest: Path, expected_sha256: str | None, *,
                 done += len(chunk)
                 if done > limit:
                     raise IntegrityError("Файл слишком большой")
-                out.write(chunk)
+                try:
+                    out.write(chunk)
+                except OSError as exc:
+                    raise _write_error(dest, exc) from exc
                 sha.update(chunk)
                 if progress:
                     progress(done, total)
+            try:
+                out.flush()            # ошибка записи — здесь, а не при закрытии файла под видом ошибки сети
+            except OSError as exc:
+                raise _write_error(dest, exc) from exc
     except GitHubError:
         dest.unlink(missing_ok=True)
         raise
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except _NETWORK_ERRORS as exc:
         dest.unlink(missing_ok=True)
         raise _explain(exc, url) from exc
     digest = sha.hexdigest()

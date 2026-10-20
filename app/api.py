@@ -93,6 +93,10 @@ class Api:
     def quit_app(self):
         return self._core.quit()
 
+    @_guard
+    def app_restart(self):
+        return self._core.app_restart()
+
     # ---- zapret
     @_guard
     def zapret_start(self, quiet=False):

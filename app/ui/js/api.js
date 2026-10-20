@@ -58,6 +58,24 @@
     return Promise.race([call(method, ...args), timeout]).finally(() => clearTimeout(timer));
   }
 
+  /**
+   * Ответ метода-запроса (get_state, get_logs, lists_get…): данные или отказ ядра { ok: false, error }.
+   * Отказ превращается в исключение (refusal: true), а не принимается за пустые данные.
+   */
+  function unwrap(method, result) {
+    if (result && typeof result === 'object' && result.ok === false) {
+      const err = new Error(result.error ? String(result.error) : `ядро отклонило ${method} и не назвало причину`);
+      err.refusal = true;
+      throw err;
+    }
+    return result;
+  }
+
+  /** Данные метода-запроса с ограничением по времени; отказ ядра — исключение. */
+  async function query(method, timeoutMs, ...args) {
+    return unwrap(method, await callWithTimeout(method, timeoutMs, ...args));
+  }
+
   /** Вызов действия: всегда возвращает объект с полем ok и не бросает исключений. */
   async function action(method, ...args) {
     let result;
@@ -79,6 +97,22 @@
 
   function isBusy(key) {
     return inflight.has(key);
+  }
+
+  /**
+   * Действие в несколько шагов (окно перед включением, затем вызов ядра): пока оно идёт, кнопки с этим key
+   * заняты, а повторное нажатие ничего не начинает — возвращает null. Вызовы Lz.api.run внутри — с другими ключами.
+   */
+  async function hold(key, fn) {
+    if (inflight.has(key)) return null;
+    inflight.add(key);
+    emitBusy();
+    try {
+      return await fn();
+    } finally {
+      inflight.delete(key);
+      emitBusy();
+    }
   }
 
   function onBusyChange(listener) {
@@ -116,5 +150,7 @@
     return result;
   }
 
-  Lz.api = { backend, isReady, hasMethod, call, callWithTimeout, action, run, isBusy, onBusyChange, describeError };
+  Lz.api = {
+    backend, isReady, hasMethod, call, callWithTimeout, unwrap, query, action, run, hold, isBusy, onBusyChange, describeError,
+  };
 })(window.Lz);

@@ -23,6 +23,8 @@ REQUIRED_CONFIG_FIELDS = (
     "port", "host", "secret", "dc_redirects", "buffer_size", "pool_size", "fallback_cfproxy",
     "cfproxy_user_domains", "cfproxy_worker_domains", "cfproxy_h2_media", "disable_secure",
 )
+# Счётчики, без которых не обойтись (скорость, график, «Telegram подключён»). Остальные — по возможности.
+REQUIRED_STATS_FIELDS = ("connections_active", "connections_total", "connections_ws", "bytes_up", "bytes_down")
 
 
 class CoreError(UserError):
@@ -81,8 +83,14 @@ def check(core: ProxyCore) -> str | None:
     for name in ("parse_dc_ip_list", "coerce_domain_list"):
         if not callable(getattr(core.config, name, None)):
             return f"в ядре нет функции {name}"
-    if not hasattr(core.stats_module, "stats"):
+    if not hasattr(core.main, "_server_instance"):
+        return "в ядре нет _server_instance (по нему видно, что прокси слушает порт)"
+    st = getattr(core.stats_module, "stats", None)
+    if st is None:
         return "в ядре нет статистики"
+    missing = [f for f in REQUIRED_STATS_FIELDS if not hasattr(st, f)]
+    if missing:
+        return "в статистике ядра нет полей: " + ", ".join(missing)
     if not callable(getattr(core.utils, "create_ssl_context", None)):
         return "в ядре нет create_ssl_context"
     return None
@@ -94,6 +102,12 @@ def load_bundled() -> ProxyCore:
 
 def module_name_for(version: str) -> str:
     return "tgws_proxy_" + re.sub(r"[^0-9A-Za-z]", "_", version)
+
+
+def _forget_modules(name: str) -> None:
+    """Убрать из sys.modules пакет ядра и его подмодули: следующая попытка загрузит его заново."""
+    for key in [k for k in sys.modules if k == name or k.startswith(name + ".")]:
+        del sys.modules[key]
 
 
 def load_from_dir(package_dir: Path, version: str) -> ProxyCore:
@@ -111,12 +125,18 @@ def load_from_dir(package_dir: Path, version: str) -> ProxyCore:
         try:
             spec.loader.exec_module(module)
         except Exception as exc:
-            for key in [k for k in sys.modules if k == name or k.startswith(name + ".")]:
-                del sys.modules[key]
+            _forget_modules(name)
             raise CoreError(f"ядро не загрузилось: {exc!r}") from exc
     try:
         return _assemble(name, "updated")
+    except CoreError:
+        _forget_modules(name)
+        raise
     except ImportError as exc:
+        _forget_modules(name)
         missing = getattr(exc, "name", None)
         hint = f" (нужен модуль {missing}, которого нет в этой сборке)" if missing else ""
         raise CoreError(f"ядро не загрузилось: {exc}{hint}") from exc
+    except Exception as exc:  # noqa: BLE001 — чужой код: SyntaxError, RuntimeError в подмодуле
+        _forget_modules(name)
+        raise CoreError(f"ядро не загрузилось: {exc!r}") from exc

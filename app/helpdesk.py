@@ -23,7 +23,7 @@ DOH_PROVIDERS = (
     {"id": "quad9", "name": "Quad9", "ip": "9.9.9.9"},
 )
 DOH_JSON = "https://cloudflare-dns.com/dns-query?name={name}&type=A"
-_DOMAIN = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+_DOMAIN = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63}|xn--[a-z0-9-]{1,59})$")
 
 
 def _curl() -> str:
@@ -115,11 +115,13 @@ def check_dns(doh_enabled: bool) -> dict:
 
 
 def normalize_domain(text: str) -> str | None:
-    value = (text or "").strip().lower()
-    value = re.sub(r"^[a-z]+://", "", value).split("/")[0].split(":")[0].strip(".")
-    if value.startswith("www."):
+    """Адрес сайта из ввода человека: без схемы, пути, порта и «www.», кириллица — в punycode
+    (так его понимают и curl, и списки winws)."""
+    from .zapret.lists import clean_domain
+    value = clean_domain((text or "").strip().lstrip("^"))
+    if value is not None and value.startswith("www."):
         value = value[4:]
-    return value if _DOMAIN.match(value) else None
+    return value if value and _DOMAIN.match(value) else None
 
 
 def check_site(domain: str) -> dict:
@@ -229,6 +231,17 @@ def _vpnclient_lines(vc: dict | None) -> list[str]:
                      f"{sel.get('proto')}/{sel.get('transport')}/{sel.get('security')} · ядро {sel.get('engine')}")
     if vc.get("error_kind") or vc.get("error"):
         lines.append(f"Ошибка своего VPN: {vc.get('error_kind') or 'other'}")
+    diagnosis = vc.get("diagnosis")
+    if isinstance(diagnosis, dict) and diagnosis.get("code"):
+        lines.append(f"Причина: {diagnosis.get('code')} ({diagnosis.get('side')})")
+    silent: dict[str, int] = {}
+    for s in servers:
+        reason = ((s.get("latency") or {}).get("reason") or {}) if isinstance(s, dict) else {}
+        if isinstance(reason, dict) and reason.get("code"):
+            key = f"{reason['code']} ({reason.get('side')})"
+            silent[key] = silent.get(key, 0) + 1
+    if silent:
+        lines.append("Нет ответа: " + ", ".join(f"{key} ×{count}" for key, count in sorted(silent.items())))
     cores = vc.get("cores") or {}
     if cores:
         lines.append("Ядра: " + ", ".join(

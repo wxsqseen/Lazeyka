@@ -490,3 +490,13 @@ def test_hwid_offers():
     working = _fetched(headers={"x-hwid-active": "true"})
     assert offer(working, Decoded("links", servers=decode(VLESS.encode(), {}).servers)) is None
     assert offer(_fetched(), Decoded("links")) ["kind"] == "ua"
+
+
+def test_pasted_local_server_is_real_but_subscription_stub_is_not():
+    """Провайдеры кладут в подписку «серверы» на 127.0.0.1 с текстом — это заглушки. А ссылку на свой
+    прокси на этом ПК (127.x, localhost), вставленную человеком, нужно принять как сервер."""
+    body = b"socks://MTI3LjAuMC4xOjEwODA=@127.0.0.1:1080#Local\nvless://11111111-2222-4333-8444-555555555555@0.0.0.0:443#Expired\n"
+    from_sub = sb.decode(body, {})
+    assert not from_sub.servers and "Local" in "; ".join(from_sub.notices)
+    pasted = sb.decode(body, {}, keep_local=True)
+    assert [s.name for s in pasted.servers] == ["Local"] and pasted.notices == ["Expired"]

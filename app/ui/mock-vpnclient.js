@@ -14,15 +14,22 @@
  *   vpnc=nocore     — ядро не скачалось при запуске: плашка «Скачать ещё раз», повтор по расписанию
  *   vpnc=autoupdate — ядро обновилось само до 1.15.0 и заработает со следующего подключения
  *   vpnc=empty      — ни одной подписки и сервера: пустое состояние, ядра не установлены
- *   vpnc=error      — не подключилось: сервер отклонил рукопожатие REALITY
+ *   vpnc=error      — не подключилось: сервер отклонил рукопожатие REALITY (причина — устаревшие ключи, у VPN-провайдера)
+ *   vpnc=noexit     — ядро работает, а через сервер ничего не открывается: DPI интернет-провайдера, плашка vpn-exit
+ *   vpnc=offline    — нет интернета: включение не вышло и у серверов «нет ответа» с причиной «у вас»
+ *   vpnc=why        — у серверов «нет ответа» с причинами разных сторон (порт закрыт, DPI, UDP, не ясно, kill switch)
  *   vpnc=conflict   — работает Incy: при включении — окно «Уже работает другой VPN»
- *   vpnc=uac        — то же, но Лазейка запущена от другой учётной записи UAC: режим прокси недоступен
+ *   vpnc=uac        — то же, но Лазейка запущена от другой учётной записи UAC: режим прокси недоступен — ядро
+ *                     отдаёт оба факта (туннельный конфликт с proxy_denied), системный прокси не предлагается
+ *   vpnc=uaconly    — чужого VPN нет, режим «Системный прокси», Лазейка под чужой учётной записью UAC: после
+ *                     «Включить» — окно и плашка «Системный прокси недоступен» (uac_user, как менеджер в preflight)
  *   vpnc=xhttp      — выбран сервер XHTTP, он работает через помощник Xray
  *   vpnc=import     — идёт импорт подписки, затем предложение представиться другим клиентом
  *   vpnc=offer      — сразу предложение после импорта (панель ответила 403)
  *   vpnc=deeplink   — пришла ссылка lazeyka:// — окно «Добавить из ссылки?»
  *   vpnc=expiring   — подписка заканчивается через 2 дня, израсходовано 93 % трафика
  *   vpnc=coreupdate — вышло обновление ядра sing-box 1.14.4
+ *   importfile=conf — «Из файла» выбирает WireGuard .conf: сервер добавляется сразу, итог — в ответе (message)
  *   scale=0.8…1.5   — масштаб окна (settings.ui_scale)
  *   vpncdemo=start|qr|props|backup|apps|delete|menu|rename|dirty — открыть окно раздела (для скриншотов)
  */
@@ -91,13 +98,38 @@
   const MODES = ['tun', 'proxy', 'local'];
   /* Чужой VPN и учётная запись UAC — то, что в ядре видят Core (_own_conflict) и менеджер (preflight). */
   const FOREIGN_TUNNEL = SCENARIO === 'conflict' || SCENARIO === 'uac' ? 'Incy' : null;
-  const PROXY_DENIED = SCENARIO === 'uac'
-    ? 'Режим «Системный прокси» недоступен: Лазейка запущена от имени другой учётной записи (в окне UAC ввели пароль другого администратора), и её прокси не подействует на ваши программы. Включите режим «Весь трафик» или запустите Лазейку из своей учётной записи.'
+  /* Как SysProxy.available ядра: только причина, без совета — что делать, говорит страница. */
+  const PROXY_DENIED = SCENARIO === 'uac' || SCENARIO === 'uaconly'
+    ? 'Системный прокси здесь недоступен: Лазейка запущена от другой учётной записи'
     : null;
   const SUPPORTED_SCHEMES = /^(vless|vmess|ss|trojan|hysteria2|hy2|tuic|wireguard|socks5?):\/\//i;
   const UNSUPPORTED_SCHEMES = /^(anytls|naive\+https|ssr|trojan-go|amneziawg|sstp|openconnect):\/\//i;
+  /* Причины «нет ответа» — коды, стороны и тексты как у diagnose.explain ядра (выборка для стенда). */
+  const REASONS = {
+    udp_blocked: ['isp', 'Сервер на UDP (Hysteria2, TUIC, WireGuard, mKCP) не отвечает, а серверы на TCP отвечают — похоже, интернет-провайдер режет UDP.',
+      'Выберите сервер на TCP (VLESS, Trojan) или подключитесь через другую сеть.'],
+    dpi: ['isp', 'Соединение с сервером есть, но защищённое рукопожатие обрывается — похоже, так соединения режет DPI интернет-провайдера.',
+      'Включите «Фрагментацию ClientHello» в «Подробнее» или выберите сервер с другим транспортом (XHTTP, gRPC).'],
+    port_closed: ['provider', 'Сервер на связи, но его порт закрыт: сервер выключен или провайдер сменил порт.',
+      'Обновите подписку. Не поможет — выберите другой сервер.'],
+    keys_outdated: ['provider', 'До сервера всё доходит, но он не принимает ключи из подписки (REALITY или TLS) — похоже, они устарели.',
+      'Обновите подписку. Не поможет — напишите в поддержку VPN-провайдера.'],
+    tcp_timeout: ['unknown', 'Сервер не отвечает, хотя интернет есть: он выключен, или интернет-провайдер блокирует его адрес.',
+      'Проверьте задержку всех серверов подписки или подключитесь через другую сеть — так станет ясно, чья сторона.'],
+    no_internet: ['you', 'Интернета нет: даже напрямую не открываются контрольные сайты.',
+      'Проверьте кабель или Wi-Fi и роутер. Когда интернет появится, проверьте снова.'],
+    killswitch: ['lazeyka', 'Kill switch выпускает в сеть только ядра текущего подключения — этот сервер сейчас не проверить.',
+      'Проверьте задержку, когда VPN выключен, или выберите этот сервер — он проверится через подключение.'],
+  };
+  /* Какие серверы в стенде молчат и почему (vpnc=why — причины разных сторон, vpnc=offline — нет интернета). */
+  const SILENT = {
+    why: { Франкфурт: 'port_closed', Хельсинки: 'dpi', Стокгольм: 'udp_blocked', Варшава: 'tcp_timeout', Рига: 'killswitch' },
+    offline: { Амстердам: 'no_internet', Франкфурт: 'no_internet', Хельсинки: 'no_internet', Стокгольм: 'no_internet' },
+  }[SCENARIO] || { Стокгольм: 'udp_blocked' };
 
   let vc = null;
+  /* Как VpnClientManager._conflict: отказ uac_user запоминается в preflight и висит до следующего preflight. */
+  let managerConflict = null;
   /* Адреса подписок — секрет ядра; имитация держит их у себя, как profiles.json. */
   const subUrls = new Map();
   /* Пароль локального прокси и свои User-Agent подписок странице не отдаются — как local-proxy.json ядра. */
@@ -129,6 +161,17 @@
     return `${prefix}${Date.now().toString(16).slice(-6)}${idCounter}`;
   };
   const today = () => new Date().toISOString().slice(0, 10);
+  const reasonFor = (code) => {
+    const [side, text, advice] = REASONS[code] || REASONS.tcp_timeout;
+    return { side, code: REASONS[code] ? code : 'tcp_timeout', text, advice };
+  };
+  /* «Нет ответа» с причиной — как задержку записывает ядро после проверки; kill switch — «не проверить». */
+  const silentLatency = (code) => ({
+    ms: null,
+    at: nowSec(),
+    error: code === 'killswitch' ? 'не проверить при включённом kill switch' : 'нет ответа за 5 с',
+    reason: reasonFor(code),
+  });
 
   /* ---------- Эталон и сценарии ---------- */
 
@@ -193,11 +236,54 @@
     if (vc.selected && vc.selected.kind === 'auto') vc.selected = selectedFor(vc.selected.id) || vc.selected;
   }
 
+  /*
+   * Серверы конфига работающего VPN — как session.plan.servers ядра (manager._selection): выбранный (у «Самого
+   * быстрого» — поддерживаемые серверы группы) и остальные поддерживаемые серверы его подписки, всего не больше 16.
+   * Собираются при включении под тогдашний выбор; эталон «уже работает» — под текущий, при первом вопросе.
+   */
+  const MAX_CONFIG_SERVERS = 16;
+  let configIds = null;
+
+  function buildConfigIds() {
+    const id = vc.selected ? String(vc.selected.id) : '';
+    const subOf = (item) => item.sub || null;
+    const supported = vc.servers.filter((server) => server.supported);
+    let primary = [];
+    let sub = null;
+    if (id.startsWith('auto:')) {
+      const target = id.slice('auto:'.length);
+      const group = vc.groups.find((item) => item.id === target);
+      primary = supported.filter((server) => (group ? group.members.includes(server.id) : subOf(server) === target))
+        .slice(0, MAX_CONFIG_SERVERS);
+      sub = group ? subOf(group) : target;
+    } else if (serverById(id)) {
+      primary = [serverById(id)];
+      sub = subOf(primary[0]);
+    }
+    const rest = supported.filter((server) => subOf(server) === sub && !primary.includes(server));
+    return new Set(primary.concat(rest).slice(0, MAX_CONFIG_SERVERS).map((server) => server.id));
+  }
+
+  /** Как Manager._switch: сервер или группа в конфиге — переключение без перезапуска, иначе перезапуск. */
+  function inConfig(id) {
+    if (!configIds) rememberConfig();
+    if (!String(id).startsWith('auto:')) return configIds.has(String(id));
+    const group = vc.groups.find((item) => item.id === String(id).slice('auto:'.length));
+    return Boolean(group) && group.members.some((member) => configIds.has(member));
+  }
+
+  /** Конфиг собран под нынешний выбор — и в снимке, как vpnclient.config_servers ядра. */
+  function rememberConfig() {
+    configIds = buildConfigIds();
+    vc.config_servers = Array.from(configIds);
+  }
+
   function resetRuntime() {
     vc.started_at = null;
     vc.verified = false;
     vc.exit = null;
     vc.listen = null;
+    vc.config_servers = null;
     vc.stats = { up: 0, down: 0, up_rate: 0, down_rate: 0, connections: 0 };
     vc.memory = { 'sing-box': null, xray: null };
     refreshAuto();
@@ -206,6 +292,33 @@
   function needsXray() {
     const selected = vc.selected;
     return Boolean(selected && selected.engine === 'xray') || vc.servers.some((server) => server.engine === 'xray');
+  }
+
+  /** Серверы, которые в этом сценарии молчат: «нет ответа» с причиной (SILENT). */
+  function markSilent() {
+    for (const server of vc.servers) {
+      if (server.supported && SILENT[server.name]) server.latency = silentLatency(SILENT[server.name]);
+    }
+  }
+
+  /** Как менеджер: выход не проверен — ошибка с причиной и плашка vpn-exit (почему, чья сторона, что сделать). */
+  function noExit(why) {
+    vc.error = why.text;
+    vc.error_kind = why.code === 'dpi' || why.code === 'keys_outdated' ? 'tls' : 'timeout';
+    vc.diagnosis = why;
+    const side = { you: 'у вас', isp: 'у интернет-провайдера', provider: 'у VPN-провайдера', lazeyka: 'в Лазейке', unknown: 'не ясно' }[why.side];
+    state.notices = state.notices.filter((item) => item.id !== 'vpn-exit').concat({
+      id: 'vpn-exit', level: 'warn', page: 'vpnclient', persistent: true, dismissible: true,
+      text: `Ядро включено, но через сервер ничего не открывается. ${why.text} Чья сторона: ${side}. ${why.advice}`,
+      action: { label: 'Переподключить', call: 'vpnclient_restart', args: [] },
+    });
+  }
+
+  function clearDiagnosis() {
+    vc.error = null;
+    vc.error_kind = null;
+    vc.diagnosis = null;
+    state.notices = state.notices.filter((item) => item.id !== 'vpn-exit');
   }
 
   function applyScenario() {
@@ -250,7 +363,7 @@
         for (const name of ['sing-box', 'xray']) {
           const what = name === 'xray' ? 'Помощник Xray не скачался' : 'Ядро VPN не скачалось';
           const at = new Date(retryAt * 1000);
-          setCoreAlert(name, `${what}: ${reason.replace(/\.$/, '')}. Повторю в ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}.`);
+          setCoreAlert(name, `${what}: ${reason.replace(/\.$/, '')}. Повторим в ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}.`);
         }
         break;
       }
@@ -265,13 +378,39 @@
         resetRuntime();
         vc.error_kind = 'tls';
         vc.error = 'Сервер «Амстердам» отклонил рукопожатие REALITY.';
+        vc.diagnosis = reasonFor('keys_outdated');
         log('vpn', 'error', 'outbound/vless[proxy]: REALITY: processed invalid connection — сервер отклонил рукопожатие');
+        break;
+      case 'noexit':
+        /* Ядро работает, а через сервер ничего не открывается: причина — DPI интернет-провайдера. */
+        vc.verified = false;
+        vc.exit = null;
+        noExit(reasonFor('dpi'));
+        break;
+      case 'offline':
+        vc.status = 'error';
+        resetRuntime();
+        vc.error_kind = 'timeout';
+        vc.error = 'Не удалось узнать адрес сервера «Амстердам»: адрес (IPv4) не получен ни от одного DNS через HTTPS.';
+        vc.diagnosis = reasonFor('no_internet');
+        markSilent();
+        break;
+      case 'why':
+        vc.servers.splice(4, 0,
+          makeServer({ id: 'a7b8c9d0e1f2a3b4', sub: 's-3f9a1c', name: 'Варшава', country: 'PL' }),
+          makeServer({ id: 'b8c9d0e1f2a3b4c5', sub: 's-3f9a1c', name: 'Рига', country: 'LV', proto: 'trojan', security: 'tls' }));
+        markSilent();
         break;
       case 'conflict':
       case 'uac':
         vc.status = 'stopped';
         resetRuntime();
         vc.conflict = snapshotConflict();
+        break;
+      case 'uaconly':
+        vc.status = 'stopped';
+        resetRuntime();
+        vc.mode = 'proxy';
         break;
       case 'xhttp':
         vc.selected = selectedFor('d3e4f5a6b7c8d9e0');
@@ -331,6 +470,11 @@
     ];
   }
 
+  /** Как _sub_public ядра: число серверов подписки считается по списку, а не хранится отдельно. */
+  function countServers() {
+    for (const sub of vc.subscriptions) sub.servers = vc.servers.filter((server) => server.sub === sub.id).length;
+  }
+
   function setup(data, error) {
     if (!data) {
       state.vpnclient = {
@@ -343,6 +487,7 @@
     vc = data;
     rebase(vc);
     applyScenario();
+    countServers();
     for (let i = HISTORY_POINTS; i > 0; i -= 1) {
       const [up, down] = vc.status === 'running' ? nextRates() : [0, 0];
       vc.history.push([Math.round(nowSec() - i), Math.round(up), Math.round(down)]);
@@ -464,18 +609,26 @@
   function finishStart() {
     if (vc.status !== 'starting') return;
     const selected = vc.selected;
-    if (selected && selected.kind === 'server') {
-      const server = serverById(selected.id);
-      if (server && server.latency && server.latency.error) {
-        vc.status = 'error';
-        vc.error_kind = 'timeout';
-        vc.error = `Сервер «${server.name}» не ответил за 8 с.`;
-        log('vpn', 'error', `outbound[proxy]: dial tcp ${server.name}: i/o timeout`);
-        return;
-      }
+    const server = selected && selected.kind === 'server' ? serverById(selected.id) : null;
+    if (SCENARIO === 'offline') {
+      vc.status = 'error';
+      vc.error_kind = 'timeout';
+      vc.error = 'Не удалось узнать адрес сервера: адрес (IPv4) не получен ни от одного DNS через HTTPS.';
+      vc.diagnosis = reasonFor('no_internet');
+      log('vpn', 'warn', 'Свой VPN не включился (timeout) [you/no_internet]');
+      return;
+    }
+    if (server && server.latency && server.latency.error) {
+      vc.status = 'error';
+      vc.error_kind = 'timeout';
+      vc.error = `Сервер «${server.name}» не ответил за 8 с.`;
+      vc.diagnosis = server.latency.reason || reasonFor('tcp_timeout');
+      log('vpn', 'error', `outbound[proxy]: dial tcp ${server.name}: i/o timeout`);
+      return;
     }
     vc.status = 'running';
     refreshAuto();
+    rememberConfig();
     vc.started_at = nowSec();
     vc.stats = { up: 0, down: 0, up_rate: 0, down_rate: 0, connections: randomInt(8, 20) };
     vc.listen = vc.mode === 'tun' ? null : `127.0.0.1:${vc.settings.port}`;
@@ -483,6 +636,7 @@
     log('vpn', 'info', `sing-box ${vc.cores['sing-box'].version}: запущен, ${vc.mode === 'tun' ? 'TUN «Lazeyka» 172.19.0.1/30' : `прокси ${vc.listen}`}`);
     later(VERIFY_MS, () => {
       if (vc.status !== 'running') return;
+      clearDiagnosis();
       vc.verified = true;
       vc.exit = exitFor(vc.selected);
       log('vpn', 'info', `Выход проверен: ${vc.exit.ip}, ${vc.exit.country || '—'}`);
@@ -490,8 +644,7 @@
   }
 
   async function startSequence() {
-    vc.error = null;
-    vc.error_kind = null;
+    clearDiagnosis();
     resetRuntime();
     vc.status = 'starting';
     if (!vc.cores['sing-box'].installed) await installCore('sing-box');
@@ -504,6 +657,7 @@
     vc.status = 'stopping';
     later(STOP_MS, () => {
       vc.status = 'stopped';
+      clearDiagnosis();
       resetRuntime();
       log('vpn', 'info', 'Свой VPN выключен, системный прокси возвращён');
     });
@@ -511,6 +665,7 @@
 
   function restartSequence(reason) {
     log('vpn', 'info', `Переподключаемся: ${reason}`);
+    clearDiagnosis();
     vc.status = 'starting';
     vc.verified = false;
     vc.exit = null;
@@ -518,7 +673,11 @@
     later(START_MS, finishStart);
   }
 
+  /** Как Core._own_conflict: под чужой учётной записью UAC системный прокси не предлагается — и факт об этом (proxy_denied). */
   function tunnelConflict(label) {
+    if (PROXY_DENIED) {
+      return { kind: 'tunnel', label, text: `Уже работает ${label} — два VPN мешают друг другу: выключите ${label}.`, proxy_denied: PROXY_DENIED };
+    }
     return { kind: 'tunnel', label, text: `Уже работает ${label} — два VPN мешают друг другу: выключите ${label} или включите Лазейку как системный прокси.` };
   }
 
@@ -543,17 +702,18 @@
     return null;
   }
 
-  /** Как VpnClientManager.preflight: режим прокси под чужой учётной записью UAC. */
+  /** Как VpnClientManager.preflight: режим прокси под чужой учётной записью UAC (label у ядра — «Лазейка»). */
   function uacConflict() {
-    return vc.mode === 'proxy' && PROXY_DENIED ? { kind: 'uac_user', label: 'Свой VPN', text: PROXY_DENIED } : null;
+    return vc.mode === 'proxy' && PROXY_DENIED ? { kind: 'uac_user', label: 'Лазейка', text: PROXY_DENIED } : null;
   }
 
   /* ---------- Задержка и скорость ---------- */
 
+  /** Как ядро: у «нет ответа» после проверки — причина (чья сторона и что сделать). */
   function measureLatency(server) {
-    if (server.name === 'Стокгольм') return { ms: null, at: nowSec(), error: 'нет ответа за 5 с' };
+    if (SILENT[server.name]) return silentLatency(SILENT[server.name]);
     const base = BASE_LATENCY[server.country] || (server.latency && server.latency.ms) || randomInt(70, 260);
-    return { ms: Math.round(base * random(0.85, 1.25)), at: nowSec(), error: null };
+    return { ms: Math.round(base * random(0.85, 1.25)), at: nowSec(), error: null, reason: null };
   }
 
   function runLatency(ids) {
@@ -584,7 +744,7 @@
     return {
       id: newId('m'), sub: null, name: 'Сервер', country: null, proto: 'vless', transport: 'tcp', security: 'reality',
       engine: 'sing-box', supported: true, reason: null, description: null, warnings: [],
-      latency: { ms: null, at: null, error: null }, speed: null, ...fields,
+      latency: { ms: null, at: null, error: null, reason: null }, speed: null, ...fields,
     };
   }
 
@@ -877,7 +1037,9 @@
   Object.assign(api, {
     vpnclient_preflight() {
       if (!vc) return ok({ ask: false, conflict: null });
-      const conflict = ownConflict() || uacConflict();
+      /* Менеджер запоминает свой отказ до следующего preflight — он и попадает в снимок (snapshot.conflict). */
+      managerConflict = uacConflict();
+      const conflict = ownConflict() || managerConflict;
       return ok({ ask: Boolean(conflict), conflict });
     },
 
@@ -925,15 +1087,18 @@
       if (server && !server.supported) return fail(`Сервер «${server.name}» не поддерживается: ${server.reason}`);
       const selected = selectedFor(String(id));
       if (!selected) return fail('Такого сервера больше нет — обновите список');
+      const switchLive = vc.status === 'running' && inConfig(String(id));
       vc.selected = selected;
-      log('vpn', 'info', `Выбран сервер «${selected.name}»${vc.status === 'running' ? ' — переключаем без перезапуска' : ''}`);
-      if (vc.status === 'running') {
+      log('vpn', 'info', `Выбран сервер «${selected.name}»${switchLive ? ' — переключаем без перезапуска' : ''}`);
+      if (switchLive) {
         vc.verified = false;
         later(RESELECT_MS, () => {
           if (vc.status !== 'running') return;
           vc.verified = true;
           vc.exit = exitFor(vc.selected);
         });
+      } else if (vc.status === 'running') {
+        restartSequence(`сервер «${selected.name}» вне конфига подключения`);
       }
       return ok();
     },
@@ -954,6 +1119,7 @@
       const target = id ? String(id) : (vc.selected && (vc.selected.actual ? vc.selected.actual.id : vc.selected.id));
       const server = serverById(target);
       if (!server) return fail('Сервер для теста не найден');
+      if (!inConfig(server.id)) return fail('Сервер не входит в текущее подключение — выберите его и повторите');
       vc.speed = { running: true, server: server.id, mbps: null, at: null };
       later(SPEED_MS, () => {
         const mbps = Math.round(random(38, 128) * 10) / 10;
@@ -975,11 +1141,22 @@
       return ok();
     },
 
+    /*
+     * Как manager.import_file: .txt/.json — обычное добавление с ходом в import; файл WireGuard (.conf,
+     * importfile=conf в адресе) добавляется сразу — итог в ответе (message), а не в import.
+     */
     vpnclient_import_file() {
       const denied = requireVc();
       if (denied) return denied;
-      startImport('wireguard://home.conf#Дом (WireGuard)', null, 'Читаем home.conf…');
-      return ok(null, 700);
+      if (params.get('importfile') !== 'conf') {
+        startImport('vless://file@203.0.113.90:443?security=reality#Сервер из файла', null, 'Читаем servers.txt…');
+        return ok(null, 700);
+      }
+      const server = makeServer({ name: 'Дом (WireGuard)', proto: 'wireguard', security: 'none', transport: 'udp' });
+      vc.servers.push(server);
+      if (!vc.selected) vc.selected = selectedFor(server.id);
+      log('vpn', 'info', 'Добавлен сервер WireGuard из home.conf');
+      return ok({ message: 'Добавлено серверов WireGuard: 1' }, 700);
     },
 
     vpnclient_import_qr(source) {
@@ -1073,7 +1250,7 @@
       if (!serverById(String(id))) return fail('Сервер не найден');
       vc.servers = vc.servers.filter((server) => server.id !== id);
       vc.groups.forEach((group) => { group.members = group.members.filter((member) => member !== id); });
-      for (const sub of vc.subscriptions) sub.servers = vc.servers.filter((server) => server.sub === sub.id).length;
+      countServers();
       if (vc.selected && vc.selected.id === id) vc.selected = vc.servers.length ? selectedFor(vc.servers[0].id) : null;
       return ok();
     },
@@ -1318,12 +1495,20 @@
       setup(null, err);
     });
 
+  /* Для demo=alerts (mock.js): работающий VPN без выхода через сервер — как сценарий noexit, с плашкой vpn-exit. */
+  mock.demos['vpnc-noexit'] = () => ready.then(() => {
+    if (!vc || vc.status !== 'running') return;
+    vc.verified = false;
+    vc.exit = null;
+    noExit(reasonFor('dpi'));
+  });
+
   const getState = api.get_state;
   api.get_state = async function getStateWithVpnClient(...args) {
     await ready;
     state.updates.count = state.updates.items.filter((item) => item.available && !item.skipped && item.state !== 'done').length;
     /* Конфликт Core пересчитывает в каждом снимке: он зависит от режима и чужого VPN. */
-    if (vc) vc.conflict = snapshotConflict() || uacConflict();
+    if (vc) vc.conflict = managerConflict || snapshotConflict();
     return getState(...args);
   };
 

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import time
 from pathlib import Path
@@ -76,6 +75,37 @@ def plan(current: str, wanted: list[tuple[str, str]]) -> dict:
     return {"missing": missing, "conflicts": conflicts, "outside": outside}
 
 
+def _remaining(line: str, wanted_hosts: set[str], wanted_set: set[tuple[str, str]]) -> str | None:
+    """Строка с конфликтом без конфликтующих имён: «1.2.3.4 discord.com intranet» → «1.2.3.4 intranet».
+    None — других имён в строке нет. Комментарий в конце строки остаётся при ней."""
+    body, sep, comment = line.partition("#")
+    parts = body.split()
+    if len(parts) < 2:
+        return None
+    ip = parts[0]
+    keep = [h for h in parts[1:] if not (h.lower() in wanted_hosts and (ip, h.lower()) not in wanted_set)]
+    if not keep:
+        return None
+    return " ".join([ip, *keep]) + (f" {sep}{comment}" if sep else "")
+
+
+def _disable_conflicts(outside: list[str], conflicts: set[str], wanted: list[tuple[str, str]]) -> list[str]:
+    """Конфликтующая строка комментируется целиком (так её видно и можно вернуть), а посторонние имена
+    из неё — например, внутреннее имя организации — остаются действующей строкой рядом."""
+    wanted_hosts = {h for _ip, h in wanted}
+    wanted_set = set(wanted)
+    body: list[str] = []
+    for line in outside:
+        if line not in conflicts:
+            body.append(line)
+            continue
+        body.append(DISABLED_PREFIX + line)
+        rest = _remaining(line, wanted_hosts, wanted_set)
+        if rest:
+            body.append(rest)
+    return body
+
+
 def check() -> dict:
     wanted = fetch()
     current = hosts_path().read_text(encoding="utf-8", errors="replace")
@@ -93,7 +123,7 @@ def apply() -> dict:
     backup = paths.BACKUPS_DIR / f"hosts-{time.strftime('%Y%m%d-%H%M%S')}.bak"
     shutil.copyfile(path, backup)
     conflict_set = set(p["conflicts"])
-    body = [DISABLED_PREFIX + line if line in conflict_set else line for line in p["outside"]]
+    body = _disable_conflicts(p["outside"], conflict_set, wanted)
     while body and not body[-1].strip():
         body.pop()
     block = [BEGIN] + [f"{ip} {host}" for ip, host in wanted] + [END]

@@ -88,15 +88,6 @@ def _json_from(text: str) -> Any:
     return json.loads(decoded)
 
 
-def profile_url(text: str) -> str | None:
-    """Адрес профиля, если ссылка указывает на файл (incy://routing/onadd/https://…, autorouting)."""
-    m = _LINK.match((text or "").strip())
-    if not m:
-        return None
-    payload = _payload(m.group(4))
-    return payload if re.match(r"^https?://", payload, re.I) else None
-
-
 def _payload(rest: str) -> str:
     rest = rest.strip()
     if rest.startswith("?"):
@@ -122,7 +113,9 @@ def parse_happ(text: str) -> RouteProfile:
             raise RouteProfileError("Ссылка выключает маршрутизацию другого приложения — это не профиль", kind="off")
         payload = _payload(rest)
         if re.match(r"^https?://", payload, re.I):
-            raise RouteProfileError("Профиль маршрутизации лежит по ссылке — его нужно скачать", kind="url",
+            # Скачивать профиль по адресу Лазейка не умеет (docs/vpnclient-plan.md, 4a): честно просим сам профиль.
+            raise RouteProfileError("Профиль маршрутизации лежит по адресу в интернете — такие Лазейка не "
+                                    "скачивает: нужен сам профиль (JSON или ссылка с ним)", kind="url",
                                     url=payload, auto=bool(auto))
         text = payload
     try:

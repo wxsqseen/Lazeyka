@@ -4,7 +4,6 @@ import itertools
 import json
 import logging
 import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +13,8 @@ from app import log as applog
 from app import paths, vpn, winutil
 from app.errors import UserError
 from app.settings import Settings
+from app.vpnclient.manager import VpnClientManager
+from tests.fakes.vpn_world import wait_for
 
 MOCK = Path(__file__).resolve().parent.parent / "app" / "ui" / "mock-vpnclient-state.json"
 
@@ -44,8 +45,9 @@ class FakeManager:
         self.snap = mock_state()
 
     def __getattr__(self, name):
-        # Любое действие из раздела 6: import_text, sub_update, select, latency…
-        if name.startswith("_"):
+        # Действие из раздела 6 (import_text, sub_update, select, latency…) — только из тех, что есть у
+        # настоящего менеджера: опечатку в вызове из Core иначе не поймал бы ни один тест.
+        if name.startswith("_") or not callable(getattr(VpnClientManager, name, None)):
             raise AttributeError(name)
 
         def action(*args, **kwargs):
@@ -82,6 +84,8 @@ class FakeZapret:
         self.status, self.error, self.mode = "stopped", None, "app"
         self.strategies, self.process, self.pack = [], None, None
         self.paused_for_test = False
+        self.guard_paused = False
+        self.lock = threading.RLock()
         self.vpn_applied = {"mode": "plain"}
         self.settings = None
         self.av_removal_seen = False
@@ -221,10 +225,7 @@ def test_core_install_shares_busy_with_updates(tmp_path, monkeypatch):
     with pytest.raises(UpdateError, match="Уже выполняется"):
         core.updates.install_async("vpncore")               # та же задача со страницы «Обновления»
     gate.set()
-    for _ in range(100):
-        if "vpncore" not in core.updates._busy:
-            break
-        time.sleep(0.02)
+    assert wait_for(lambda: "vpncore" not in core.updates._busy)
     assert core.updates.progress["vpncore"]["state"] == "done"
     assert core.vpnclient_core_install("v2ray")["ok"] is False
 
@@ -257,6 +258,24 @@ def test_shutdown_survives_manager_failure(tmp_path):
     assert stopped == ["tg", "zapret"]
 
 
+def test_shutdown_returns_service_paused_by_connectivity_guard(tmp_path):
+    """Режим службы: страховка связи выключила службу посреди проверки, а человек вышел из Лазейки. Вердикта
+    нет — служба возвращается, как была: без Лазейки до перезагрузки Windows её никто бы не запустил."""
+    journal: list = []
+    core = make_core(tmp_path, FakeManager(journal))
+    core._stop = threading.Event()
+    core.tester = SimpleNamespace(cancel=lambda: None, join=lambda t: None)
+    core.tg = SimpleNamespace(stop=lambda remember: None)
+    core.zapret.mode, core.zapret.guard_paused = "service", True
+    core.zapret.resume_service = lambda: journal.append(("zapret.resume_service",))
+    core.shutdown()
+    assert ("zapret.resume_service",) in journal
+    core.zapret.guard_paused = False
+    journal.clear()
+    core.shutdown()
+    assert ("zapret.resume_service",) not in journal, "выключенную человеком службу выход не трогает"
+
+
 def _autostart_core(tmp_path, monkeypatch, first=False, on_start=True, was_running=True, foreign=False):
     journal: list = []
     vc = FakeManager(journal)
@@ -284,6 +303,18 @@ def test_autostart_vpn_after_zapret(tmp_path, monkeypatch):
     assert journal == [("zapret.start",), ("vpnclient.start", True)]
 
 
+def test_service_stopped_for_untrusted_folder_is_started_again(tmp_path, monkeypatch):
+    """Служба обхода работала из недоверенной папки данных и остановлена перед её разбором: пакет поставлен
+    заново — служба запускается снова (без Лазейки её до перезагрузки никто бы не запустил)."""
+    core, journal, _ = _autostart_core(tmp_path, monkeypatch, on_start=False)
+    core.zapret.mode = "service"
+    core._autostart_components()
+    assert ("zapret.start",) not in journal, "служба не останавливалась — запускать её незачем"
+    core._resume_service = True
+    core._autostart_components()
+    assert ("zapret.start",) in journal
+
+
 @pytest.mark.parametrize("kwargs", [{"first": True}, {"on_start": False}, {"was_running": False}])
 def test_no_autostart(tmp_path, monkeypatch, kwargs):
     core, journal, _ = _autostart_core(tmp_path, monkeypatch, **kwargs)
@@ -302,10 +333,11 @@ def test_autostart_skips_next_to_incy(tmp_path, monkeypatch):
     assert alert["action"] == {"label": "Открыть VPN", "page": "vpnclient"}
 
 
-def test_resume_does_not_restart_vpn(tmp_path):
+def test_resume_does_not_restart_vpn(tmp_path, monkeypatch):
     vc = FakeManager()
     core = make_core(tmp_path, vc)
-    core._last_wall = time.time() - 120
+    core._sleep_mark = (1000.0, 1000.0)                 # (с загрузки Windows, из них без сна)
+    monkeypatch.setattr(winutil, "sleep_clock", lambda: (1121.0, 1001.0))   # 120 с сна
     core._wd_next = 0.0
     core._check_resume()
     names = [c[0] for c in vc.calls]
@@ -447,10 +479,10 @@ def test_selftest_vpnclient_checks_without_core():
     from app.vpnclient import engines
     detail = selftest.check_vpnclient_parsing()           # разбор и конфиг — без запуска ядра
     assert "ссылка VLESS+REALITY" in detail and "подписка и профили" in detail
-    cores = selftest.pinned_cores()
-    assert cores["sing-box"]["sha256"] == engines.CORES["sing-box"].zip_sha256
-    assert cores["xray"]["url"].startswith("https://github.com/XTLS/Xray-core/releases/download/v26.3.27/")
-    assert selftest.PINNED_CORES["sing-box"]["sha256"] == engines.CORES["sing-box"].zip_sha256   # план = код
+    for name, plan in selftest.PINNED_CORES.items():                                       # план = код
+        core = engines.CORES[name]
+        assert (plan["asset"], plan["size"], plan["sha256"], plan["url"]) == \
+            (core.asset, core.zip_size, core.zip_sha256, core.release_url())
     detail = selftest.check_core_pins(frozen=True)        # без сети и без zip: их в сборке больше нет
     assert "sing-box 1.14.3" in detail and "xray 26.3.27" in detail and "GPL-3.0" in detail
 
@@ -532,9 +564,6 @@ def test_foreign_conflict_shows_on_vpn_page(tmp_path):
 
 def test_real_manager_gets_core_hooks(tmp_path, monkeypatch):
     """Настоящий VpnClientManager создаётся Core с zapret_view, on_change и before_core."""
-    import importlib.util
-    if importlib.util.find_spec("app.vpnclient.manager") is None:
-        pytest.skip("app/vpnclient/manager.py ещё не написан")
     core = make_core(tmp_path, None)
     core.zapret.pack = None
     manager = core._create_vpnclient()

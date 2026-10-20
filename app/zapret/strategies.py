@@ -227,17 +227,3 @@ def discover(pack_dir: Path) -> tuple[list[Strategy], list[str]]:
         except (OSError, StrategyError) as exc:
             errors.append(f"{path.name}: {exc}")
     return strategies, errors
-
-
-def referenced_files(args: list[str]) -> list[Path]:
-    """Файлы, на которые ссылаются аргументы (для проверки целостности пакета)."""
-    files: list[Path] = []
-    for arg in args:
-        if "=" not in arg:
-            continue
-        value = arg.split("=", 1)[1]
-        if value.startswith("@"):
-            value = value[1:]
-        if re.match(r"^[A-Za-z]:\\", value):
-            files.append(Path(value))
-    return files

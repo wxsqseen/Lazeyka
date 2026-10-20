@@ -245,8 +245,18 @@ def test_proxy_and_local_inbounds():
         clash="c", internal_user="iu", internal_pass="ip", local_user="lu", local_pass="lp"), socks_udp=False))
     assert local["inbounds"][0]["users"] == [{"username": "lu", "password": "lp"}]
     assert {"inbound": ["mixed-in"], "network": ["udp"], "action": "reject"} in local["route"]["rules"]
-    lan = build_singbox(make_plan([s], "tun", proxy_listen="0.0.0.0"))
-    assert next(i for i in lan["inbounds"] if i["tag"] == "mixed-in")["listen"] == "0.0.0.0"
+    with_password = Secrets(clash="c", internal_user="iu", internal_pass="ip", local_user="lu", local_pass="lp")
+    lan = build_singbox(make_plan([s], "tun", proxy_listen="0.0.0.0", secrets=with_password))
+    inbound = next(i for i in lan["inbounds"] if i["tag"] == "mixed-in")
+    assert inbound["listen"] == "0.0.0.0" and inbound["users"] == [{"username": "lu", "password": "lp"}]
+
+
+@pytest.mark.parametrize("mode", ["tun", "proxy", "local"])
+def test_lan_inbound_without_password_is_refused(mode):
+    """Вход для устройств из сети без логина и пароля — открытый прокси через сервер человека для всей
+    локальной сети: генератор такой конфиг не собирает, даже если план попросил."""
+    with pytest.raises(ConfigError, match="только с логином и паролем"):
+        build_singbox(make_plan([server("vless_reality_vision")], mode, proxy_listen="0.0.0.0"))
 
 
 def test_log_level_and_dns_strategy():
@@ -428,16 +438,34 @@ def test_process_patterns_case_insensitive():
     assert not re.search(name_re, r"C:\x\NotDiscord.exe")
 
 
+def _without_fp(case: str) -> Server:
+    tls = {k: v for k, v in server(case).tls.items() if k != "fingerprint"}
+    return server(case, tls=tls)
+
+
 def test_options_mux_fingerprint_fragment():
     reality, ws = server("vless_reality_vision"), server("vless_tls_ws")
     cfg = build_singbox(make_plan([reality, ws], mux=True, fingerprint="randomizednoalpn", tls_fragment=True))
     r_ob, ws_ob = outbound(cfg, reality.id), outbound(cfg, ws.id)
     assert "multiplex" not in r_ob and ws_ob["multiplex"]["enabled"] is True
-    assert r_ob["tls"]["utls"]["fingerprint"] == "randomized" == ws_ob["tls"]["utls"]["fingerprint"]
+    # Отпечаток из ссылки (fp=chrome, fp=firefox) важнее общего — так обещает «Подробнее».
+    assert r_ob["tls"]["utls"]["fingerprint"] == "chrome" and ws_ob["tls"]["utls"]["fingerprint"] == "firefox"
     assert ws_ob["tls"]["fragment"] is True and "fragment" not in r_ob["tls"]   # REALITY фрагментацию не применяет
-    unsafe = build_singbox(make_plan([reality, ws], fingerprint="unsafe"))
-    assert "utls" not in outbound(unsafe, ws.id)["tls"]
-    assert outbound(unsafe, reality.id)["tls"]["utls"]["fingerprint"] == "chrome"   # REALITY без uTLS не работает
+    plain_reality, plain_ws = _without_fp("vless_reality_vision"), _without_fp("vless_tls_ws")
+    cfg = build_singbox(make_plan([plain_reality, plain_ws], fingerprint="randomizednoalpn"))
+    assert (outbound(cfg, plain_reality.id)["tls"]["utls"]["fingerprint"] == "randomized"
+            == outbound(cfg, plain_ws.id)["tls"]["utls"]["fingerprint"]), "общий — серверам без своего"
+    unsafe = build_singbox(make_plan([plain_reality, plain_ws], fingerprint="unsafe"))
+    assert "utls" not in outbound(unsafe, plain_ws.id)["tls"]
+    assert outbound(unsafe, plain_reality.id)["tls"]["utls"]["fingerprint"] == "chrome"   # REALITY без uTLS не работает
+
+
+def test_helper_fingerprint_from_link_wins():
+    own, plain = server("vless_xhttp_reality"), _without_fp("vless_xhttp_reality")
+    for s, expected in ((own, "chrome"), (plain, "firefox")):
+        x = build_xray(make_plan([s], fingerprint="firefox"))
+        ob = next(o for o in x["outbounds"] if o.get("tag") == f"out-{s.id}")
+        assert ob["streamSettings"]["realitySettings"]["fingerprint"] == expected
 
 
 def test_ech():

@@ -6,7 +6,6 @@
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -18,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .. import archive, paths
+from ..filehash import sha256_file
 from . import strategies
 from ..errors import UserError
 
@@ -53,24 +53,44 @@ def safe_version(version: str) -> str:
     return cleaned
 
 
+# Слова пре-релиза, приписанные к числу без дефиса: «1.3.0rc1», «2.0beta2».
+_PRE_WORDS = ("alpha", "beta", "preview", "pre", "rc", "dev")
+_VERSION_PART = re.compile(r"^(\d+)([a-z]*)(\d*)$")
+_PRE_SPLIT = re.compile(r"[.\-_]|(?<=\D)(?=\d)|(?<=\d)(?=\D)")
+_NO_FIX = (0, "", 0)
+
+
 def version_key(version: str) -> tuple:
-    parts = []
-    for chunk in re.split(r"[.\-_]", version.strip().lstrip("vV")):
-        m = re.match(r"(\d+)(.*)", chunk)
-        if m:
-            # 1.10.3 > 1.10.3b: суффикс после числа означает предрелиз
-            parts.append((int(m.group(1)), 0 if m.group(2) else 1, m.group(2)))
-        else:
-            parts.append((-1, 0, chunk))
-    return tuple(parts)
+    """Ключ сравнения версий zapret, tg-ws-proxy и самой Лазейки.
 
-
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    - Буква сразу после числа — более позднее исправление той же версии (так нумерует Flowseal):
+      1.9.8 < 1.9.8a < 1.9.8b < 1.9.9.
+    - Пре-релиз — после дефиса (semver: 1.3.0-beta.1 < 1.3.0-rc.1 < 1.3.0) или словом alpha/beta/rc/pre/dev
+      без дефиса (1.3.0rc1 < 1.3.0); окончательный релиз старше любого своего пре-релиза.
+    - Хвостовые нули не значат ничего: 1.10 == 1.10.0; «v» в начале и метаданные после «+» не учитываются.
+    """
+    text = version.strip().lstrip("vV").lower().split("+", 1)[0]
+    main, _, pre = text.partition("-")
+    parts = re.split(r"[._]", main) if main else []
+    numbers: list[tuple[int, str, int]] = []
+    for index, chunk in enumerate(parts):
+        match = _VERSION_PART.match(chunk)
+        if match is None:
+            numbers.append((-1, chunk, 0))
+            continue
+        number, letters, tail = int(match.group(1)), match.group(2), match.group(3)
+        if letters.startswith(_PRE_WORDS):
+            numbers.append((number, "", 0))
+            pre = ".".join(item for item in (letters + tail, *parts[index + 1:], pre) if item)
+            break
+        numbers.append((number, letters, int(tail or 0)))
+    while numbers and numbers[-1] == _NO_FIX:
+        numbers.pop()
+    if not pre:
+        return tuple(numbers), (1, ())
+    ids = tuple((0, int(ident), "") if ident.isdigit() else (1, 0, ident)
+                for ident in _PRE_SPLIT.split(pre) if ident)
+    return tuple(numbers), (0, ids)
 
 
 def read_meta(pack_dir: Path) -> PackInfo | None:
@@ -250,13 +270,30 @@ def cleanup(keep: set[str]) -> None:
             continue
         shutil.rmtree(trash, ignore_errors=True)
         log.info("Удалён старый пакет стратегий %s", info.version)
-    if paths.TMP_DIR.is_dir():
-        for child in paths.TMP_DIR.iterdir():
-            if child.name.startswith(("pack-", "old-", "dl-")):
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    try:
-                        child.unlink()
-                    except OSError:
-                        pass
+    remove_stale_tmp()
+
+
+# Временные файлы установок во временной папке данных: пакеты zapret (pack-, old-, dl-), ядро
+# Telegram-прокси (tgws-), новая Лазейка (app-). Свежие не трогаем — их может писать установка,
+# идущая параллельно (уборку зовут и после обновления zapret, и при перечитывании пакета).
+TMP_PREFIXES = ("pack-", "old-", "dl-", "tgws-", "app-")
+STALE_TMP_SECONDS = 3600.0
+
+
+def remove_stale_tmp(now: float | None = None) -> None:
+    """Хвосты прерванных установок (аварийный выход, выключение компьютера) старше часа."""
+    if not paths.TMP_DIR.is_dir():
+        return
+    now = time.time() if now is None else now
+    for child in paths.TMP_DIR.iterdir():
+        if not child.name.startswith(TMP_PREFIXES):
+            continue
+        try:
+            if now - child.lstat().st_mtime < STALE_TMP_SECONDS:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink()
+        except OSError as exc:
+            log.debug("Временный файл %s пока не удалить: %r", child.name, exc)
