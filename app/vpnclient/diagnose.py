@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import email.utils
 import errno
+import hashlib
 import ipaddress
+import os
 import re
 import socket
 import ssl
@@ -219,6 +221,50 @@ def tls_probe(host: str, port: int, sni: str | None, timeout: float = 4.0) -> st
         return "error"
 
 
+QUIC_PROTOCOLS = ("hysteria2", "tuic")          # на UDP, но поверх QUIC — его можно спросить напрямую
+QUIC_CONTROL = ("1.1.1.1", 443)                 # эталон QUIC (Cloudflare): отвечает, если UDP у человека проходит
+
+
+def salamander(data: bytes, password: bytes, salt: bytes | None = None) -> bytes:
+    """Обфускация Hysteria2 salamander: соль 8 байт + данные XOR BLAKE2b-256(пароль + соль), как у клиента."""
+    salt = os.urandom(8) if salt is None else salt
+    key = hashlib.blake2b(password + salt, digest_size=32).digest()
+    return salt + bytes(b ^ key[i % 32] for i, b in enumerate(data))
+
+
+def _quic_version_probe() -> bytes:
+    """Длинный заголовок QUIC с зарезервированной версией (RFC 9000, 15): сервер QUIC отвечает на него Version
+    Negotiation. 1200 байт — меньше сервер отвечать не обязан (RFC 9000, 14.1)."""
+    head = bytes([0xC0]) + bytes.fromhex("1a2a3a4a") + b"\x08" + os.urandom(8) + b"\x08" + os.urandom(8)
+    return head + bytes(1200 - len(head))
+
+
+def quic_probe(host: str, port: int, obfs_password: str | None = None, timeout: float = 2.0, tries: int = 2) -> str:
+    """Прямая проба UDP до сервера QUIC (Hysteria2, TUIC) мимо ядра. answer — ответил (молчать на неизвестную
+    версию сервер QUIC не умеет; у Hysteria2 с salamander — только на пакет с верным паролем обфускации);
+    closed — порт закрыт (ICMP, Windows сообщает сбросом); silent — ни слова; error — не отправить."""
+    try:
+        family, _type, _proto, _name, addr = socket.getaddrinfo(host, int(port), type=socket.SOCK_DGRAM)[0]
+    except (OSError, ValueError):
+        return "error"
+    password = obfs_password.encode() if obfs_password else None
+    for _ in range(tries):
+        packet = _quic_version_probe()
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(timeout)
+                sock.sendto(salamander(packet, password) if password else packet, addr)
+                sock.recvfrom(2048)
+                return "answer"
+        except ConnectionResetError:
+            return "closed"
+        except TimeoutError:
+            continue
+        except OSError:
+            return "error"
+    return "silent"
+
+
 # ------------------------------------------------------------ чья сторона: причина «нет ответа»
 
 SIDES = ("you", "isp", "provider", "lazeyka", "unknown")
@@ -266,6 +312,8 @@ class Facts:
     system_dns: bool | None = None   # DNS сети знает имя сервера
     tcp: str | None = None           # TcpProbe.outcome
     handshake: str | None = None     # tls_probe(): у серверов с TLS и REALITY
+    quic: str | None = None          # quic_probe() до сервера на QUIC (Hysteria2, TUIC)
+    quic_control: bool | None = None  # эталон QUIC ответил — UDP у человека проходит (спрашиваем, если сервер молчит)
     peers_ok: int = 0                # соседи по подписке ответили (свежая задержка)
     peers_udp_ok: int = 0            # из них на UDP
     peers_failed: int = 0            # соседи по подписке не ответили
@@ -369,6 +417,21 @@ _UDP_BLOCKED = Reason("isp", "udp_blocked", "Сервер на UDP (Hysteria2, T
 _UDP_SILENT = Reason("unknown", "udp_silent", "Сервер на UDP не отвечает. Напрямую это не проверить: он выключен, "
                                               "или интернет-провайдер режет UDP.",
                      "Проверьте задержку всех серверов: если на TCP отвечают, а на UDP — нет, режет провайдер.")
+_UDP_NONE = Reason("isp", "udp_blocked", "UDP не проходит совсем: не отвечает даже эталонный QUIC-сервер Cloudflare. "
+                                         "Его режет интернет-провайдер, роутер или файрвол компьютера.",
+                   "Выберите сервер на TCP (VLESS, Trojan) или подключитесь через другую сеть.")
+_UDP_SERVER_SILENT = Reason("unknown", "udp_server_silent", "UDP у вас проходит (эталонный сервер Cloudflare "
+                                                            "отвечает), а этот сервер молчит: он выключен, сменил "
+                                                            "порт или пароль обфускации — или интернет-провайдер "
+                                                            "блокирует именно его адрес.",
+                            "Обновите подписку. Не поможет — проверьте через другую сеть, например мобильный "
+                            "интернет: заработает — блокирует провайдер, нет — напишите в поддержку VPN-провайдера.")
+_UDP_HANDSHAKE = Reason("unknown", "udp_handshake", "Сервер отвечает по UDP, но подключение не устанавливается: "
+                                                    "рукопожатие не доходит до конца. Так бывает, когда "
+                                                    "интернет-провайдер режет такие соединения (DPI) или у сервера "
+                                                    "сменились параметры.",
+                        "Обновите подписку. Не поможет — выберите сервер на TCP (VLESS, Trojan) или проверьте через "
+                        "другую сеть.")
 _PORT_CLOSED = Reason("provider", "port_closed", "Сервер на связи, но его порт закрыт: сервер выключен или "
                                                  "провайдер сменил порт.",
                       "Обновите подписку. Не поможет — выберите другой сервер.")
@@ -387,9 +450,12 @@ _TCP_TIMEOUT = Reason("unknown", "tcp_timeout", "Сервер не отвеча�
 _KEYS_OUTDATED = Reason("provider", "keys_outdated", "До сервера всё доходит, но он не принимает ключи из подписки "
                                                      "(REALITY или TLS) — похоже, они устарели.",
                         "Обновите подписку. Не поможет — напишите в поддержку VPN-провайдера.")
-_AUTH_REJECTED = Reason("provider", "auth_rejected", "Сервер не принял ключ: его сменили, подписка закончилась или "
-                                                     "устройств больше, чем разрешено.",
-                        "Обновите подписку и проверьте срок и устройства в личном кабинете провайдера.")
+_AUTH_REJECTED = Reason("provider", "auth_rejected", "Сервер на связи, но не принял ключ из подписки: его сменили "
+                                                     "или отключили, подписка закончилась, или к ней подключено "
+                                                     "больше устройств, чем разрешено.",
+                        "Обновите подписку. Не поможет — отключите её в других приложениях и на других устройствах "
+                        "и проверьте снова; дальше — срок и устройства в личном кабинете или поддержка "
+                        "VPN-провайдера.")
 _NO_EXIT = Reason("provider", "no_exit", "Сервер на связи, но в интернет через него не выйти: сбой на сервере или "
                                          "ключ больше не действует.",
                   "Обновите подписку и выберите другой сервер. Не поможет — напишите в поддержку VPN-провайдера.")
@@ -462,8 +528,19 @@ def explain(f: Facts) -> Reason:
     if f.dns is not None:
         return _dns(f)
     if f.udp:
+        # Ядро назвало отказ сервера (пароль, TLS) — это точнее любых проб: путь до сервера свободен.
+        if f.kind == "auth":
+            return _AUTH_REJECTED
+        if f.kind == "tls":
+            return _KEYS_OUTDATED
         if f.peers_udp_ok:
             return _SERVER_DOWN
+        if f.quic == "answer":
+            return _UDP_HANDSHAKE
+        if f.quic == "closed":
+            return _PORT_CLOSED
+        if f.quic == "silent" and f.quic_control is not None:
+            return _UDP_SERVER_SILENT if f.quic_control else _UDP_NONE
         return _UDP_BLOCKED if f.tcp_ok_anywhere else _UDP_SILENT
     if f.tcp == "refused":
         return _PORT_CLOSED

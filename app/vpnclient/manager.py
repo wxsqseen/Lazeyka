@@ -20,6 +20,7 @@ import base64
 import concurrent.futures
 import contextlib
 import ctypes
+import http.client
 import importlib
 import ipaddress
 import json
@@ -84,6 +85,9 @@ CONTROL_URLS = ("https://ya.ru", EXIT_URL)   # как у проверок обх
 CONTROL_TIMEOUT = 3.0
 PROBE_TIMEOUT = 4.0                     # прямая проба TCP: Windows повторяет SYN после отказа — «закрыто» через ~2 с
 HANDSHAKE_TIMEOUT = 4.0                 # прямое рукопожатие TLS до сервера
+QUIC_TIMEOUT = 2.0                      # прямая проба QUIC (Hysteria2, TUIC): ждём ответа на каждую из двух попыток
+ASK_TIMEOUT = 15.0                      # вопрос ядру о молчащем сервере: иные отказывают в ключе лишь через ~10 с
+ASK_SETTLE = 2.0                        # строка журнала об отказе приходит чуть позже ответа на запрос
 PROBE_LIMIT = 16                        # столько серверов без ответа пробуем напрямую за одну проверку задержки
 PEER_FRESH = 900.0                      # задержка соседа по подписке моложе 15 минут — годится для сравнения
 DIAGNOSIS_REUSE = 60.0                  # выход не проверен снова — прежняя причина годится минуту, без новых проб
@@ -392,6 +396,30 @@ def free_port(preferred: int | None = None, *, host: str = "127.0.0.1", avoid: f
         if got not in avoid:
             return got
     raise VpnClientError(f"Не нашлось свободного порта{f' рядом с {preferred}' if preferred else ''}", "port")
+
+
+def ask_core(port: int, user: str, password: str, timeout: float) -> None:
+    """Запрос через вход разбора временного экземпляра задержки (config.WHY_IN): ядро открывает соединение через
+    выход user и, если не вышло, пишет в журнал почему. Ответ не нужен — нужна строка журнала."""
+    proxy = f"http://{urllib.parse.quote(user, safe='')}:{urllib.parse.quote(password, safe='')}@127.0.0.1:{port}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"https": proxy}))
+    try:
+        opener.open(PROBE_URL, timeout=timeout).close()
+    except (OSError, ValueError, http.client.HTTPException):
+        pass
+
+
+def core_hints(main, tags: list[str], settle: float) -> dict[str, str]:
+    """Что журнал ядра сказал об отказе выходов tags: tls | auth | clock. Строка «open connection … [тег]: …»
+    приходит чуть позже, чем закрывается запрос, — ждём её по условию, не дольше settle."""
+    deadline = time.monotonic() + settle
+    while True:
+        tail = list(main.tail)
+        found = {t: [line for line in tail if f"[{t}]: " in line and "open connection" in line] for t in tags}
+        if all(found.values()) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    return {t: hint for t, lines in found.items() if (hint := diagnose.runtime_hint(lines))}
 
 
 def port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
@@ -844,6 +872,8 @@ class Deps:
     # Факты для причины «нет ответа» — только по отказу (diagnose.explain).
     tcp_probe: Callable[..., diagnose.TcpProbe] = diagnose.tcp_probe
     tls_probe: Callable[..., str] = diagnose.tls_probe
+    quic_probe: Callable[..., str] = diagnose.quic_probe
+    ask_core: Callable[..., None] = ask_core
     online: Callable[[], bool] = direct_online
     system_dns: Callable[[str], bool] = system_knows
     memory: Callable[[int], int | None] = process_memory
@@ -893,6 +923,7 @@ class VpnClientManager:
         self._exit_reason: tuple | None = None       # ((сеанс, сервер), когда, Reason) — прежняя причина без выхода
         self._device_limit: dict[str, bool] = {}     # подписка → провайдер сообщил о лимите устройств
         self._latency_causes: dict[str, str] = {}    # сервер → почему не мерили: killswitch | unsupported | dns
+        self._latency_hints: dict[str, str] = {}     # сервер → что о нём сказало ядро замера: tls | auth | clock
         self._exit: dict | None = None
         self._session: _Session | None = None
         self._pending: RunPlan | None = None         # план собран, ядро ещё не запущено (для own())
@@ -2727,7 +2758,7 @@ class VpnClientManager:
             results = self.store.latency()
             peers = self._peer_facts(server, results, self._fresh(results))
         facts = self._facts(server, kind=hint, online=online, skew=skew, peers=peers)
-        facts.tcp, facts.handshake = probed.get("tcp"), probed.get("handshake")
+        _probe_facts(facts, probed)
         return diagnose.explain(facts)
 
     def _online_and_skew(self, timed: bool) -> tuple[bool, float | None]:
@@ -2739,8 +2770,18 @@ class VpnClientManager:
     def _server_probe(self, server: Server, address: str | None) -> dict:
         """Прямые пробы мимо ядра: TCP, затем рукопожатие TLS (у TLS и REALITY). Серверы на UDP напрямую не
         проверить — по ним судят соседи по подписке."""
-        if not address or diagnose.uses_udp(server.proto, server.network):
+        if not address:
             return {}
+        if diagnose.uses_udp(server.proto, server.network):
+            hy = server.hy2 or {}
+            if server.proto not in diagnose.QUIC_PROTOCOLS or hy.get("obfs") not in (None, "", "salamander"):
+                return {}                   # WireGuard, mKCP, обфускация gecko: прямой пробы нет — судят соседи
+            quic = self.deps.quic_probe(address, server.port, hy.get("obfs_password") if hy.get("obfs") else None,
+                                        QUIC_TIMEOUT)
+            control = None
+            if quic == "silent":            # сервер молчит: проходит ли UDP у человека вообще
+                control = self.deps.quic_probe(*diagnose.QUIC_CONTROL, None, QUIC_TIMEOUT) == "answer"
+            return {"quic": quic, "quic_control": control}
         tcp = self.deps.tcp_probe(address, server.port, PROBE_TIMEOUT).outcome
         handshake = None
         if tcp == "ok" and server.security in ("tls", "reality"):
@@ -3287,7 +3328,7 @@ class VpnClientManager:
     def _measure(self, servers: list[Server]) -> None:
         addresses: dict[str, str] = {}               # адреса серверов из планов замера — для прямых проб
         with self._lock:
-            self._latency_causes = {}
+            self._latency_causes, self._latency_hints = {}, {}
         try:
             session = self._session
             in_config = {s.id for s in session.plan.servers} if session is not None else set()
@@ -3358,7 +3399,7 @@ class VpnClientManager:
             if not failed:
                 return
             with self._lock:
-                causes = dict(self._latency_causes)
+                causes, hints = dict(self._latency_causes), dict(self._latency_hints)
             fresh = self._fresh(results, {s.id for s in servers})
             network = [s for s in failed if causes.get(s.id) not in ("killswitch", "unsupported")]
             online, skew = self._online_and_skew(any(_timed(s) for s in network)) if network else (None, None)
@@ -3370,13 +3411,13 @@ class VpnClientManager:
                     probed = dict(zip((s.id for s in targets), found))
             for server in failed:
                 cause = causes.get(server.id)
-                facts = self._facts(server, kind=cause if cause != "dns" else None, online=online, skew=skew,
+                kind = hints.get(server.id) if cause in (None, "dns") else cause
+                facts = self._facts(server, kind=kind, online=online, skew=skew,
                                     peers=self._peer_facts(server, results, fresh, set(causes)))
                 if cause == "dns":
                     for key, value in self._dns_facts(server.host).items():
                         setattr(facts, key, value)
-                probe = probed.get(server.id, {})
-                facts.tcp, facts.handshake = probe.get("tcp"), probe.get("handshake")
+                _probe_facts(facts, probed.get(server.id, {}))
                 reason = diagnose.explain(facts)
                 self.store.set_latency(server.id, None, results[server.id].get("error"), reason=reason.public(),
                                        save=False)
@@ -3436,6 +3477,10 @@ class VpnClientManager:
                 clash = self.deps.clash(plan.ports.clash, plan.secrets.clash)
                 main.start(lambda: bool(clash.version()), READY_TIMEOUT)
                 self._delays_via(clash, list(plan.servers), members=len(plan.servers))
+                try:
+                    self._ask_core(plan, main)
+                except Exception:  # noqa: BLE001 — задержки уже записаны: без ответа ядра причину назовут пробы
+                    log.warning("Ядро замера не спрошено о причинах «нет ответа»", exc_info=True)
             finally:
                 for proc in (main, helper):
                     if proc is not None:
@@ -3444,6 +3489,25 @@ class VpnClientManager:
                 for path in probe_dir.glob("*.json"):
                     path.unlink(missing_ok=True)
         return found
+
+    def _ask_core(self, plan: RunPlan, main) -> None:
+        """Clash API на отказ говорит лишь «ошибка в проверке задержки». Молчащим серверам — по запросу через вход
+        разбора (config.WHY_IN) с ожиданием до ASK_TIMEOUT: журнал ядра называет отказ этого выхода (ключ не
+        принят, TLS, часы) — в том числе у серверов, которые отказывают в ключе дольше замера задержки."""
+        config = self._config()
+        results = self.store.latency()
+        # shortcut: серверы помощника Xray не разбираются — в его журнале нет тегов выходов (нужен уровень info и
+        # разбор по соединениям), им остаются прямые пробы.
+        silent = {config.tag(s.id): s.id for s in plan.servers
+                  if _no_answer(results.get(s.id)) and plan.engines.get(s.id) != "xray"}
+        if not silent or not plan.ports.proxy or not self.deps.online():
+            return                              # без интернета ядру ответить нечего — и пробы не нужны
+        with concurrent.futures.ThreadPoolExecutor(DELAY_WORKERS) as pool:
+            list(pool.map(lambda t: self.deps.ask_core(plan.ports.proxy, t, plan.secrets.internal_pass, ASK_TIMEOUT),
+                          silent))
+        hints = core_hints(main, list(silent), ASK_SETTLE)
+        with self._lock:
+            self._latency_hints.update({silent[tag]: hint for tag, hint in hints.items()})
 
     def _buildable(self, plan: RunPlan) -> RunPlan:
         """План временного экземпляра без серверов, из которых конфиг не собрать (у них — ошибка задержки)."""
@@ -4594,6 +4658,12 @@ def _latency_entry(value: Any) -> dict:
         return {"ms": value.get("ms"), "at": value.get("at"), "error": error,
                 "reason": diagnose.public_reason(value.get("reason")) if error else None}
     return {"ms": None, "at": None, "error": None, "reason": None}
+
+
+def _probe_facts(facts: diagnose.Facts, probed: dict) -> None:
+    """Итоги прямых проб (_server_probe) — в факты причины."""
+    for key in ("tcp", "handshake", "quic", "quic_control"):
+        setattr(facts, key, probed.get(key))
 
 
 def _no_answer(value: Any) -> bool:

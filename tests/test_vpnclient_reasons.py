@@ -399,6 +399,41 @@ def _udp_world(tmp_path, *, udp_peer_ok):
     return m, w
 
 
+def test_latency_core_names_rejected_key_of_silent_server(tmp_path):
+    """Сервер Hysteria2 отказывает в ключе лишь через ~10 с — дольше замера: clash API говорит «ошибка в проверке
+    задержки», и раньше страница писала «UDP-сервер молчит · не ясно». Теперь Лазейка спрашивает ядро замера
+    отдельным запросом через его вход разбора, и журнал ядра называет отказ."""
+    m, w = _udp_world(tmp_path, udp_peer_ok=True)
+    hy = _named(w, "Hy")
+    tag = w.config.tag(hy.id)
+    w.core_says[tag] = (f"ERROR [1 10.5s] connection: open connection to www.gstatic.com:443 using "
+                        f"outbound/hysteria2[{tag}]: authentication failed, status code: 404")
+    _measure(m, [hy.id])
+    assert ("ask", tag) in w.probes
+    assert _reason(w, "Hy") == ("provider", "auth_rejected")
+    m.shutdown()
+
+
+@pytest.mark.parametrize("quic, control, want", [
+    ("answer", True, ("unknown", "udp_handshake")),
+    ("silent", True, ("unknown", "udp_server_silent")),
+    ("silent", False, ("isp", "udp_blocked")),
+    ("closed", True, ("provider", "port_closed")),
+])
+def test_latency_udp_server_probed_directly(tmp_path, quic, control, want):
+    """Сервер на QUIC молчит, а ядро причины не назвало: прямая проба QUIC (у Hysteria2 с salamander — с паролем
+    обфускации) и, если сервер молчит, эталон QUIC — проходит ли UDP вообще."""
+    m, w = _udp_world(tmp_path, udp_peer_ok=False)
+    hy = _named(w, "Hy")
+    hy.hy2 = {"obfs": "salamander", "obfs_password": "obfs-pw"}
+    w.quic[_addr(w, "Hy")] = quic
+    w.quic_control = control
+    _measure(m, [hy.id])
+    assert ("quic", _addr(w, "Hy"), "obfs-pw") in w.probes
+    assert _reason(w, "Hy") == want
+    m.shutdown()
+
+
 def test_latency_udp_blocked_when_tcp_answers(tmp_path):
     m, w = _udp_world(tmp_path, udp_peer_ok=False)
     _measure(m)

@@ -477,6 +477,11 @@ class World:
     tcp: dict = field(default_factory=dict)                 # адрес → ok | refused | timeout | reset | unreachable
     handshakes: dict = field(default_factory=dict)          # адрес → ok | alert | reset | timeout
     probes: list = field(default_factory=list)              # (вид пробы, адрес)
+    # Проба QUIC: адрес → answer | closed | silent | error (по умолчанию error — «не проверить», как раньше);
+    # quic_control — ответил ли эталон QUIC; core_says — строка журнала ядра замера о выходе с этим тегом.
+    quic: dict = field(default_factory=dict)
+    quic_control: bool = True
+    core_says: dict = field(default_factory=dict)
 
     def clock(self) -> float:
         return self.clock_value
@@ -490,6 +495,21 @@ class World:
     def tls_probe(self, host, port, sni, timeout=None):
         self.probes.append(("tls", host))
         return self.handshakes.get(host, "ok")
+
+    def quic_probe(self, host, port, obfs_password=None, timeout=None):
+        from app.vpnclient.diagnose import QUIC_CONTROL
+        if (host, port) == QUIC_CONTROL:
+            return "answer" if self.quic_control else "silent"
+        self.probes.append(("quic", host, obfs_password))
+        return self.quic.get(host, "error")
+
+    def ask_core(self, port, tag, password, timeout):
+        """Вопрос ядру замера: его ответ — строка в журнале последнего запущенного sing-box. Не задана — как у
+        настоящего ядра при молчащем сервере: тайм-аут, о причине ни слова."""
+        self.probes.append(("ask", tag))
+        line = self.core_says.get(tag) or (f"ERROR connection: open connection to www.gstatic.com:443 using "
+                                           f"outbound/vless[{tag}]: context deadline exceeded")
+        next(p for p in reversed(self.processes) if p.name == "sing-box").tail.append(line)
 
     def advance(self, seconds: float) -> None:
         self.clock_value += seconds
@@ -528,7 +548,8 @@ def make_manager(tmp_path: Path, store: FakeStore, *, settings=None, is_admin: b
                 physical_interface=lambda overrides=None: "Ethernet", lan_networks=lambda: [],
                 tun_luid=lambda address: 42, exit_check=exit_check,
                 direct_date=lambda: None, speed_check=lambda *a: 87.4, tcp_probe=world.tcp_probe,
-                tls_probe=world.tls_probe, online=lambda: world.online, system_dns=lambda host: world.system_dns,
+                tls_probe=world.tls_probe, quic_probe=world.quic_probe, ask_core=world.ask_core,
+                online=lambda: world.online, system_dns=lambda host: world.system_dns,
                 memory=lambda pid: pid * 1000, running_apps=lambda: [{"name": "game.exe", "path": "C:/g/game.exe"}],
                 adapters=lambda: [], opener=lambda route: route, clock=world.clock, data_dir=tmp_path / "vpnclient")
     for key, value in overrides.items():

@@ -130,7 +130,51 @@
   "default_domain_resolver": {
    "server": "dns-direct",
    "strategy": "ipv4_only"
-  }
+  },
+  "rules": [
+   {
+    "auth_user": [
+     "srv-be728789714ae239"
+    ],
+    "action": "route",
+    "outbound": "srv-be728789714ae239"
+   },
+   {
+    "auth_user": [
+     "srv-243ae83b718753f1"
+    ],
+    "action": "route",
+    "outbound": "srv-243ae83b718753f1"
+   },
+   {
+    "auth_user": [
+     "srv-db4ef4622cd60bb5"
+    ],
+    "action": "route",
+    "outbound": "srv-db4ef4622cd60bb5"
+   },
+   {
+    "auth_user": [
+     "srv-d5934c9cd2ec65cd"
+    ],
+    "action": "route",
+    "outbound": "srv-d5934c9cd2ec65cd"
+   },
+   {
+    "auth_user": [
+     "srv-edfb9ce9d303ee2a"
+    ],
+    "action": "route",
+    "outbound": "srv-edfb9ce9d303ee2a"
+   },
+   {
+    "auth_user": [
+     "srv-836a58596e719a24"
+    ],
+    "action": "route",
+    "outbound": "srv-836a58596e719a24"
+   }
+  ]
  },
  "experimental": {
   "clash_api": {
@@ -140,5 +184,39 @@
     "http://127.0.0.1"
    ]
   }
- }
+ },
+ "inbounds": [
+  {
+   "type": "mixed",
+   "tag": "why-in",
+   "listen": "127.0.0.1",
+   "listen_port": 20808,
+   "users": [
+    {
+     "username": "srv-be728789714ae239",
+     "password": "int-pass"
+    },
+    {
+     "username": "srv-243ae83b718753f1",
+     "password": "int-pass"
+    },
+    {
+     "username": "srv-db4ef4622cd60bb5",
+     "password": "int-pass"
+    },
+    {
+     "username": "srv-d5934c9cd2ec65cd",
+     "password": "int-pass"
+    },
+    {
+     "username": "srv-edfb9ce9d303ee2a",
+     "password": "int-pass"
+    },
+    {
+     "username": "srv-836a58596e719a24",
+     "password": "int-pass"
+    }
+   ]
+  }
+ ]
 }

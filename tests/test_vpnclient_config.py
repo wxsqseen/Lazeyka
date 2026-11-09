@@ -525,9 +525,16 @@ def test_delay_instance():
     plan = make_plan(supported_servers(), "tun")
     cfg = build_delay(plan)
     assert validate(cfg) == []
-    assert "inbounds" not in cfg and "rules" not in cfg["route"]
     proxy = cfg["outbounds"][0]
     assert proxy["tag"] == "proxy" and len(proxy["outbounds"]) == len(plan.servers)
+    # Вход разбора отказов: только этот компьютер, по паролю; пользователь — тег выхода, и его запрос идёт ровно
+    # в этот выход (manager._ask_core). Других входов (TUN, прокси для программ) у замера нет.
+    [why] = cfg["inbounds"]
+    assert why["type"] == "mixed" and why["listen"] == "127.0.0.1" and why["tag"] == "why-in"
+    assert [u["username"] for u in why["users"]] == proxy["outbounds"]
+    assert all(u["password"] == plan.secrets.internal_pass for u in why["users"])
+    assert cfg["route"]["rules"] == [{"auth_user": [t], "action": "route", "outbound": t} for t in proxy["outbounds"]]
+    assert cfg["route"]["final"] == "proxy"
     assert cfg["experimental"]["clash_api"]["external_controller"] == "127.0.0.1:20901"
     assert [s["tag"] for s in cfg["dns"]["servers"]] == ["dns-direct"]
 

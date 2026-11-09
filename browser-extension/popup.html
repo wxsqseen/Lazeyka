@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Лазейка</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon-32.png" alt="" width="24" height="24">
+    <h1>Лазейка для браузера</h1>
+  </header>
+  <p id="status" role="status" aria-live="polite">Проверяем…</p>
+  <button id="toggle" type="button" class="primary" disabled>Включить для браузера</button>
+  <label class="port">Порт локального прокси Лазейки
+    <input id="port" type="number" min="1" max="65535" inputmode="numeric">
+  </label>
+  <details>
+    <summary>Как настроить Лазейку</summary>
+    <ol>
+      <li>В Лазейке откройте «Свой VPN» и выберите сервер нужной подписки.</li>
+      <li>В «Подключение» выберите режим «Только локальный прокси» и включите VPN.</li>
+      <li>Порт — в «Подробнее» Лазейки (обычно 20808). «Вход по паролю» должен быть выключен: браузер не умеет передавать пароль прокси SOCKS5.</li>
+    </ol>
+    <p>Через VPN пойдёт только этот браузер. Windows и другие программы ничего не заметят.</p>
+  </details>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -239,6 +239,7 @@ F = diagnose.Facts
     (F(online=True, tcp="ok", handshake="timeout"), "isp", "dpi"),
     (F(online=True, tcp="reset"), "isp", "dpi"),
     (F(online=True, udp=True, tcp_ok_anywhere=True, peers_failed=1), "isp", "udp_blocked"),
+    (F(online=True, udp=True, quic="silent", quic_control=False), "isp", "udp_blocked"),
     # у VPN-провайдера
     (F(online=True, dns="nxdomain"), "provider", "dns_missing"),
     (F(online=True, dns="nodata"), "provider", "dns_missing"),
@@ -248,6 +249,10 @@ F = diagnose.Facts
     (F(online=True, tcp="timeout", peers_ok=2, peers_failed=1), "provider", "server_down"),
     (F(online=True, tcp=None, peers_ok=1), "provider", "server_down"),
     (F(online=True, udp=True, peers_ok=1, peers_udp_ok=1, tcp_ok_anywhere=True), "provider", "server_down"),
+    # Ядро назвало отказ — точнее проб и соседей: у Hysteria2 «authentication failed, status code: 404».
+    (F(online=True, udp=True, kind="auth", quic="answer", tcp_ok_anywhere=True), "provider", "auth_rejected"),
+    (F(online=True, udp=True, kind="tls", quic="answer"), "provider", "keys_outdated"),
+    (F(online=True, udp=True, quic="closed"), "provider", "port_closed"),
     (F(online=True, tcp="ok", handshake="ok", kind="tls"), "provider", "keys_outdated"),
     (F(online=True, tcp="ok", kind="auth"), "provider", "auth_rejected"),
     (F(online=True, tcp="ok", handshake="alert"), "provider", "no_exit"),
@@ -267,6 +272,9 @@ F = diagnose.Facts
     (F(online=True, tcp="timeout", peers_failed=4), "unknown", "all_down"),
     (F(online=True, tcp="unreachable"), "unknown", "tcp_timeout"),
     (F(online=True, udp=True), "unknown", "udp_silent"),
+    (F(online=True, udp=True, quic="silent", quic_control=True, tcp_ok_anywhere=True), "unknown", "udp_server_silent"),
+    (F(online=True, udp=True, quic="answer"), "unknown", "udp_handshake"),
+    (F(online=True, udp=True, quic="error", tcp_ok_anywhere=True), "isp", "udp_blocked"),
     (F(online=True, dns="found"), "unknown", "dns_retry"),
     (F(), "unknown", "unknown"),
 ])
@@ -389,3 +397,64 @@ def test_help_orphan_own_adapter():
 def test_collect_adapters_read_only_smoke():
     adapters = diagnose.collect_adapters()
     assert all(isinstance(a.name, str) and isinstance(a.dns, list) for a in adapters)
+
+
+# ------------------------------------------------------------ прямая проба QUIC (Hysteria2, TUIC)
+
+def _quic_server(password: bytes | None):
+    """Сервер на 127.0.0.1: отвечает, только если пришёл длинный заголовок QUIC с зарезервированной версией —
+    с salamander сначала снимает обфускацию его паролем (чужой пароль — мусор, ответа нет, как у Hysteria2)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(5)
+    seen = []
+
+    def serve():
+        try:
+            while True:
+                data, peer = sock.recvfrom(4096)
+                if password is not None:
+                    salt, body = data[:8], data[8:]
+                    data = diagnose.salamander(body, password, salt)[8:]    # XOR обратим тем же ключом
+                seen.append(len(data))
+                if data[0] & 0x80 and data[1:5] == bytes.fromhex("1a2a3a4a"):
+                    sock.sendto(b"\x80\x00\x00\x00\x00" + data[6 + data[5]:6 + data[5] + 9], peer)
+        except OSError:
+            pass
+    threading.Thread(target=serve, daemon=True).start()
+    return sock, seen
+
+
+def test_quic_probe_answer_and_salamander_password():
+    plain, seen = _quic_server(None)
+    try:
+        assert diagnose.quic_probe("127.0.0.1", plain.getsockname()[1], timeout=1) == "answer"
+        assert seen == [1200], "меньше 1200 байт сервер QUIC отвечать не обязан"
+    finally:
+        plain.close()
+    obfs, _ = _quic_server(b"right")
+    try:
+        port = obfs.getsockname()[1]
+        assert diagnose.quic_probe("127.0.0.1", port, "right", timeout=1) == "answer"
+        assert diagnose.quic_probe("127.0.0.1", port, "wrong", timeout=0.3) == "silent"
+        assert diagnose.quic_probe("127.0.0.1", port, None, timeout=0.3) == "silent"
+    finally:
+        obfs.close()
+
+
+def test_quic_probe_closed_port():
+    """Порт закрыт: Windows сообщает об ICMP «порт недоступен» сбросом — это не молчание."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as free:
+        free.bind(("127.0.0.1", 0))
+        port = free.getsockname()[1]
+    assert diagnose.quic_probe("127.0.0.1", port, timeout=0.5) == "closed"
+    assert diagnose.quic_probe("no-such-host.invalid", 443, timeout=0.5) == "error"
+
+
+def test_salamander_matches_hysteria():
+    """Ключ — BLAKE2b-256(пароль + соль), XOR по кругу (hysteria/extras/obfs/salamander.go)."""
+    import hashlib
+    salt = bytes(range(8))
+    out = diagnose.salamander(b"\x00" * 40, b"pw", salt)
+    key = hashlib.blake2b(b"pw" + salt, digest_size=32).digest()
+    assert out[:8] == salt and out[8:] == key + key[:8]

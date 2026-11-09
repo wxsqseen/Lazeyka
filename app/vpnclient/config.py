@@ -32,6 +32,7 @@ DIRECT = "direct"
 TUN_IN = "tun-in"
 PROXY_IN = "mixed-in"
 INTERNAL_IN = "internal-in"
+WHY_IN = "why-in"                # вход разбора отказов временного экземпляра задержки (manager._ask_core)
 DNS_REMOTE = "dns-remote"
 DNS_DIRECT = "dns-direct"
 DNS_BYPASS = "dns-bypass"        # домены «через обход»: DNS идёт тем же путём, что их трафик
@@ -1133,8 +1134,8 @@ def build_singbox(plan: RunPlan) -> dict[str, Any]:
 
 
 def build_delay(plan: RunPlan) -> dict[str, Any]:
-    """Временный экземпляр для задержки при выключенном ядре: только выходы и API (без входов и
-    TUN). Все серверы — в селекторе proxy: GET /group/proxy/delay меряет их параллельно."""
+    """Временный экземпляр для задержки при выключенном ядре: выходы, API и вход разбора отказов (без TUN и
+    прокси для программ). Все серверы — в селекторе proxy: GET /group/proxy/delay меряет их параллельно."""
     if not plan.ports.clash or not plan.secrets.clash:
         raise ConfigError("Не выбраны порт и секрет API ядра")
     if plan.dns.strategy not in _STRATEGIES:
@@ -1155,6 +1156,12 @@ def build_delay(plan: RunPlan) -> dict[str, Any]:
     }
     if endpoints:
         cfg["endpoints"] = endpoints
+    if plan.ports.proxy and plan.secrets.internal_pass:
+        # Clash API на отказ говорит лишь «ошибка в проверке задержки», а журнал ядра называет причину только у
+        # соединений через вход: пользователь входа — тег выхода, правило ведёт его запрос ровно в этот выход.
+        cfg["inbounds"] = [{"type": "mixed", "tag": WHY_IN, "listen": "127.0.0.1", "listen_port": int(plan.ports.proxy),
+                            "users": [{"username": t, "password": plan.secrets.internal_pass} for t in server_tags]}]
+        cfg["route"]["rules"] = [{"auth_user": [t], **_to(t)} for t in server_tags]
     return cfg
 
 

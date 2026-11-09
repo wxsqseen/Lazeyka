@@ -48,6 +48,23 @@ def test_window_engine_files_are_not_filtered_out():
     assert '_check(results, "Окно WebView2", window_engine)' in source and "webview_guard.install()" in source
 
 
+def test_browser_extension_matches_lazeyka():
+    """Расширение «Лазейка для браузера» стучится в локальный прокси Лазейки: порт по умолчанию — тот же, что в
+    настройках, а прав — только прокси, хранилище и WebRTC (и адрес проверки выхода)."""
+    import json
+    from app.settings import defaults
+    ext = paths.resource_dir() / "browser-extension"
+    manifest = json.loads((ext / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["manifest_version"] == 3
+    assert sorted(manifest["permissions"]) == ["privacy", "proxy", "storage"]
+    assert manifest["host_permissions"] == ["https://1.1.1.1/*"]
+    port = re.search(r"const DEFAULT_PORT = (\d+);", (ext / "background.js").read_text(encoding="utf-8")).group(1)
+    assert int(port) == defaults()["vpnclient"]["port"]
+    assert defaults()["vpnclient"]["local_auth"] is False, "SOCKS5 с паролем браузер не умеет"
+    for icon in manifest["icons"].values():
+        assert (ext / icon).is_file(), icon
+
+
 def test_selftest_report_path_is_quoted():
     script = (BUILD / "build.ps1").read_text(encoding="utf-8-sig")
     assert "-ArgumentList ('--selftest \"{0}\"' -f $report)" in script
