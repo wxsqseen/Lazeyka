@@ -248,6 +248,10 @@ class Api:
         return self._core.check_site(str(domain))
 
     @_guard
+    def passport_check(self):
+        return self._core.passport_check()
+
+    @_guard
     def lists_add_site(self, domain=""):
         return self._core.lists_add_site(str(domain))
 
@@ -433,6 +437,22 @@ class Api:
     @_guard
     def vpnclient_speedtest(self, server_id=None):
         return self._core.vpnclient_speedtest(_str_or_none(server_id))
+
+    @_guard
+    def vpnclient_rescue(self, server_id=""):
+        return self._core.vpnclient_rescue(str(server_id))
+
+    @_guard
+    def vpnclient_unmask(self, server_id=""):
+        return self._core.vpnclient_unmask(str(server_id))
+
+    @_guard
+    def vpnclient_smart_forget(self, domain=None):
+        return self._core.vpnclient_smart_forget(_str_or_none(domain))
+
+    @_guard
+    def vpnclient_route_site(self, domain="", via="proxy"):
+        return self._core.vpnclient_route_site(str(domain), str(via))
 
     @_guard
     def vpnclient_deeplink_confirm(self, token, accept=False):

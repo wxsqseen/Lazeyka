@@ -4,16 +4,31 @@
  * Панели Discord и YouTube (проверка и «Найти и включить») и сам выбор — в help-symptoms.js.
  */
 (function (Lz) {
-  const { h, uid, setText, setHidden } = Lz.dom;
+  const { h, icon, uid, setText, setHidden } = Lz.dom;
   const ui = Lz.ui;
   const fmt = Lz.fmt;
   const texts = Lz.texts;
 
   const VERDICT_VIEW = {
     works: { tone: 'ok', title: (domain) => `${domain} открывается` },
-    blocked: { tone: 'warn', title: (domain) => `${domain} не открывается` },
+    ru_ca: { tone: 'info', title: (domain) => `${domain} открывается с российским сертификатом` },
     dns: { tone: 'warn', title: (domain) => `Провайдер подменяет адрес ${domain}` },
     down: { tone: 'info', title: (domain) => `${domain} не отвечает` },
+    unreachable: { tone: 'warn', title: (domain) => `${domain} не отвечает по адресу` },
+    ip: { tone: 'warn', title: (domain) => `Провайдер закрыл адрес ${domain}` },
+    dpi: { tone: 'warn', title: (domain) => `Провайдер режет ${domain} по имени` },
+    freeze: { tone: 'warn', title: (domain) => `Соединение с ${domain} замирает` },
+    cert: { tone: 'warn', title: (domain) => `Вместо ${domain} отвечает провайдер` },
+    geo: { tone: 'warn', title: (domain) => `${domain} не пускает из России` },
+    vpn_refused: { tone: 'warn', title: (domain) => `${domain} не пускает через VPN` },
+    whitelist: { tone: 'warn', title: () => 'Интернет по белому списку' },
+  };
+
+  /** Кнопки рентгена: что сделать с сайтом. done — уже сделано (вместо кнопки — метка). */
+  const FIX_VIEW = {
+    add_site: { label: 'Добавить в «Мои сайты»', done: 'В «Моих сайтах»', method: 'lists_add_site', args: (d) => [d] },
+    vpn_site: { label: 'Пускать через свой VPN', done: 'Через свой VPN', method: 'vpnclient_route_site', args: (d) => [d, 'proxy'] },
+    direct_site: { label: 'Пускать мимо VPN', done: 'Мимо VPN', method: 'vpnclient_route_site', args: (d) => [d, 'direct'] },
   };
 
   /* ---------- Общие кусочки ---------- */
@@ -149,9 +164,22 @@
 
   /* ---------- Сайт ---------- */
 
+  function renderSteps(steps) {
+    if (!steps.length) return null;
+    return h('ul', { class: 'checklist site-steps' }, steps.map((step) => {
+      const state = step.ok === true ? 'is-ok' : step.ok === false ? 'is-fail' : 'is-skip';
+      const glyph = step.ok === true ? 'checkCircle' : step.ok === false ? 'xCircle' : 'alertCircle';
+      return h('li', { class: ['checklist__item', state] },
+        h('span', { class: 'checklist__icon', 'aria-hidden': 'true' }, icon(glyph, { size: 18 })),
+        h('span', { class: 'checklist__name', text: step.label }),
+        h('span', { class: 'sr-only', text: step.ok === true ? 'в порядке' : step.ok === false ? 'не проходит' : 'не проверялось' }),
+        step.detail ? h('span', { class: 'checklist__detail', text: step.detail }) : null);
+    }));
+  }
+
   function createSitePanel() {
     let result = null;
-    let added = false;
+    let done = new Set();
 
     const inputId = uid('site');
     const input = ui.textInput({ id: inputId, placeholder: 'example.com', inputMode: 'url', maxLength: 253 });
@@ -163,23 +191,25 @@
       if (!data) return null;
       if (data.checking) return spinnerLine(`Проверяем ${data.checking}…`);
       const view = VERDICT_VIEW[data.verdict] || { tone: 'info', title: (domain) => domain };
-      let action = null;
-      if (data.added) {
-        action = h('span', { class: 'tag tag--ok', text: 'В «Моих сайтах»' });
-      } else if (data.canAdd) {
-        action = withKey(ui.button({
-          label: 'Добавить в «Мои сайты»',
-          kind: 'primary',
+      const buttons = data.fixes.filter((id) => FIX_VIEW[id]).map((id, index) => (data.done.includes(id)
+        ? h('span', { class: 'tag tag--ok', text: FIX_VIEW[id].done })
+        : withKey(ui.button({
+          label: FIX_VIEW[id].label,
+          kind: index === 0 ? 'primary' : 'secondary',
           size: 'sm',
-          busyKey: 'lists_add_site',
-          onClick: () => addSite(),
-        }).el, 'site-add');
-      }
-      return ui.callout({ tone: view.tone, title: view.title(data.domain), text: data.advice, actions: action });
+          busyKey: `site-fix-${id}`,
+          onClick: () => applyFix(id),
+        }).el, `site-${id}`)));
+      /* Кнопки — строкой под вердиктом: справа в плашке две кнопки сжимали текст до слова в строке. */
+      return [
+        ui.callout({ tone: view.tone, title: view.title(data.domain), text: data.advice }),
+        buttons.length ? h('div', { class: 'site-fixes' }, buttons) : null,
+        renderSteps(data.steps),
+      ];
     }
 
     function show() {
-      verdict.update(result ? { ...result, added } : null);
+      verdict.update(result ? { ...result, done: [...done] } : null);
     }
 
     async function submit() {
@@ -201,24 +231,26 @@
           domain: String(response.domain || value),
           verdict: String(response.verdict || ''),
           advice: String(response.advice || ''),
-          canAdd: Boolean(response.can_add),
+          steps: Array.isArray(response.steps) ? response.steps : [],
+          fixes: Array.isArray(response.fixes) ? response.fixes : (response.can_add ? ['add_site'] : []),
         };
-        added = false;
+        done = new Set();
       }
       show();
     }
 
-    async function addSite() {
+    async function applyFix(id) {
       if (!result) return;
       const domain = result.domain;
+      const fix = FIX_VIEW[id];
       const response = await Lz.api.run({
-        method: 'lists_add_site',
-        args: [domain],
-        key: 'lists_add_site',
-        success: (reply) => reply.message || `${domain} добавлен в «Мои сайты»`,
+        method: fix.method,
+        args: fix.args(domain),
+        key: `site-fix-${id}`,
+        success: (reply) => reply.message || `${domain}: ${fix.done.toLowerCase()}`,
       });
       if (response && response.ok && result && result.domain === domain) {
-        added = true;
+        done.add(id);
         show();
       }
     }
@@ -231,7 +263,7 @@
     input.addEventListener('input', () => field.setError(null));
 
     const el = h('div', { class: 'symptom' },
-      lead('Проверим, почему не открывается сайт: блокировка, подмена адреса провайдером или сайт просто не работает.'),
+      lead('Проверим сайт по шагам — адрес, соединение, имя сайта, большие ответы, путь через свой VPN — и скажем, что именно его режет и что с этим сделать.'),
       field.el,
       verdict.el);
     return { el, update() {} };

@@ -42,6 +42,11 @@ TG_DOWN = "tg-down"                # Telegram-прокси не включилс
 VC_DOWN = "vpnclient-autostart"    # свой VPN не включился при запуске Лазейки
 FILTER_ALERT = "zapret-filter"     # фильтр обхода не перестроился под сеть или свой VPN
 COMPAT_ALERT = "compat-off"        # подключён VPN, а совместимость с VPN выключена
+WHITELIST_ALERT = "whitelist"      # мобильный интернет по белому списку: обход не поможет (siteprobe.network_mode)
+WHITELIST_TEXT = ("Мобильный интернет сейчас по белому списку: оператор пускает только к одобренным сайтам "
+                  "(Госуслуги, VK, Яндекс…). Обход тут не поможет — открыть остальное можно только через сервер "
+                  "VPN, до которого оператор пускает.")
+WHITELIST_RECHECK = 180.0          # плашка белого списка висит — перепроверка раз в 3 минуты, снимет обычный интернет
 VPN_NOTE_WAIT = 90.0               # столько ждём фильтра под VPN, чтобы сказать «обход его не трогает»
 GUARD_RECHECK = 60.0               # «пропал интернет» висит — проверочный сайт раз в минуту, без сторожа
 UPDATE_CHECK_DELAY = 8.0           # проверка обновлений после запуска — когда всё уже включилось
@@ -61,6 +66,21 @@ def ok(**extra: Any) -> Result:
 
 def fail(message: str, **extra: Any) -> Result:
     return {"ok": False, "error": message, **extra}
+
+
+def _passport_summary(items: list[dict]) -> str:
+    from .siteprobe import CUT
+    cut = sum(1 for i in items if i["verdict"] in CUT)
+    parts = [f"Провайдер режет {cut} из {len(items)}"]
+    geo = sum(1 for i in items if i["verdict"] == "geo")
+    if geo:
+        parts.append(f"сами не пускают из России — {geo}")
+    fixed = sum(1 for i in items if i["ok"] and i["verdict"] not in ("works", "dns", "ru_ca"))
+    if fixed:
+        parts.append(f"Лазейка настроила {fixed}")
+    if any(i["verdict"] == "whitelist" for i in items):
+        parts.append("мобильный интернет сейчас по белому списку")
+    return ", ".join(parts) + "."
 
 
 def _stopped(what: str) -> str:
@@ -87,7 +107,7 @@ _VC_SETTINGS = ("port", "local_auth", "socks_udp", "allow_lan", "dns_remote", "d
                 "noises", "fingerprint", "latency_on_update", "sort", "deeplink", "sub_update_hours", "verbose",
                 "core_auto_update")
 _VC_ROUTING = ("preset", "via_zapret", "games_direct", "torrents_direct", "ip_check_direct", "direct_apps",
-               "proxy_apps", "direct_sites", "proxy_sites")
+               "proxy_apps", "direct_sites", "proxy_sites", "smart_route")
 
 
 def vpnclient_placeholder(settings: dict, reason: str) -> dict:
@@ -109,9 +129,11 @@ def vpnclient_placeholder(settings: dict, reason: str) -> dict:
         "history": [], "subscriptions": [], "groups": [], "servers": [],
         "latency": {"running": False, "done": 0, "total": 0, "why": 0},
         "speed": {"running": False, "server": None, "mbps": None, "at": None},
+        "rescue": {"running": False, "server": None, "found": None, "message": None, "at": None},
         "import": {"running": False, "message": None, "error": None, "offer": None},
         "routing": {**{k: vc.get(k) for k in _VC_ROUTING}, "bypass": "proxy", "bypass_note": None,
-                    "rules": {"state": "idle", "updated_at": None, "stale": False, "items": [], "error": None}},
+                    "rules": {"state": "idle", "updated_at": None, "stale": False, "items": [], "error": None},
+                    "smart": {"enabled": bool(vc.get("smart_route")), "sites": [], "checking": None}},
         "routing_profiles": [],
         # Логин и пароль локального прокси — секрет менеджера: без него — пусто.
         "settings": {**{k: vc.get(k) for k in _VC_SETTINGS}, "local_user": "", "local_password_set": False},
@@ -180,6 +202,8 @@ class Core:
         self._check_fp: tuple | None = None   # состояние обхода, при котором шла последняя проверка
         self.dns_state: dict = {"running": False, "at": None, "doh_enabled": None, "spoofed": [],
                                 "providers": [], "message": None}
+        self.passport_state: dict = {"running": False, "stage": None, "done": 0, "total": 0, "at": None,
+                                     "items": [], "summary": None}
         # Defender сносит файлы: проверяем по запросу, кнопку даём только после реального удаления
         self.defender_state: dict = {"checked": False, "running": False, "present": None, "active": None,
                                      "excluded": None, "at": None}
@@ -191,6 +215,7 @@ class Core:
         self._vpn_seen: tuple[bool, int] = (False, 0)   # что видел последний осмотр и сколько осмотров подряд
         self.zapret.vpn_plan = self._vpn_plan
         self.tester.source = self._direct_source
+        self.tester.network_mode = self._network_mode
         self._wd_fix_failed: tuple | None = None    # сторож (auto) уже подбирал при этих настройках и сети — зря
         # Страховка связи: после любого запуска winws Лазейкой — не пропал ли из-за него интернет.
         self.guard = ConnectivityGuard(self.zapret, online=self._online, alert=self.alert,
@@ -340,8 +365,13 @@ class Core:
         """Колбэк плашек для менеджеров (свой VPN, обход): level=None — снять."""
         if level is None:
             self.clear_alert(alert_id)
-        else:
-            self.set_alert(alert_id, level, text or "", action, page)
+            return
+        fresh = not self.has_alert(alert_id)
+        self.set_alert(alert_id, level, text or "", action, page)
+        if alert_id == "vpn-server" and fresh:
+            # Ни один сервер своего VPN не отвечает — не белый ли список у мобильного оператора (своя плашка).
+            self._wl_next = 0.0
+            self._recheck_whitelist()
 
     def has_alert(self, alert_id: str) -> bool:
         lock, book = self._alert_book()
@@ -440,6 +470,8 @@ class Core:
             self.clear_alert(TG_DOWN)
         if self._vpnclient_status() in ("running", "starting"):
             self.clear_alert(VC_DOWN)
+        if self.has_alert(WHITELIST_ALERT):
+            self._recheck_whitelist()
         self._reconcile_fix()
         self._reconcile_check()
 
@@ -492,6 +524,37 @@ class Core:
                 self._guard_busy = False
 
         threading.Thread(target=check, name="guard-recheck", daemon=True).start()
+
+    def _network_mode(self, bind: str | None) -> str:
+        """Режим сети (siteprobe.network_mode) с плашкой: белый список — повесить, обычный интернет — снять."""
+        from .siteprobe import network_mode
+        mode = network_mode(bind)
+        if mode == "whitelist":
+            vc = getattr(self, "vpnclient", None)
+            # Задержка у всех серверов: отвечающие (до них оператор пускает) встанут наверх списка.
+            action = ({"label": "Проверить серверы VPN", "call": "vpnclient_latency", "args": []}
+                      if vc is not None and vc.has_servers() else None)
+            self.set_alert(WHITELIST_ALERT, "warn", WHITELIST_TEXT, action=action, page="zapret")
+        elif mode == "open":
+            self.clear_alert(WHITELIST_ALERT)
+        return mode
+
+    def _recheck_whitelist(self) -> None:
+        """Плашка белого списка висит — фоном раз в 3 минуты смотрим, не вернулся ли обычный интернет."""
+        now = time.monotonic()
+        if getattr(self, "_wl_busy", False) or now < getattr(self, "_wl_next", 0.0):
+            return
+        self._wl_busy, self._wl_next = True, now + WHITELIST_RECHECK
+
+        def check() -> None:
+            try:
+                self._network_mode(self._probe_source())
+            except Exception:  # noqa: BLE001 — не вышло проверить: плашка остаётся до следующего раза
+                log.debug("Белый список не перепроверен", exc_info=True)
+            finally:
+                self._wl_busy = False
+
+        threading.Thread(target=check, name="whitelist-recheck", daemon=True).start()
 
     def _reconcile_check(self) -> None:
         """Удачная проверка после плашки (сторожа или по кнопке «Проверить»): всё открылось — снять
@@ -745,9 +808,13 @@ class Core:
             log.warning("Свой VPN недоступен: %r", exc)
             return None
         try:
-            return VpnClientManager(self.settings, self.notify, self.is_admin,
-                                    zapret_view=self._zapret_view, on_change=self._vpnclient_changed,
-                                    before_core=self._vpnclient_before_core, alert=self.alert)
+            vc = VpnClientManager(self.settings, self.notify, self.is_admin,
+                                  zapret_view=self._zapret_view, on_change=self._vpnclient_changed,
+                                  before_core=self._vpnclient_before_core, alert=self.alert)
+            # Пробы умного маршрута — мимо туннеля, как проверки обхода; белый список отмечается плашкой.
+            vc.deps.direct_source = self._probe_source
+            vc.deps.network_mode = self._network_mode
+            return vc
         except Exception as exc:  # noqa: BLE001
             log.exception("Менеджер своего VPN не создан")
             self.vpnclient_error = f"Свой VPN не запустился: {exc}"
@@ -1077,13 +1144,19 @@ class Core:
             self._wd_fails = self._wd_fails + 1 if failing else 0
             if not failing:
                 self.clear_alert(WATCHDOG_ALERT)
+                self.clear_alert(WHITELIST_ALERT)     # Discord и YouTube в белые списки не входят
             if self._wd_fails == 1 and failing:
                 self._wd_next = time.time() + 60   # перепроверить через минуту: вдруг случайный сбой
             if self._wd_fails < 2:
                 return
             self._wd_fails = 0
-            # Решение владельца: не уведомление раз в 10 минут, а плашка, пока не откроется снова.
             what = " и ".join(failing)
+            if self._network_mode(bind) == "whitelist":
+                # Оператор пускает только по белому списку: подбор стратегии рвал бы обход впустую.
+                log.info("Сторож: %s не открывается — мобильный интернет по белому списку, обход не виноват", what)
+                self.clear_alert(WATCHDOG_ALERT)
+                return
+            # Решение владельца: не уведомление раз в 10 минут, а плашка, пока не откроется снова.
             repeat = (getattr(self, "_wd_fix_failed", None) == self._autofix_key()
                       and self.has_alert(WATCHDOG_ALERT))
             if mode == "auto" and repeat:
@@ -1208,6 +1281,7 @@ class Core:
                 "zapret_sync")},
             "diag": dict(self.diag_state),
             "dns": dict(self.dns_state),
+            "passport": dict(self.passport_state, items=[dict(i) for i in self.passport_state["items"]]),
             "vpn": self._vpn_state(s),
             "vpnclient": vc_state,
             "defender": dict(self.defender_state),
@@ -1767,6 +1841,13 @@ class Core:
                 lock.release()
             raise
 
+    def _probe_source(self) -> str | None:
+        """_direct_source для проб сайта: прямого пути при туннеле нет — без привязки (как ходит сейчас)."""
+        try:
+            return self._direct_source()
+        except NoDirectPath:
+            return None
+
     def _direct_source(self) -> str | None:
         """Для проверок обхода: адрес прямого подключения, если работает туннель VPN в интернет —
         полный или для части адресов (тогда неизвестно, каких именно). У VPN в режиме системного
@@ -2035,26 +2116,174 @@ class Core:
         return ok(text=text, copied=copied)
 
     def check_site(self, domain: str) -> Result:
-        from .helpdesk import check_site
-        return check_site(str(domain))
+        """«Рентген сайта»: пробы мимо VPN (тем путём, где работает обход), через свой VPN, что делает с сайтом
+        обход; не открылось напрямую — ещё и не белый ли список у оператора (с плашкой)."""
+        from .helpdesk import check_site, normalize_domain
+        name = normalize_domain(str(domain))
+        if not name:
+            return check_site(str(domain))      # отказ с подсказкой, как ввести адрес
+        bind = self._probe_source()
+        vc = getattr(self, "vpnclient", None)
+        return check_site(name, bind=bind, vpn_opener=vc.probe_opener() if vc is not None else None,
+                          zapret=self._zapret_handles(name), own_vpn=bool(vc is not None and vc.has_servers()),
+                          network_mode=lambda: self._network_mode(bind))
+
+    def _zapret_handles(self, domain: str) -> str | None:
+        """Что обход делает с сайтом: handles (активная стратегия его обрабатывает) | skips | off; None — обход
+        недоступен (нет прав или пакета)."""
+        z = self.zapret
+        if not self.is_admin or z.pack is None:
+            return None
+        if z.status != "running":
+            return "off"
+        try:
+            from .vpnclient.routing import handles_domain
+            view = self._zapret_view()
+            found = handles_domain(view.strategy_args, pack_dir=view.pack_dir, ipset_mode=view.ipset_mode,
+                                   domain=domain)
+        except Exception:  # noqa: BLE001 — стратегия не разобралась: о сайте этого просто не скажем
+            log.debug("Обрабатывает ли обход сайт — не выяснено", exc_info=True)
+            return None
+        return "handles" if found else "skips"
 
     def lists_add_site(self, domain: str) -> Result:
         from .helpdesk import normalize_domain
-        from .zapret import lists as zlists
         name = normalize_domain(str(domain))
         if not name:
             return fail("Некорректный адрес сайта")
+        if not self._add_user_sites([name]):
+            return ok(message=f"{name} уже в «Моих сайтах»")
+        return ok(message=f"{name} добавлен в «Мои сайты»")
+
+    def _add_user_sites(self, names: list[str]) -> list[str]:
+        """Дописать сайты в «Мои сайты» одним сохранением (один перезапуск обхода); ответ — какие добавлены."""
+        from .zapret import lists as zlists
         current = next((x["text"] for x in self.zapret.lists_get() if x["id"] == "list-general-user.txt"), "")
         lines = current.splitlines()
-        if name in (ln.strip() for ln in lines):
-            return ok(message=f"{name} уже в «Моих сайтах»")
+        have = {ln.strip() for ln in lines}
+        fresh = [n for n in dict.fromkeys(names) if n not in have]
+        if not fresh:
+            return []
         # Дописываем в конец: пометки и заголовок, которые человек вёл в списке, остаются как были.
         kept = [ln for ln in lines if ln.strip() != zlists.PLACEHOLDER_DOMAIN]
         while kept and not kept[-1].strip():
             kept.pop()
-        self.zapret.lists_save("list-general-user.txt", "\n".join(kept + [name]) + "\n")
+        self.zapret.lists_save("list-general-user.txt", "\n".join(kept + fresh) + "\n")
         self._sync_bypass(force=True)
-        return ok(message=f"{name} добавлен в «Мои сайты»")
+        return fresh
+
+    # ------------------------------------------------------------ паспорт провайдера
+
+    def passport_check(self) -> Result:
+        """«Паспорт провайдера»: рентген популярных сайтов и раскладка — что в обход, что через свой VPN, что
+        напрямую. Фоном; ход и итог — в state()["passport"]."""
+        from .siteprobe import PASSPORT_SITES
+        if self.passport_state.get("running"):
+            return ok()
+        self.passport_state = {"running": True, "stage": "check", "done": 0, "total": len(PASSPORT_SITES),
+                               "at": None, "items": [], "summary": None}
+        self.background("passport", self._passport, "Паспорт провайдера не составлен")
+        return ok()
+
+    def _passport(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from . import siteprobe
+        items: list[dict] = []
+        try:
+            bind = self._probe_source()
+            vc = getattr(self, "vpnclient", None)
+            opener = vc.probe_opener() if vc is not None else None
+            own = bool(vc is not None and vc.has_servers())
+            lock = threading.Lock()
+            mode: dict[str, str] = {}
+
+            def network_mode() -> str:
+                with lock:                      # белый список спрашиваем один раз на весь паспорт
+                    if "now" not in mode:
+                        mode["now"] = self._network_mode(bind)
+                    return mode["now"]
+
+            def probe(domain: str) -> tuple[Any, dict]:
+                facts = siteprobe.inspect(domain, bind=bind, vpn_opener=opener, zapret=self._zapret_handles(domain),
+                                          own_vpn=own, network_mode=network_mode)
+                return facts, siteprobe.verdict(facts)
+
+            def one(entry: tuple[str, str]) -> dict:
+                domain, label = entry
+                facts, found = probe(domain)
+                item = {"domain": domain, "label": label, "verdict": found["verdict"],
+                        "what": siteprobe.SHORT.get(found["verdict"], ""), "action": None, "ok": None,
+                        "fixes": found["fixes"], "reason": siteprobe.blocked_reason(facts)}
+                with lock:
+                    self.passport_state = dict(self.passport_state, done=self.passport_state["done"] + 1)
+                return item
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                items = list(pool.map(one, siteprobe.PASSPORT_SITES))
+            self.passport_state = dict(self.passport_state, stage="apply", items=items)
+            self._passport_apply(items, probe, vc)
+            self.passport_state = dict(self.passport_state, summary=_passport_summary(items))
+        finally:
+            for item in items:
+                item.pop("fixes", None)
+                item.pop("reason", None)
+            self.passport_state = dict(self.passport_state, running=False, stage=None, at=time.time(), items=items)
+
+    def _passport_apply(self, items: list[dict], probe: Callable[[str], tuple[Any, dict]], vc: Any) -> None:
+        """Раскладка по итогам: что обход возьмёт — в «Мои сайты» одним сохранением и проверка ещё раз; что не
+        взял обход или режут по адресу — через свой VPN; что не пускает через VPN — напрямую (умный маршрут)."""
+        from . import siteprobe
+
+        def smart(item: dict, via: str, why: str, done: str) -> None:
+            if vc is not None and vc.smart_add(item["domain"], via, why):
+                item["action"], item["ok"] = done, True
+            else:
+                item["action"] = "включите умный маршрут своего VPN — и Лазейка пустит его " + (
+                    "через сервер" if via == "proxy" else "напрямую")
+
+        for item in items:
+            verdict = item["verdict"]
+            if verdict in ("works", "dns", "ru_ca"):
+                item["ok"] = True
+            elif "direct_site" in item["fixes"]:
+                smart(item, "direct", "vpn", "теперь напрямую, мимо VPN")
+            elif "add_site" not in item["fixes"] and "vpn_site" in item["fixes"]:
+                smart(item, "proxy", item["reason"] or "ip", "теперь через свой VPN")
+            elif "add_site" not in item["fixes"] and verdict in siteprobe.CUT | {"geo"}:
+                item["action"] = "нужен свой VPN: добавьте подписку на странице «Свой VPN»"
+            elif verdict == "unreachable":
+                item["action"] = ("включите свой VPN и проверьте ещё раз — станет ясно, закрыт ли адрес"
+                                  if vc is not None and vc.has_servers() else
+                                  "адрес закрыт или сайт лежит — открыть поможет только свой VPN")
+        to_zapret = [i for i in items if "add_site" in i["fixes"]]
+        if not to_zapret:
+            return
+        z = self.zapret
+        try:
+            self._add_user_sites([i["domain"] for i in to_zapret])
+        except UserError as exc:
+            for item in to_zapret:
+                item["action"] = f"в «Мои сайты» не добавлен: {exc}"
+            return
+        if z.status != "running":
+            for item in to_zapret:
+                item["action"] = "добавлен в «Мои сайты» — включите обход"
+            return
+        self.passport_state = dict(self.passport_state, stage="recheck")
+        deadline = time.monotonic() + 20
+        while z.status != "running" and time.monotonic() < deadline:   # обход перезапускается с новым списком
+            time.sleep(0.5)
+        time.sleep(2)                                                   # winws встаёт на перехват не сразу
+        for item in to_zapret:
+            facts, found = probe(item["domain"])
+            if found["verdict"] in ("works", "dns", "ru_ca"):
+                item["action"], item["ok"] = "добавлен в «Мои сайты» — открывается через обход", True
+            elif "vpn_site" in found["fixes"]:
+                smart(item, "proxy", siteprobe.blocked_reason(facts) or "dpi",
+                      "обход не пробил — теперь через свой VPN")
+            else:
+                item["action"] = "добавлен в «Мои сайты», но обход его пока не пробил"
 
     def discord_clear_cache(self) -> Result:
         if winutil.other_account():
@@ -2351,6 +2580,29 @@ class Core:
 
     def vpnclient_profile_remove(self, profile_id: str) -> Result:
         return self._vc_result(self._vc().profile_remove(str(profile_id)))
+
+    def vpnclient_rescue(self, server_id: str) -> Result:
+        """«Подобрать маскировку» серверу, который молчит (спасатель сервера)."""
+        self._require_admin()
+        return self._vc_result(self._vc().rescue(str(server_id)))
+
+    def vpnclient_unmask(self, server_id: str) -> Result:
+        return self._vc_result(self._vc().unmask(str(server_id)))
+
+    def vpnclient_smart_forget(self, domain: str | None = None) -> Result:
+        """Убрать сайт из умного маршрута (без адреса — все)."""
+        return self._vc_result(self._vc().smart_forget(str(domain) if domain else None))
+
+    def vpnclient_route_site(self, domain: str, via: str) -> Result:
+        """Кнопка рентгена сайта: сайт — в свои правила «только через VPN» или «мимо VPN»."""
+        from .helpdesk import normalize_domain
+        name = normalize_domain(str(domain))
+        if not name:
+            return fail("Некорректный адрес сайта")
+        result = self._vc_result(self._vc().route_site(name, str(via)))
+        if result.get("ok"):
+            result.setdefault("message", f"{name} — {'только через VPN' if via == 'proxy' else 'мимо VPN'}")
+        return result
 
     def vpnclient_speedtest(self, server_id: str | None = None) -> Result:
         return self._vc_result(self._vc().speedtest(server_id))

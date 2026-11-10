@@ -1,11 +1,73 @@
 'use strict';
 /*
- * Страница «Помощь»: «Что не работает?» (help-symptoms.js), DNS (help-dns.js), отчёт для того,
- * кто помогает, и «Проверка компьютера» (help-diag.js) — бывшая страница «Диагностика».
+ * Страница «Помощь»: паспорт провайдера, «Что не работает?» (help-symptoms.js), DNS (help-dns.js), отчёт
+ * для того, кто помогает, и «Проверка компьютера» (help-diag.js) — бывшая страница «Диагностика».
  */
 (function (Lz) {
-  const { h, setText, setHidden } = Lz.dom;
+  const { h, icon, setText, setHidden } = Lz.dom;
   const ui = Lz.ui;
+
+  /* ---------- Паспорт провайдера ---------- */
+
+  const PASSPORT_STAGE = {
+    check: (p) => `Проверяем сайты: ${p.done || 0} из ${p.total || 0}…`,
+    apply: () => 'Раскладываем: что в обход, что через ваш VPN, что мимо него…',
+    recheck: () => 'Проверяем ещё раз то, что добавили в обход…',
+  };
+
+  function renderPassport(items) {
+    if (!items.length) return null;
+    return h('ul', { class: 'checklist passport' }, items.map((item) => {
+      const fine = item.ok === true;
+      const quiet = item.verdict === 'down' || item.verdict === 'unreachable';
+      return h('li', { class: ['checklist__item', fine ? 'is-ok' : quiet ? 'is-skip' : 'is-fail'] },
+        h('span', { class: 'checklist__icon', 'aria-hidden': 'true' },
+          icon(fine ? 'checkCircle' : quiet ? 'alertCircle' : 'xCircle', { size: 18 })),
+        h('span', { class: 'checklist__name', text: item.label }),
+        h('span', { class: 'sr-only', text: fine ? 'работает' : 'не работает' }),
+        h('span', { class: 'checklist__detail', text: [item.what, item.action].filter(Boolean).join(' — ') }));
+    }));
+  }
+
+  function createPassport() {
+    const run = ui.button({
+      label: 'Проверить и настроить',
+      icon: 'search',
+      kind: 'primary',
+      busyKey: 'passport_check',
+      onClick: () => Lz.api.run({ method: 'passport_check', key: 'passport_check' }),
+    });
+    const progress = ui.slot((text) => (text ? Lz.helpPanels.parts.spinnerLine(text) : null), { cls: 'passport__progress' });
+    const summary = h('p', { class: 'passport__summary', hidden: true });
+    const list = ui.slot(renderPassport, { cls: 'passport-wrap' });
+    const card = ui.card({ title: 'Паспорт провайдера' });
+    card.body.append(
+      h('div', { class: 'action-row' },
+        h('div', { class: 'action-row__text' },
+          h('p', { class: 'action-row__title', text: 'Что режет ваш провайдер?' }),
+          h('p', { class: 'action-row__desc', text: 'Проверим 15 популярных сайтов и сразу всё разложим: что откроет обход, что пойдёт через ваш VPN, а что — мимо него. Около минуты.' })),
+        run.el),
+      progress.el,
+      summary,
+      list.el);
+    return {
+      el: card.el,
+      update(state) {
+        const passport = state.passport && typeof state.passport === 'object' ? state.passport : {};
+        const running = Boolean(passport.running);
+        run.setBusy(running);
+        progress.update(running ? (PASSPORT_STAGE[passport.stage] || PASSPORT_STAGE.check)(passport) : '');
+        const text = running ? '' : String(passport.summary || '');
+        setText(summary, text);
+        setHidden(summary, !text);
+        const items = Array.isArray(passport.items) ? passport.items : [];
+        list.update(running ? [] : items.map((item) => ({
+          label: String(item.label || item.domain || ''), verdict: String(item.verdict || ''),
+          what: item.what ? String(item.what) : '', action: item.action ? String(item.action) : '', ok: item.ok === true,
+        })));
+      },
+    };
+  }
 
   function createReport() {
     const preview = h('pre', { class: 'notes report__text', tabIndex: 0, 'aria-label': 'Текст отчёта' });
@@ -46,7 +108,7 @@
       subtitle: 'Подсказки по признакам, проверка DNS и компьютера, отчёт для помощи человека.',
     });
     const symptoms = sections.createSymptoms({ initial: Lz.params.get('symptom') });
-    const all = [symptoms, sections.createDns(), createReport(), sections.createDiagnostics()];
+    const all = [createPassport(), symptoms, sections.createDns(), createReport(), sections.createDiagnostics()];
     const el = h('div', { class: 'page__inner' }, header.el, all.map((section) => section.el));
 
     return {

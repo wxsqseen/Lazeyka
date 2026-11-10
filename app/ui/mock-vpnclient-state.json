@@ -38,20 +38,20 @@
   "servers": [
     {"id": "b1c2d3e4f5a6b7c8", "sub": "s-3f9a1c", "name": "Амстердам", "country": "NL", "proto": "vless",
      "transport": "tcp", "security": "reality", "engine": "sing-box", "supported": true, "reason": null,
-     "description": null, "warnings": [], "latency": {"ms": 64, "at": 1760684300.0, "error": null, "reason": null},
+     "description": null, "warnings": [], "mask": null, "latency": {"ms": 64, "at": 1760684300.0, "error": null, "reason": null},
      "speed": null},
     {"id": "c2d3e4f5a6b7c8d9", "sub": "s-3f9a1c", "name": "Франкфурт", "country": "DE", "proto": "vless",
      "transport": "tcp", "security": "reality", "engine": "sing-box", "supported": true, "reason": null,
-     "description": null, "warnings": ["duplicate:sni"], "latency": {"ms": 81, "at": 1760684300.0, "error": null, "reason": null},
+     "description": null, "warnings": ["duplicate:sni"], "mask": "дробление TLS", "latency": {"ms": 81, "at": 1760684300.0, "error": null, "reason": null},
      "speed": {"mbps": 87.4, "at": 1760684350.0}},
     {"id": "d3e4f5a6b7c8d9e0", "sub": "s-3f9a1c", "name": "Хельсинки", "country": "FI", "proto": "vless",
      "transport": "xhttp", "security": "reality", "engine": "xray", "supported": true,
      "reason": "через помощник Xray: XHTTP", "description": "Запасной канал, если основной режут",
-     "warnings": [], "latency": {"ms": 142, "at": 1760684300.0, "error": null, "reason": null}, "speed": null},
+     "warnings": [], "mask": null, "latency": {"ms": 142, "at": 1760684300.0, "error": null, "reason": null}, "speed": null},
     {"id": "e4f5a6b7c8d9e0f1", "sub": "s-3f9a1c", "name": "Стокгольм", "country": "SE", "proto": "hysteria2",
      "transport": "tcp", "security": "tls", "engine": "sing-box", "supported": true, "reason": null,
      "description": null, "warnings": [],
-     "latency": {"ms": null, "at": 1760684300.0, "error": "нет ответа за 5 с",
+     "mask": null, "latency": {"ms": null, "at": 1760684300.0, "error": "нет ответа за 5 с",
                  "reason": {"side": "isp", "code": "udp_blocked",
                             "text": "Сервер на UDP (Hysteria2, TUIC, WireGuard, mKCP) не отвечает, а серверы на TCP отвечают — похоже, интернет-провайдер режет UDP.",
                             "advice": "Выберите сервер на TCP (VLESS, Trojan) или подключитесь через другую сеть."}},
@@ -59,17 +59,24 @@
     {"id": "f5a6b7c8d9e0f1a2", "sub": null, "name": "Мой старый сервер", "country": null, "proto": "vless",
      "transport": "quic", "security": "tls", "engine": null, "supported": false,
      "reason": "транспорт QUIC удалён из Xray и несовместим с ним в sing-box", "description": null,
-     "warnings": [], "latency": {"ms": null, "at": null, "error": null, "reason": null}, "speed": null}
+     "warnings": [], "mask": null, "latency": {"ms": null, "at": null, "error": null, "reason": null}, "speed": null}
   ],
   "latency": {"running": false, "done": 0, "total": 0, "why": 0},
   "speed": {"running": false, "server": null, "mbps": null, "at": null},
+  "rescue": {"running": false, "server": null, "found": null, "message": null, "at": null},
   "import": {"running": false, "message": null, "error": null, "offer": null},
   "routing": {
     "preset": "all", "via_zapret": true, "bypass": "direct",
     "bypass_note": "Discord и YouTube идут через обход: он работает и последняя проверка прошла.",
     "games_direct": false, "torrents_direct": false, "ip_check_direct": false,
-    "direct_apps": [], "proxy_apps": [], "direct_sites": [], "proxy_sites": [],
-    "rules": {"state": "idle", "updated_at": null, "stale": false, "items": [], "error": null}
+    "direct_apps": [], "proxy_apps": [], "direct_sites": [], "proxy_sites": [], "smart_route": true,
+    "rules": {"state": "idle", "updated_at": null, "stale": false, "items": [], "error": null},
+    "smart": {"enabled": true, "checking": null, "sites": [
+      {"domain": "instagram.com", "via": "proxy", "why": "dpi", "label": "провайдер режет по имени сайта", "at": 1794700000},
+      {"domain": "example-bank.ru", "via": "direct", "why": "vpn", "label": "не пускает через VPN", "at": 1794695000},
+      {"domain": "linkedin.com", "via": "proxy", "why": "ip", "label": "провайдер закрыл адрес сайта", "at": 1794690000},
+      {"domain": "medium.com", "via": "proxy", "why": "freeze", "label": "соединение замирает после ~16 КБ", "at": 1794680000}
+    ]}
   },
   "routing_profiles": [],
   "settings": {

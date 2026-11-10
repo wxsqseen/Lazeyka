@@ -116,6 +116,7 @@ def make_core(tmp_path, vpnclient=None):
     core.tester = SimpleNamespace(state={}, fix_state={}, check_state={}, running=False, fix_running=False)
     core.updates = UpdateManager(core.settings, core.zapret, SimpleNamespace(core=None), core.notify, True)
     core.diag_state, core.dns_state, core.defender_state = {}, {}, {}
+    core.passport_state = {"running": False, "items": []}
     core.watchdog_state = {"last_at": None, "last_ok": None, "failing": [], "vpn": False}
     core._conflicts, core._original_tgws, core.busy = [], False, None
     core._check_fp, core._best_id, core._scores, core._best_at = None, None, {}, None

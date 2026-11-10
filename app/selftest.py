@@ -50,7 +50,7 @@ SAMPLE_XRAY = {"outbounds": [{
 
 # Все модули своего VPN: менеджер подгружает их по имени, и PyInstaller сам их не видит. Список
 # сверяется с файлами пакета в тестах — новый модуль не забудется.
-VPNCLIENT_MODULES = ("backup", "clash", "config", "deeplink", "diagnose", "engines", "guard", "killswitch",
+VPNCLIENT_MODULES = ("backup", "clash", "config", "deeplink", "diagnose", "engines", "guard", "killswitch", "learn",
                      "links", "manager", "model", "process", "qr", "routeprofile", "routing", "rules", "store",
                      "subscription", "sysproxy", "xrayjson")
 

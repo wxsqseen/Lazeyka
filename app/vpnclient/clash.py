@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 from ..errors import UserError
 
@@ -185,9 +185,11 @@ class TrafficSampler:
     """Свой поток: /traffic — скорость и итоги, /connections раз в 5 с — число соединений и точные итоги,
     текущий член групп «Самый быстрый». Тикер и страница берут только snapshot() — кэш."""
 
-    def __init__(self, client: ClashClient, *, groups: tuple[str, ...] = (), clock=time.time):
+    def __init__(self, client: ClashClient, *, groups: tuple[str, ...] = (), clock=time.time,
+                 on_connections: Callable[[list], None] | None = None):
         self.client = client
         self.groups = tuple(groups)
+        self.on_connections = on_connections      # умный маршрут (learn.Learner.observe): соединения раз в 5 с
         self._clock = clock
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -288,3 +290,9 @@ class TrafficSampler:
                 if isinstance(value, int) and value >= getattr(self, attr):
                     setattr(self, attr, value)
             self._now.update(now)
+        conns = snap.get("connections")
+        if self.on_connections is not None and isinstance(conns, list):
+            try:
+                self.on_connections(conns)
+            except Exception:  # noqa: BLE001 — статистика важнее
+                log.exception("Соединения для умного маршрута не разобраны")

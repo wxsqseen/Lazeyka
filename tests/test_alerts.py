@@ -88,6 +88,8 @@ def watchdog_core(tmp_path, monkeypatch):
         {"id": "discord", "label": "Discord", "ok": sites["discord"], "detail": ""},
         {"id": "youtube", "label": "YouTube", "ok": sites["youtube"], "detail": ""}])
     core.sites = sites
+    core.netmode = "open"
+    monkeypatch.setattr("app.siteprobe.network_mode", lambda bind: core.netmode)
     return core
 
 
@@ -108,6 +110,22 @@ def test_watchdog_ask_sets_alert_without_notify(watchdog_core):
     core.sites.update(discord=True)
     core._watchdog_check("ask")
     assert _alert(core, "watchdog") is None, "удачная проверка снимает плашку"
+
+
+def test_watchdog_under_whitelist_explains_instead_of_fixing(watchdog_core):
+    """Мобильный интернет по белому списку: виноват не обход — вместо «перестал открываться» и подбора стратегии
+    плашка белого списка; Discord снова открылся — плашка снята."""
+    core = watchdog_core
+    core.netmode = "whitelist"
+    fixes = []
+    core.tester.start_fix = lambda: fixes.append(1)
+    core._watchdog_check("auto")
+    core._watchdog_check("auto")
+    assert fixes == [] and _alert(core, "watchdog") is None
+    assert _alert(core, "whitelist")["page"] == "zapret"
+    core.sites.update(discord=True)
+    core._watchdog_check("auto")
+    assert _alert(core, "whitelist") is None
 
 
 def test_watchdog_plural_text(watchdog_core):

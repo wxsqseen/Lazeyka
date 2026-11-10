@@ -125,25 +125,173 @@
     return userSitesList().text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
   }
 
+  const IP_BLOCKED = new Set(['linkedin.com', 'telegram.org']);
+  const FROZEN_SITES = new Set(['medium.com', 'hetzner.com']);
+  const GEO_SITES = new Set(['chatgpt.com', 'openai.com', 'notion.so']);
+  const VPN_REFUSED = new Set(['lk.example-bank.ru']);
+  const RU_CA_SITES = new Set(['sberbank.ru', 'vtb.ru', 'tbank.ru', 'rzd.ru']);
+
+  const step = (id, label, isOk, detail) => ({ id, label, ok: isOk, detail });
+
+  /** Как siteprobe.verdict ядра: шаги «Рентгена» и кнопки. */
   function siteVerdict(name) {
     const tld = name.slice(name.lastIndexOf('.') + 1);
-    if (SPOOFED_DOMAINS.includes(name) && !dohEnabled) {
-      return { verdict: 'dns', can_add: false, advice: 'Провайдер подменяет адрес сайта. Включите DNS через HTTPS — проверка DNS ниже.' };
-    }
+    const vpn = state.vpnclient || {};
+    const vpnOn = vpn.status === 'running';
+    const ownVpn = Array.isArray(vpn.servers) && vpn.servers.length > 0;
+    const vpnStep = (works) => (vpnOn ? [step('vpn', 'Через свой VPN', works, works ? 'код 200' : 'не открывается')] : []);
+    const vpnFix = ownVpn ? ['vpn_site'] : [];
+    const via = vpnOn ? ' Через ваш VPN сайт открывается.' : '';
+    const dns = step('dns', 'Адрес сайта (DNS)', true, 'настоящий адрес');
+    const tcp = step('tcp', 'Соединение с сервером', true, 'есть');
+    const tls = step('tls', 'Защищённое соединение', true, 'есть');
     if (DOWN_TLDS.has(tld) || name.startsWith('nosuch')) {
-      return { verdict: 'down', can_add: false, advice: 'Такого сайта нет или он не отвечает — дело не в блокировке.' };
+      return { verdict: 'down', fixes: [], steps: [step('dns', 'Адрес сайта (DNS)', false, 'имя не находится ни у провайдера, ни в DNS через HTTPS'),
+        step('tcp', 'Соединение с сервером', null, 'не проверялось: адреса нет')],
+      advice: 'Такого сайта нет или он не отвечает — дело не в блокировке.' };
     }
-    const bypassed = state.zapret.status === 'running' && userSites().includes(name);
-    if (BLOCKED_SITES.has(name) && !bypassed) {
-      return { verdict: 'blocked', can_add: true, advice: 'Сайт не открывается. Добавьте его в «Мои сайты» — обход начнёт его обрабатывать.' };
+    if (SPOOFED_DOMAINS.includes(name) && !dohEnabled) {
+      return { verdict: 'dns', fixes: [], steps: [step('dns', 'Адрес сайта (DNS)', false, 'провайдер подменяет адрес'), tcp, tls,
+        step('answer', 'Ответ сайта', true, 'код 200'), step('freeze', 'Большие ответы', true, 'проходят'), ...vpnStep(true)],
+      advice: 'Сайт открывается по настоящему адресу, но провайдер подменяет адрес. Включите DNS через HTTPS — проверка DNS ниже.' };
     }
-    return { verdict: 'works', can_add: false, advice: 'Сайт открывается. Если в браузере нет — очистите кэш браузера или проверьте блокировщик рекламы.' };
+    if (IP_BLOCKED.has(name)) {
+      const steps = [dns, step('tcp', 'Соединение с сервером', false, 'адрес не отвечает'), ...vpnStep(true)];
+      if (!vpnOn) {
+        return { verdict: 'unreachable', fixes: [], steps,
+          advice: `Адрес сайта не отвечает: либо провайдер его закрыл, либо сайт лежит.${ownVpn ? ' Включите свой VPN и проверьте ещё раз — станет ясно, что именно.' : ''}` };
+      }
+      return { verdict: 'ip', fixes: vpnFix, steps,
+        advice: 'Провайдер закрыл адрес сайта: соединение не устанавливается. Обход тут не поможет — через ваш VPN сайт открывается.' };
+    }
+    if (GEO_SITES.has(name)) {
+      return { verdict: 'geo', fixes: vpnFix, steps: [dns, tcp, tls, step('answer', 'Ответ сайта', false, 'код 451 — сайт не пускает из этой страны'), ...vpnStep(true)],
+        advice: `Сайт сам не пускает пользователей из России (ответ 451) — обход тут не поможет, нужен VPN.${vpnOn ? ' Через ваш VPN он открывается.' : ''}` };
+    }
+    if (VPN_REFUSED.has(name) && vpnOn) {
+      return { verdict: 'vpn_refused', fixes: ['direct_site'], steps: [dns, tcp, tls, step('answer', 'Ответ сайта', true, 'код 200'),
+        step('freeze', 'Большие ответы', true, 'проходят'), step('vpn', 'Через свой VPN', false, 'код 403 — сайт не пускает')],
+      advice: 'Напрямую сайт открывается, а через ваш VPN — нет: сайт не пускает из-за границы или с адресов VPN. Пустите его мимо VPN.' };
+    }
+    if (RU_CA_SITES.has(name)) {
+      return { verdict: 'ru_ca', fixes: [], steps: [dns, tcp, step('tls', 'Защищённое соединение', true, 'есть, сертификат российского удостоверяющего центра (Минцифры)'),
+        step('answer', 'Ответ сайта', true, 'код 200'), ...vpnStep(true)],
+      advice: 'Сайт открывается, но его сертификат выдал российский удостоверяющий центр (Минцифры). Chrome, Edge и Firefox без него покажут ошибку сертификата — откройте сайт в Яндекс Браузере или установите сертификат Минцифры (инструкция — на Госуслугах).' };
+    }
+    const zapretOn = state.zapret.status === 'running';
+    const listed = userSites().includes(name);
+    if ((BLOCKED_SITES.has(name) || FROZEN_SITES.has(name)) && !(zapretOn && listed && BLOCKED_SITES.has(name))) {
+      const frozen = FROZEN_SITES.has(name);
+      const what = frozen
+        ? 'Соединение устанавливается, но замирает — так провайдеры режут сайты на зарубежных хостингах (обрыв после ~16 КБ).'
+        : 'Провайдер обрывает соединение на имени сайта — так работает его фильтр (DPI).';
+      const steps = frozen
+        ? [dns, tcp, tls, step('answer', 'Ответ сайта', true, 'код 200'), step('freeze', 'Большие ответы', false, 'замирают после ~16 КБ'), ...vpnStep(true)]
+        : [dns, tcp, step('tls', 'Защищённое соединение', false, 'оборвалось на имени сайта'), ...vpnStep(true)];
+      if (zapretOn && listed) {
+        return { verdict: frozen ? 'freeze' : 'dpi', fixes: vpnFix, steps,
+          advice: `${what} Обход этот сайт обрабатывает, но нынешняя стратегия его не пробивает.${ownVpn ? ' Надёжнее — через свой VPN.' : ''}${via}` };
+      }
+      return { verdict: frozen ? 'freeze' : 'dpi', fixes: ['add_site', ...vpnFix], steps,
+        advice: zapretOn ? `${what} Обход этот сайт сейчас не обрабатывает — добавьте его в «Мои сайты».${via}`
+          : `${what} Добавьте сайт в «Мои сайты» и включите обход.${via}` };
+    }
+    return { verdict: 'works', fixes: [], steps: [dns, tcp, tls, step('answer', 'Ответ сайта', true, 'код 200'),
+      step('freeze', 'Большие ответы', true, 'проходят'), ...vpnStep(true)],
+    advice: 'Сайт открывается. Если в браузере нет — очистите кэш браузера или проверьте блокировщик рекламы.' };
   }
 
   api.check_site = function checkSite(domain) {
     const name = normalizeDomain(domain);
     if (!name) return fail('Введите адрес сайта, например example.com');
-    return ok({ domain: name, ...siteVerdict(name) }, SITE_CHECK_MS);
+    const found = siteVerdict(name);
+    return ok({ domain: name, ...found, can_add: found.fixes.includes('add_site') }, SITE_CHECK_MS);
+  };
+
+  /* ---------- Паспорт провайдера (как Core.passport_check) ---------- */
+
+  const PASSPORT_SITES = [['youtube.com', 'YouTube'], ['discord.com', 'Discord'], ['web.telegram.org', 'Telegram'],
+    ['instagram.com', 'Instagram'], ['x.com', 'X'], ['facebook.com', 'Facebook'], ['linkedin.com', 'LinkedIn'],
+    ['chatgpt.com', 'ChatGPT'], ['rutracker.org', 'Rutracker'], ['medium.com', 'Medium'], ['patreon.com', 'Patreon'],
+    ['github.com', 'GitHub'], ['wikipedia.org', 'Википедия'], ['ya.ru', 'Яндекс'], ['gosuslugi.ru', 'Госуслуги']];
+  const PASSPORT_SHORT = { works: 'открывается', dns: 'открывается, но провайдер подменяет адрес', down: 'не отвечает',
+    ru_ca: 'открывается, сертификат Минцифры',
+    unreachable: 'адрес не отвечает', ip: 'провайдер закрыл адрес', dpi: 'провайдер режет по имени',
+    freeze: 'замирает после ~16 КБ', cert: 'вместо сайта отвечает провайдер', geo: 'сам не пускает из России',
+    vpn_refused: 'не пускает через VPN', whitelist: 'белый список' };
+  const PASSPORT_CUT = new Set(['ip', 'dpi', 'freeze', 'cert']);
+  const PASSPORT_STEP_MS = 160;
+
+  function smartAdd(domain, via, why, label) {
+    const routing = state.vpnclient && state.vpnclient.routing;
+    if (!routing || routing.smart_route === false || !routing.smart) return false;
+    routing.smart.sites = routing.smart.sites.filter((site) => site.domain !== domain);
+    routing.smart.sites.unshift({ domain, via, why, label, at: nowSec() });
+    return true;
+  }
+
+  function passportItems() {
+    const vpn = state.vpnclient || {};
+    const ownVpn = Array.isArray(vpn.servers) && vpn.servers.length > 0;
+    const smartLabel = { ip: 'провайдер закрыл адрес сайта', dpi: 'провайдер режет по имени сайта', freeze: 'соединение замирает после ~16 КБ', geo: 'сайт не пускает из России' };
+    const zapretOn = state.zapret.status === 'running';
+    const toZapret = [];
+    const items = PASSPORT_SITES.map(([domain, label]) => {
+      const found = siteVerdict(domain);
+      const item = { domain, label, verdict: found.verdict, what: PASSPORT_SHORT[found.verdict] || '', action: null, ok: null };
+      const fixes = found.fixes;
+      const smart = (via, why, done) => {
+        if (smartAdd(domain, via, why, via === 'direct' ? 'не пускает через VPN' : smartLabel[why] || '')) Object.assign(item, { action: done, ok: true });
+        else item.action = `включите умный маршрут своего VPN — и Лазейка пустит его ${via === 'proxy' ? 'через сервер' : 'напрямую'}`;
+      };
+      if (['works', 'dns', 'ru_ca'].includes(found.verdict)) item.ok = true;
+      else if (fixes.includes('direct_site')) smart('direct', 'vpn', 'теперь напрямую, мимо VPN');
+      else if (fixes.includes('add_site')) toZapret.push({ item, found, smart });
+      else if (fixes.includes('vpn_site')) smart('proxy', found.verdict === 'geo' ? 'geo' : found.verdict, 'теперь через свой VPN');
+      else if (found.verdict === 'unreachable') item.action = ownVpn ? 'включите свой VPN и проверьте ещё раз — станет ясно, закрыт ли адрес' : 'адрес закрыт или сайт лежит — открыть поможет только свой VPN';
+      else if (PASSPORT_CUT.has(found.verdict) || found.verdict === 'geo') item.action = 'нужен свой VPN: добавьте подписку на странице «Свой VPN»';
+      return item;
+    });
+    if (toZapret.length) {
+      const list = userSitesList();
+      const have = userSites();
+      const fresh = toZapret.map((entry) => entry.item.domain).filter((domain) => !have.includes(domain));
+      if (fresh.length) list.text = `${have.concat(fresh).join('\n')}\n`;
+      for (const { item, found, smart } of toZapret) {
+        if (!zapretOn) { item.action = 'добавлен в «Мои сайты» — включите обход'; continue; }
+        const again = siteVerdict(item.domain);
+        if (['works', 'dns', 'ru_ca'].includes(again.verdict)) Object.assign(item, { action: 'добавлен в «Мои сайты» — открывается через обход', ok: true });
+        else if (again.fixes.includes('vpn_site')) smart('proxy', again.verdict, 'обход не пробил — теперь через свой VPN');
+        else item.action = 'добавлен в «Мои сайты», но обход его пока не пробил';
+      }
+      if (zapretOn) mock.startZapret('список изменён');
+    }
+    return items;
+  }
+
+  function passportSummary(items) {
+    const cut = items.filter((item) => PASSPORT_CUT.has(item.verdict)).length;
+    const parts = [`Провайдер режет ${cut} из ${items.length}`];
+    const geo = items.filter((item) => item.verdict === 'geo').length;
+    if (geo) parts.push(`сами не пускают из России — ${geo}`);
+    const fixed = items.filter((item) => item.ok && !['works', 'dns', 'ru_ca'].includes(item.verdict)).length;
+    if (fixed) parts.push(`Лазейка настроила ${fixed}`);
+    return `${parts.join(', ')}.`;
+  }
+
+  state.passport = { running: false, stage: null, done: 0, total: 0, at: null, items: [], summary: null };
+
+  api.passport_check = function passportCheck() {
+    if (state.passport.running) return ok();
+    const total = PASSPORT_SITES.length;
+    state.passport = { running: true, stage: 'check', done: 0, total, at: null, items: [], summary: null };
+    for (let i = 1; i <= total; i += 1) later(PASSPORT_STEP_MS * i, () => { state.passport = { ...state.passport, done: i }; });
+    later(PASSPORT_STEP_MS * (total + 4), () => { state.passport = { ...state.passport, stage: 'recheck' }; });
+    later(PASSPORT_STEP_MS * (total + 10), () => {
+      const items = passportItems();
+      state.passport = { running: false, stage: null, done: total, total, at: nowSec(), items, summary: passportSummary(items) };
+    });
+    return ok();
   };
 
   api.lists_add_site = function listsAddSite(domain) {

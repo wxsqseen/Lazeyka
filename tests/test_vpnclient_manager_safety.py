@@ -387,7 +387,7 @@ def test_first_start_failing_after_kill_switch_drops_it(tmp_path):
     m, w = _quiet_world(tmp_path, kill_switch=True)
 
     class BrokenSampler:
-        def __init__(self, client, *, groups=()):
+        def __init__(self, client, *, groups=(), on_connections=None):
             pass
 
         def start(self):

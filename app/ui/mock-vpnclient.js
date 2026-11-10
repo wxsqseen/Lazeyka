@@ -90,9 +90,10 @@
     { id: 'geoip-ru-blocked', title: 'Заблокированные IP (runetfreedom)', size: 200704 },
   ];
   const ROUTING_KEYS = new Set(['preset', 'via_zapret', 'games_direct', 'torrents_direct', 'ip_check_direct',
-    'direct_apps', 'proxy_apps', 'direct_sites', 'proxy_sites']);
+    'direct_apps', 'proxy_apps', 'direct_sites', 'proxy_sites', 'smart_route']);
   /* Как _LIVE_KEYS ядра: без перезапуска меняются только эти, остальное входит в конфиг. */
-  const LIVE_KEYS = new Set(['sort', 'latency_on_update', 'sub_update_hours', 'deeplink', 'on_sleep', 'kill_switch', 'core_auto_update']);
+  const LIVE_KEYS = new Set(['sort', 'latency_on_update', 'sub_update_hours', 'deeplink', 'on_sleep', 'kill_switch', 'core_auto_update',
+    'smart_route']);
   const UA_PRESET_OPTIONS = ['v2rayn', 'happ', 'incy'];
   const UA_PRESETS = ['lazeyka', ...UA_PRESET_OPTIONS, 'custom'];
   const UA_LABEL = { v2rayn: 'как v2rayN', happ: 'как Happ', incy: 'как Incy' };
@@ -964,7 +965,7 @@
 
   const SETTING_RULES = {
     preset: choice(['all', 'except_ru', 'blocked'], 'Неизвестный набор маршрутов'),
-    via_zapret: flag, games_direct: flag, torrents_direct: flag, ip_check_direct: flag,
+    via_zapret: flag, games_direct: flag, torrents_direct: flag, ip_check_direct: flag, smart_route: flag,
     direct_apps: list((item) => EXE.test(item) && item.length <= 260, 'Нужен файл программы .exe', LIST_LIMIT),
     proxy_apps: list((item) => EXE.test(item) && item.length <= 260, 'Нужен файл программы .exe', LIST_LIMIT),
     direct_sites: list((item) => SITE.test(item), 'Не похоже на сайт или сеть', LIST_LIMIT),
@@ -1049,6 +1050,51 @@
       managerConflict = uacConflict();
       const conflict = ownConflict() || managerConflict;
       return ok({ ask: Boolean(conflict), conflict });
+    },
+
+    vpnclient_rescue(serverId) {
+      const denied = requireVc();
+      if (denied) return denied;
+      const server = vc.servers.find((item) => item.id === serverId);
+      if (!server) return fail('Нет такого сервера');
+      if (vc.rescue && vc.rescue.running) return fail('Маскировка уже подбирается');
+      vc.rescue = { running: true, server: serverId, found: null, message: null, at: null };
+      later(1800, () => {
+        server.mask = 'дробление TLS';
+        const message = `Сервер «${server.name}» снова отвечает: включена маскировка «дробление TLS» (212 мс).`;
+        vc.rescue = { running: false, server: serverId, found: 'дробление TLS', message, at: nowSec() };
+        log('vpn', 'info', message);
+      });
+      return ok();
+    },
+
+    vpnclient_unmask(serverId) {
+      const denied = requireVc();
+      if (denied) return denied;
+      const server = vc.servers.find((item) => item.id === serverId);
+      if (!server) return fail('Нет такого сервера');
+      server.mask = null;
+      return ok();
+    },
+
+    vpnclient_smart_forget(domain) {
+      const denied = requireVc();
+      if (denied) return denied;
+      const smart = vc.routing.smart;
+      smart.sites = domain ? smart.sites.filter((site) => site.domain !== domain) : [];
+      return ok();
+    },
+
+    vpnclient_route_site(domain, via) {
+      const denied = requireVc();
+      if (denied) return denied;
+      const name = String(domain || '').trim().toLowerCase();
+      if (!name) return fail('Некорректный адрес сайта');
+      const [key, other] = via === 'direct' ? ['direct_sites', 'proxy_sites'] : ['proxy_sites', 'direct_sites'];
+      return api.vpnclient_save_settings({
+        [key]: [...vc.routing[key].filter((s) => s !== name), name],
+        [other]: vc.routing[other].filter((s) => s !== name),
+      });
     },
 
     vpnclient_start(quiet) {
@@ -1348,6 +1394,7 @@
         if (ROUTING_KEYS.has(key)) vc.routing[key] = clone(value);
         else vc.settings[key] = clone(value);
       }
+      if ('smart_route' in clean) vc.routing.smart.enabled = Boolean(clean.smart_route);
       const restart = [...changed].some((key) => !LIVE_KEYS.has(key));
       if (changed.size) log('vpn', 'info', `Настройки своего VPN: ${[...changed].join(', ')}${restart ? ' — нужен перезапуск' : ''}`);
       if ('via_zapret' in values) {

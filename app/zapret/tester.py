@@ -416,6 +416,8 @@ class StrategyTester:
         # Адрес прямого подключения, если работает VPN в интернет: проверки идут мимо туннеля.
         # NoDirectPath — туннель есть, а прямого пути нет.
         self.source: Callable[[], str | None] = lambda: None
+        # Режим сети (siteprobe.network_mode, у Core — с плашкой): при белом списке подбирать стратегию бессмысленно.
+        self.network_mode: Callable[[str | None], str] = lambda bind: "open"
 
     def _bind(self, strict: bool = False) -> str | None:
         """strict — для подбора: без прямого пути при VPN оценивать стратегии нельзя (NoDirectPath).
@@ -695,6 +697,11 @@ class StrategyTester:
                 else:
                     self._finish_fix("failed", "Похоже, нет интернета: не открывается ни один проверочный сайт. "
                                                "Проверьте подключение.")
+                return
+            if self.network_mode(bind) == "whitelist":
+                self._finish_fix("failed", "Мобильный интернет сейчас по белому списку: оператор пускает только к "
+                                           "одобренным сайтам, Discord и YouTube в них нет. Обход тут не поможет — "
+                                           "стратегию не меняли.")
                 return
             found = self._quick_pick(previous, bind)
             if found is None:

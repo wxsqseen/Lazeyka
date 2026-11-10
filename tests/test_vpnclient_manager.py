@@ -467,6 +467,8 @@ def test_snapshot_keys_match_mock(world):
     m.select("auto:g-smart")
     assert m.wait_idle(5)
     m._session.sampler.now = {"t-auto:g-smart": f"t-{amsterdam}"}   # urltest выбрал Амстердам
+    m._learner._store.save({"sites": {"instagram.com": {"why": "dpi", "host": "www.instagram.com", "at": 1.0,
+                                                        "checked": 1.0}}})   # умный маршрут что-то выучил
     snap = m.snapshot()
     assert snap["selected"]["actual"]["name"] == "Amsterdam"
     assert set(snap) == set(mock)

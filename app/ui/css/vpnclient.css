@@ -1206,6 +1206,20 @@
   color: var(--err-text);
 }
 
+/* Умный маршрут: сайт · почему и когда · «забыть» */
+.vc-smart__item {
+  align-items: center;
+}
+
+.vc-smart__item .vc-rules__title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vc-smart__item .vc-rules__meta {
+  flex: 1;
+}
+
 /* ===================== Подробнее ===================== */
 
 .vc-more {

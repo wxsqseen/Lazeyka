@@ -610,6 +610,29 @@ def subtract_networks(include: list[str], exclude: list[str]) -> list[str]:
     return result
 
 
+def handles_domain(args: list[str], *, pack_dir: Path, ipset_mode: str | None, domain: str) -> bool:
+    """Обрабатывает ли winws активной стратегии HTTPS сайта: домен в hostlist профиля на TCP 443 (минус
+    исключения) или профиль на TCP 443 вовсе без списков. IPSet «по списку» решает по адресу, а не по имени, —
+    такой профиль здесь не засчитывается; «все адреса» — засчитывается."""
+    profiles, wf, raw = _parse_profiles(list(args))
+    notes: list[str] = []
+    for p in profiles:
+        if not any(net == "tcp" and ports and _covers(ports_to_strings(ports), 443)
+                   for net, ports in _profile_networks(p, wf, raw)):
+            continue
+        if (p.ipsets or p.ipset_ips) and ipset_mode != "any":
+            continue
+        if not (p.hostlists or p.domains):
+            return True
+        exact, suffix = _domain_sets(_collect(p.hostlists, p.domains, Path(pack_dir), notes))
+        x_exact, x_suffix = _domain_sets(_collect(p.hostlist_exclude, p.exclude_domains, Path(pack_dir), notes))
+        if domain in x_exact or any(_under(domain, x) for x in x_suffix):
+            continue
+        if domain in exact or any(_under(domain, s) for s in suffix):
+            return True
+    return False
+
+
 # ------------------------------------------------------------ файлы rule-set
 
 def write_rule_set(path: Path, rules: list[dict[str, Any]]) -> bool:

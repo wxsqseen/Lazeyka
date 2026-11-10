@@ -108,6 +108,7 @@ def defaults() -> dict:
             "proxy_apps": [],             # программы только через VPN
             "direct_sites": [],
             "proxy_sites": [],
+            "smart_route": True,          # сайты, которые напрямую не открываются, — сама через сервер
             "exclude_nets": list(DEFAULT_EXCLUDE_NETS),
             "proxy_override": list(DEFAULT_PROXY_OVERRIDE),
             "port": 20808,                # системный и локальный прокси

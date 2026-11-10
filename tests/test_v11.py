@@ -136,6 +136,20 @@ def test_fix_reports_failure_and_restores_previous(fake):
     assert z.active == "general"                          # обход вернулся как был
 
 
+def test_fix_does_not_pick_under_mobile_whitelist(fake):
+    """Оператор пускает только по белому списку: Discord и YouTube не откроет никакая стратегия — подбор не рвёт
+    обход перебором, стратегия остаётся прежней."""
+    z, t, _ = fake
+    z.working = "nothing"
+    asked = []
+    t.network_mode = lambda bind: asked.append(bind) or "whitelist"
+    t.start_fix()
+    _wait(t)
+    st = t.fix_state
+    assert st["stage"] == "failed" and "белому списку" in st["message"] and st["tried"] == []
+    assert asked == [None] and z.settings.get("zapret", "strategy") == "general" and z.active == "general"
+
+
 def test_revert_returns_previous(fake):
     z, t, _ = fake
     t.start_fix()

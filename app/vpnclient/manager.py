@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import contextlib
+import copy
 import ctypes
 import http.client
 import importlib
@@ -44,9 +45,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import __version__, log as applog, paths, winutil
+from .. import __version__, log as applog, paths, siteprobe, winutil
 from ..errors import UserError
-from . import diagnose
+from . import diagnose, learn
 from .clash import ClashClient, ClashError, TrafficSampler
 from .model import (MODES, PRESETS, PROBE_URL, UA_PRESETS, DnsChoice, Group, Ports, RunPlan, Secrets, Server,
                     Subscription, TunOptions, engine_for)
@@ -212,6 +213,23 @@ def tls_context() -> ssl.SSLContext:
     ctx = ssl.create_default_context(cafile=certifi.where())
     ctx.load_default_certs()            # и хранилище Windows: корпоративные корни
     return ctx
+
+
+RESCUE_FINGERPRINTS = ("firefox", "safari", "edge", "random")
+
+
+def rescue_variants(server: Server) -> list[tuple[str, dict]]:
+    """Маскировки, которые пробует спасатель: (название для человека, mask). Только TCP с TLS или REALITY — у QUIC
+    (Hysteria2, TUIC), mKCP и WireGuard нет ни ClientHello по TCP, ни отпечатка uTLS. Дробление ClientHello
+    прячет имя сайта от фильтра; другой отпечаток — от фильтра, который узнаёт клиента по рукопожатию."""
+    if (server.security not in ("tls", "reality") or server.proto in ("hysteria2", "tuic", "wireguard")
+            or server.network == "kcp"):
+        return []
+    mine = (server.tls or {}).get("fingerprint") or "chrome"
+    out = [("дробление TLS", {"fragment": True})]
+    out += [(f"отпечаток {fp}", {"fingerprint": fp}) for fp in RESCUE_FINGERPRINTS if fp != mine]
+    out.append(("дробление TLS и отпечаток firefox", {"fragment": True, "fingerprint": "firefox"}))
+    return out
 
 
 def direct_opener() -> urllib.request.OpenerDirector:
@@ -896,6 +914,11 @@ class Deps:
     running_apps: Callable[[], list[dict]] = running_apps
     adapters: Callable[[], list] = diagnose.collect_adapters
     opener: Callable[[str], Any] | None = None      # маршрут загрузок: "direct" | "vpn"
+    # Умный маршрут (learn.py): пробы сайта мимо VPN — адрес прямого подключения (ставит Core) и режим сети.
+    direct_source: Callable[[], str | None] = lambda: None
+    network_mode: Callable[[str | None], str] = siteprobe.network_mode
+    site_inspect: Callable[..., Any] = siteprobe.inspect
+    vpn_control: Callable[[Any], Any] = lambda opener: siteprobe.vpn_attempt("www.gstatic.com", opener)
     clock: Callable[[], float] = time.time
     data_dir: Path | None = None                    # vpnclient/ (в тестах — временная)
 
@@ -927,6 +950,10 @@ class VpnClientManager:
         self._traffic = TrafficBook(self.data_dir / "traffic.json", self.deps.clock)
         self._auth = _PrivateJson(self.data_dir / "local-proxy.json", {}, secure=_secure_dir())
         self._profiles = _PrivateJson(self.data_dir / "routing-profiles.json", [], secure=_secure_dir())
+        # Выученные сайты — тоже в закрытой папке: по ним видно, что человек открывает.
+        self._learner = learn.Learner(_PrivateJson(self.data_dir / learn.FILE_NAME, {}, secure=_secure_dir()),
+                                      self._smart_probe, lambda: bool(self._vc()["smart_route"]), self._changed,
+                                      clock=self.deps.clock)
         self._resolver = self.deps.resolver or Resolver()
         self._store = None
         self._unavailable: str | None = None if is_admin else ADMIN_REASON
@@ -962,6 +989,8 @@ class VpnClientManager:
         self._restart_after_start: set[str] = set()   # версию сменили вручную, пока шёл запуск
         self._latency = {"running": False, "done": 0, "total": 0, "why": 0}
         self._speed = {"running": False, "server": None, "mbps": None, "at": None}
+        self._rescue = {"running": False, "server": None, "found": None, "message": None, "at": None}
+        self._rescue_tried: set[str] = set()         # спасатель уже пробовал сам в этой сети
         self._import = {"running": False, "message": None, "error": None, "offer": None}
         self._updating: set[str] = set()
         self._sub_retry: dict[str, float] = {}
@@ -1263,7 +1292,7 @@ class VpnClientManager:
                        for g in groups],
             "servers": [dict(_public(s, noises), latency=_latency_entry(latencies.get(s.id)),
                              speed=_speed_entry(speeds.get(s.id))) for s in servers],
-            "latency": latency, "speed": speed, "import": imp,
+            "latency": latency, "speed": speed, "import": imp, "rescue": dict(self._rescue),
             "routing": self._routing_snapshot(vc),
             "routing_profiles": self._cached("profiles", lambda: [self._profile_public(p)
                                                                   for p in self._profiles.load()]),
@@ -1365,7 +1394,8 @@ class VpnClientManager:
                 "games_direct": vc["games_direct"], "torrents_direct": vc["torrents_direct"],
                 "ip_check_direct": vc["ip_check_direct"], "direct_apps": list(vc["direct_apps"]),
                 "proxy_apps": list(vc["proxy_apps"]), "direct_sites": list(vc["direct_sites"]),
-                "proxy_sites": list(vc["proxy_sites"]), "rules": rules}
+                "proxy_sites": list(vc["proxy_sites"]), "rules": rules, "smart_route": vc["smart_route"],
+                "smart": self._learner.snapshot()}
 
     def _settings_snapshot(self, vc: dict) -> dict:
         auth = self._auth.load()
@@ -1449,6 +1479,7 @@ class VpnClientManager:
 
     def on_network_change(self) -> None:
         """Сменилась сеть: помощнику Xray — новый физический адаптер, выход — проверить снова."""
+        self._rescue_tried.clear()               # в другой сети провайдер режет по-другому
         if self._session is not None:
             self._ops.submit(self._after_network_change, key="network")
 
@@ -2479,6 +2510,10 @@ class VpnClientManager:
             self._attach_rules(plan, wanted, quiet)
         elif not quiet:
             self._clear_alert(RULES_ALERT)       # маршрутам списки больше не нужны («Всё через VPN»)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Правило умного маршрута в конфиге всегда (выключен — в наборе заглушка): включение без перезапуска.
+        learned = self._learner.write(out_dir, live=not quiet)
+        plan.learned_file, plan.learned_direct_file = learned["proxy"], learned["direct"]
         view = self._view(fresh=True)
         plan.via_zapret = bool(vc["via_zapret"]) and bool(view.strategy_args) and view.pack_dir is not None
         if plan.via_zapret:
@@ -2581,7 +2616,7 @@ class VpnClientManager:
             raise
         groups = tuple(config.group_tag(g.id) for g in plan.groups)
         session = _Session(id=sid, plan=plan, main=main, helper=helper, clash=clash,
-                           sampler=self.deps.sampler(clash, groups=groups),
+                           sampler=self.deps.sampler(clash, groups=groups, on_connections=self._learner.observe),
                            tags={config.tag(s.id): s.id for s in plan.servers}, versions=dict(versions),
                            config_paths=config_paths, started=self.deps.clock(), active=plan.selected,
                            secrets=session_secrets)
@@ -3208,6 +3243,11 @@ class VpnClientManager:
                          if measured and server.sub else None)
                 reason = self._explain_server(server, session.plan.addresses.get(server.id), peers=peers)
                 text += " " + diagnose.alert_text(reason)
+                stored = self.store.server(server.id)
+                if (reason.side in ("isp", "unknown") and stored is not None and server.id not in self._rescue_tried
+                        and rescue_variants(stored)):
+                    text += " Подбираем маскировку подключения…"
+                    self._start_rescue(stored, auto=True)
             self._set_alert(SERVER_ALERT, "warn", text)
             return False
         tag = alive[0][1]
@@ -3462,7 +3502,6 @@ class VpnClientManager:
             for server_id in skipped:
                 self._latency_done(server_id, None, KILLSWITCH_DELAY, cause="killswitch")
             servers = [s for s in servers if s.id not in skipped]
-        config = self._config()
         probe_dir = self.run_dir / "delay"
         for chunk in _chunks(servers, MAX_CONFIG_SERVERS):
             pick = {"selected": chunk[0].id, "servers": chunk, "groups": [], "first": chunk[0], "sub": None,
@@ -3475,36 +3514,12 @@ class VpnClientManager:
             plan = self._buildable(plan)
             if not plan.servers:
                 continue
-            probe_dir.mkdir(parents=True, exist_ok=True)
-            main_cfg, helper_cfg = probe_dir / "sing-box.json", probe_dir / "xray.json"
-            _write_json(main_cfg, config.build_delay(plan))
-            temp_secrets = [plan.secrets.clash, plan.secrets.helper_pass]
-            applog.add_secrets(temp_secrets)
-            helper = main = None
-            try:
-                if "xray" in plan.engines.values():
-                    _write_json(helper_cfg, config.build_xray(plan, loglevel="info"))   # причины отказа: _ask_core
-                    helper = self.deps.process("xray", self._engines().verify("xray", versions["xray"]),
-                                               ["run", "-c", str(helper_cfg)], cwd=probe_dir)
-                    ports = list(plan.ports.helper.values())
-                    helper.start(lambda: all(self.deps.port_open(p) for p in ports), READY_TIMEOUT)
-                main = self.deps.process("sing-box", self._engines().verify("sing-box", versions["sing-box"]),
-                                         ["run", "--disable-color", "-D", str(probe_dir), "-c", str(main_cfg)],
-                                         cwd=probe_dir)
-                clash = self.deps.clash(plan.ports.clash, plan.secrets.clash)
-                main.start(lambda: bool(clash.version()), READY_TIMEOUT)
+            with self._temp_core(plan, versions, probe_dir) as (clash, main, helper):
                 self._delays_via(clash, list(plan.servers), members=len(plan.servers))
                 try:
                     self._ask_core(plan, main, helper)
                 except Exception:  # noqa: BLE001 — задержки уже записаны: без ответа ядра причину назовут пробы
                     log.warning("Ядро замера не спрошено о причинах «нет ответа»", exc_info=True)
-            finally:
-                for proc in (main, helper):
-                    if proc is not None:
-                        proc.stop()
-                applog.remove_secrets(temp_secrets)
-                for path in probe_dir.glob("*.json"):
-                    path.unlink(missing_ok=True)
         return found
 
     def _ask_core(self, plan: RunPlan, main, helper=None) -> None:
@@ -3565,6 +3580,142 @@ class VpnClientManager:
         ids = {s.id for s in good}
         return replace(plan, servers=good, engines={k: v for k, v in plan.engines.items() if k in ids},
                        selected=good[0].id if good else plan.selected)
+
+    # ---------------------------------------------------------------- спасатель сервера
+
+    def rescue(self, server_id: str) -> dict:
+        """«Подобрать маскировку»: фоном; итог — уведомлением, rescue и servers[].mask."""
+        server = self.store.server(str(server_id))
+        if server is None:
+            raise VpnClientError("Нет такого сервера")
+        if not rescue_variants(server):
+            raise VpnClientError("Этому серверу маскировку не подобрать: она меняет TLS-соединение по TCP, а он "
+                                 "работает по QUIC или UDP либо без TLS")
+        if not self._start_rescue(server, auto=False):
+            raise VpnClientError("Маскировка уже подбирается")
+        return {}
+
+    def unmask(self, server_id: str) -> dict:
+        """Снять маскировку: сервер снова подключается как в подписке."""
+        self.store.set_mask(str(server_id), None)
+        if self._in_session(str(server_id)):
+            self._restart_live()
+        self._changed()
+        return {}
+
+    def _in_session(self, server_id: str) -> bool:
+        session = self._session
+        return session is not None and any(s.id == server_id for s in session.plan.servers)
+
+    def _start_rescue(self, server: Server, auto: bool) -> bool:
+        with self._lock:
+            if self._rescue["running"]:
+                return False
+            self._rescue = {"running": True, "server": server.id, "found": None, "message": None, "at": None}
+            self._rescue_tried.add(server.id)
+        threading.Thread(target=self._rescue_job, args=(server, auto), name="vpnclient-rescue", daemon=True).start()
+        self._changed()
+        return True
+
+    def _rescue_job(self, server: Server, auto: bool) -> None:
+        """Сервер молчит, а режет, похоже, провайдер: все маскировки — одним временным экземпляром (как замер
+        задержки), ставим самую быструю из ответивших; VPN на этом сервере переподключается с ней. Сама (auto) —
+        неудача только в журнал и в rescue: плашка «не отвечает» и так висит."""
+        name = server.display_name()
+        found, level, message = None, "warn", None
+        try:
+            variants = rescue_variants(server)
+            trials = []
+            for i, (_label, mask) in enumerate(variants):
+                trial = copy.deepcopy(server)
+                trial.id, trial.mask = f"{server.id}~m{i}", dict(mask)
+                trials.append(trial)
+            delays = self._variant_delays(trials)
+            # Из ответивших — с меньшим числом изменений, затем быстрее: «дробление и отпечаток» вместе — только если
+            # не помогло ни одно по отдельности (за «DPI» такое сочетание проходило реже: 8 из 10 против 10 из 10).
+            answered = sorted((len(variants[i][1]), delays[t.id], i) for i, t in enumerate(trials) if delays.get(t.id))
+            if answered:
+                _, ms, i = answered[0]
+                label, mask = variants[i]
+                self.store.set_mask(server.id, {**mask, "name": label, "at": self.deps.clock()})
+                found, level = label, "success"
+                message = f"Сервер «{name}» снова отвечает: включена маскировка «{label}» ({ms} мс)."
+                if self._in_session(server.id):
+                    message += " Переподключаемся."
+                    self._restart_live()
+            else:
+                message = (f"Маскировка не помогла: «{name}» не ответил ни с дроблением TLS, ни с другими отпечатками. "
+                           "Похоже, провайдер закрыл сам адрес сервера — выберите другой или напишите провайдеру VPN.")
+        except UserError as exc:
+            message = f"Маскировку подобрать не удалось: {applog.scrub(str(exc))}"
+        except Exception as exc:  # noqa: BLE001 — спасатель не должен ронять проверку здоровья
+            log.exception("Спасатель сервера упал")
+            message = f"Маскировку подобрать не удалось: {applog.scrub(str(exc))}"
+        finally:
+            with self._lock:
+                self._rescue = {"running": False, "server": server.id, "found": found, "message": message,
+                                "at": self.deps.clock()}
+            self._changed()
+        if found or not auto:
+            self.notify(level if not auto else "info", message)   # сама сменила подключение — отчёт без тревоги
+        else:
+            log.info("%s", message)
+
+    def _variant_delays(self, trials: list[Server]) -> dict[str, int | None]:
+        """Задержка вариантов сервера одним временным экземпляром ядра — в хранилище ничего не пишется."""
+        vc = self._vc()
+        noises = bool(vc.get("noises"))
+        engines = {s.id: engine_for(s, force_xray=noises)[0] for s in trials}
+        trials = [s for s in trials if engines[s.id]][:MAX_CONFIG_SERVERS]
+        if not trials:
+            return {}
+        versions = self._ensure_cores({s.id: engines[s.id] for s in trials})
+        session = self._session
+        if session is not None and getattr(self.deps.killswitch, "active", False):
+            versions.update({n: v for n, v in _running_versions(session).items() if n in versions})
+        if self._blocked_cores(versions):
+            raise VpnClientError("kill switch не пускает в сеть ядро проверки — выключите его на время подбора")
+        pick = {"selected": trials[0].id, "servers": trials, "groups": [], "first": trials[0], "sub": None,
+                "engines": {s.id: engines[s.id] for s in trials}}
+        work = self.run_dir / "rescue"
+        plan = self._buildable(self._build_plan(vc, pick, versions, set(), mode="local", routing_dir=work, quiet=True))
+        if not plan.servers:
+            return {}
+        config = self._config()
+        with self._temp_core(plan, versions, work) as (clash, _main, _helper):
+            found = clash.group_delay(config.SELECTOR_PROXY, PROBE_URL, DELAY_TIMEOUT_MS, members=len(plan.servers))
+        return {s.id: found.get(config.tag(s.id)) for s in plan.servers}
+
+    @contextlib.contextmanager
+    def _temp_core(self, plan: RunPlan, versions: dict[str, str], work: Path):
+        """Временный экземпляр замера: только выходы, API и вход разбора (+ помощник Xray для своих серверов).
+        В систему он ничего не добавляет: ни TUN, ни прокси. Отдаёт (clash, main, helper)."""
+        config = self._config()
+        work.mkdir(parents=True, exist_ok=True)
+        main_cfg, helper_cfg = work / "sing-box.json", work / "xray.json"
+        _write_json(main_cfg, config.build_delay(plan))
+        temp_secrets = [plan.secrets.clash, plan.secrets.helper_pass]
+        applog.add_secrets(temp_secrets)
+        helper = main = None
+        try:
+            if "xray" in plan.engines.values():
+                _write_json(helper_cfg, config.build_xray(plan, loglevel="info"))   # причины отказа: _ask_core
+                helper = self.deps.process("xray", self._engines().verify("xray", versions["xray"]),
+                                           ["run", "-c", str(helper_cfg)], cwd=work)
+                ports = list(plan.ports.helper.values())
+                helper.start(lambda: all(self.deps.port_open(p) for p in ports), READY_TIMEOUT)
+            main = self.deps.process("sing-box", self._engines().verify("sing-box", versions["sing-box"]),
+                                     ["run", "--disable-color", "-D", str(work), "-c", str(main_cfg)], cwd=work)
+            clash = self.deps.clash(plan.ports.clash, plan.secrets.clash)
+            main.start(lambda: bool(clash.version()), READY_TIMEOUT)
+            yield clash, main, helper
+        finally:
+            for proc in (main, helper):
+                if proc is not None:
+                    proc.stop()
+            applog.remove_secrets(temp_secrets)
+            for path in work.glob("*.json"):
+                path.unlink(missing_ok=True)
 
     def speedtest(self, server_id: str | None = None) -> dict:
         session = self._session
@@ -4280,6 +4431,63 @@ class VpnClientManager:
 
     # ================================================================ настройки
 
+    def probe_opener(self):
+        """Проверки Лазейки «через свой VPN» (рентген сайта, умный маршрут): служебный вход работающего ядра;
+        VPN не включён — None."""
+        session = self._session
+        if session is None or self._status != "running":
+            return None
+        plan = session.plan
+        return proxy_opener(plan.ports.internal, plan.secrets.internal_user, plan.secrets.internal_pass)
+
+    def _smart_probe(self, host: str) -> tuple[str, str | None] | None:
+        """Проба умного маршрута: мимо VPN (тем путём, где работает обход) и через сервер. VPN выключен или идёт
+        подбор стратегии (winws перезапускается на каждую пробу) — не ясно."""
+        opener = self.probe_opener()
+        if opener is None or self._view().paused_for_test:
+            return None
+        bind = self.deps.direct_source()
+        seen: dict[str, str] = {}
+
+        def mode() -> str:
+            seen["mode"] = self.deps.network_mode(bind)
+            return seen["mode"]
+
+        facts = self.deps.site_inspect(host, bind=bind, vpn_opener=opener, network_mode=mode)
+        alive = True
+        if facts.direct is not None and facts.direct.ok and facts.vpn is not None and not siteprobe.vpn_works(facts.vpn):
+            # Через сервер сайт не открылся — не лёг ли сам сервер: иначе «напрямую» выучилось бы всё подряд.
+            alive = siteprobe.vpn_works(self.deps.vpn_control(opener))
+        return learn.judge(facts, seen.get("mode"), alive)
+
+    def smart_add(self, host: str, via: str, why: str) -> bool:
+        """Паспорт провайдера: готовый вывод о сайте — в умный маршрут. False — умный маршрут выключен."""
+        if not self._vc()["smart_route"]:
+            return False
+        self._learner.add(host, via, why)
+        return True
+
+    def smart_forget(self, domain: str | None) -> dict:
+        self._learner.forget(domain or None)
+        return {}
+
+    def has_servers(self) -> bool:
+        try:
+            return bool(self.store.servers())
+        except Exception:  # noqa: BLE001 — только подсказка рентгена: не знаем — не предлагаем
+            log.debug("Список серверов не прочитан", exc_info=True)
+            return False
+
+    def route_site(self, domain: str, via: str) -> dict:
+        """Кнопка рентгена сайта: сайт — в свои правила «только через VPN» (via=proxy) или «мимо VPN» (direct);
+        из противоположного списка он уходит."""
+        if via not in ("proxy", "direct"):
+            raise VpnClientError("Неизвестный маршрут")
+        key, other = ("proxy_sites", "direct_sites") if via == "proxy" else ("direct_sites", "proxy_sites")
+        vc = self._vc()
+        return self.save_settings({key: [*(s for s in vc[key] if s != domain), domain],
+                                   other: [s for s in vc[other] if s != domain]})
+
     def save_settings(self, values: dict) -> dict:
         errors: dict[str, str] = {}
         clean: dict[str, Any] = {}
@@ -4320,6 +4528,8 @@ class VpnClientManager:
         changed = {k for k, v in clean.items() if before.get(k) != v}
         if auth_update and wants_auth:
             changed.add("local_auth")           # без входа по паролю логин в конфиг не попадает
+        if "smart_route" in changed:
+            self._learner.write()               # ядро перечитает набор само
         if "deeplink" in changed:
             self._apply_deeplink(bool(clean["deeplink"]))
         if "preset" in changed and clean["preset"] != "all":
@@ -4496,11 +4706,11 @@ SETTINGS_KEYS = ("port", "local_auth", "socks_udp", "allow_lan", "dns_remote", "
                  "noises", "fingerprint", "latency_on_update", "sort", "deeplink", "sub_update_hours", "verbose",
                  "core_auto_update")
 ROUTING_KEYS =("preset", "via_zapret", "games_direct", "torrents_direct", "ip_check_direct", "direct_apps",
-                "proxy_apps", "direct_sites", "proxy_sites")
+                "proxy_apps", "direct_sites", "proxy_sites", "smart_route")
 SAVE_KEYS = SETTINGS_KEYS + ROUTING_KEYS
 # Без перезапуска ядра меняются только эти; остальное входит в конфиг.
 _LIVE_KEYS = {"sort", "latency_on_update", "sub_update_hours", "deeplink", "on_sleep", "kill_switch",
-              "core_auto_update"}
+              "core_auto_update", "smart_route"}
 RESTART_KEYS = (set(SAVE_KEYS) - _LIVE_KEYS) | {"local_auth"}
 _LOGIN = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _EXE = re.compile(r"(?:[A-Za-z]:\\(?:[^<>\"|?*\\]+\\)*)?[^\\/:<>\"|?*]+\.exe", re.I)
@@ -4562,7 +4772,7 @@ def _is_site(text: str) -> bool:
 
 _VALIDATORS: dict[str, Callable[[Any], tuple[str | None, Any]]] = {
     "preset": _choice(PRESETS, "Неизвестный набор маршрутов"),
-    "via_zapret": _bool, "games_direct": _bool, "torrents_direct": _bool, "ip_check_direct": _bool,
+    "via_zapret": _bool, "games_direct": _bool, "torrents_direct": _bool, "ip_check_direct": _bool, "smart_route": _bool,
     "direct_apps": _str_list(lambda x: bool(_EXE.fullmatch(x)) and len(x) <= 260, "Нужен файл программы .exe"),
     "proxy_apps": _str_list(lambda x: bool(_EXE.fullmatch(x)) and len(x) <= 260, "Нужен файл программы .exe"),
     "direct_sites": _str_list(_is_site, "Не похоже на сайт или сеть"),

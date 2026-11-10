@@ -153,7 +153,7 @@ def _address_of(server: Server) -> Any:
 def _link_fields(server: Server) -> dict[str, Any]:
     """Всё, что пришло из ссылки, — без служебного (id, подписка) и своего имени человека."""
     data = server.to_dict()
-    for key in ("id", "sub", "custom_name"):
+    for key in ("id", "sub", "custom_name", "mask"):
         data.pop(key, None)
     return data
 
@@ -456,7 +456,7 @@ class ProfileStore:
                     report.added.append(server.id)
                     continue
                 report.kept.append(server.id)
-                server.custom_name = previous.custom_name
+                server.custom_name, server.mask = previous.custom_name, previous.mask
                 if previous.id != server.id:
                     report.remapped[previous.id] = server.id
             matched = {s.id for s in pairs.values()}
@@ -573,7 +573,7 @@ class ProfileStore:
                     continue
                 place = next((i for i, s in enumerate(state.servers) if s is stored), None)
                 if stored.sub is None and place is not None and _link_fields(stored) != _link_fields(server):
-                    server.id, server.custom_name = stored.id, stored.custom_name
+                    server.id, server.custom_name, server.mask = stored.id, stored.custom_name, stored.mask
                     replaced[place] = server
                     known[server.id] = known[server.key()] = server
                     report.updated.append(server.id)
@@ -618,6 +618,15 @@ class ProfileStore:
             server.custom_name = cleaned or None
             self.save()
             return copy.deepcopy(server)
+
+    def set_mask(self, server_id: str, mask: dict | None) -> None:
+        """Маскировка спасателя сервера (None — снять)."""
+        with self._lock:
+            server = self._server(server_id)
+            if server is None:
+                raise StoreError("Нет такого сервера")
+            server.mask = dict(mask) if mask else None
+            self.save()
 
     def select(self, selection: str | None) -> None:
         """Выбрать сервер, «auto:<группа>» или «auto:<подписка>»; None — снять выбор."""

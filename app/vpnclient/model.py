@@ -89,6 +89,9 @@ class Server:
     plugin: dict[str, Any] | None = None        # shadowsocks: {"name": "obfs-local", "opts": {...}}
     xray_outbound: dict[str, Any] | None = field(default=None, repr=False)  # outbound провайдера «как есть»
     fragment: dict[str, Any] | None = None      # из dialerProxy freedom провайдера: {packets, length, interval}
+    # Маскировка, которую подобрал спасатель сервера (manager.rescue): {name, fingerprint?, fragment?, at}. Своё,
+    # как custom_name: обновление подписки её не стирает.
+    mask: dict[str, Any] | None = None
     source: str = "link"                        # SOURCES
     raw: str = field(default="", repr=False)    # исходная ссылка
     warnings: list[str] = field(default_factory=list)
@@ -150,6 +153,7 @@ class Server:
             "proto": self.proto, "transport": self.network, "security": self.security,
             "engine": engine, "supported": engine is not None, "reason": reason,
             "description": self.description, "warnings": list(self.warnings),
+            "mask": (self.mask or {}).get("name"),
         }
 
 
@@ -224,8 +228,10 @@ def engine_for(server: Server, *, force_xray: bool = False) -> tuple[str | None,
         return None, f"нужны {', '.join(xray_only)} (только Xray) и {', '.join(singbox_only)} (только sing-box)"
     if xray_only:
         return "xray", "через помощник Xray: " + ", ".join(xray_only)
-    if (force_xray or server.fragment) and not singbox_only:
-        return "xray", "через помощник Xray" + (": фрагментация провайдера" if server.fragment else "")
+    masked = bool((server.mask or {}).get("fragment"))      # дробление спасателя: REALITY дробит только Xray
+    if (force_xray or server.fragment or masked) and not singbox_only:
+        why = ": фрагментация провайдера" if server.fragment else ": дробление TLS" if masked else ""
+        return "xray", "через помощник Xray" + why
     return "sing-box", None
 
 
@@ -379,6 +385,8 @@ class RunPlan:
     proxy_apps: list[str] = field(default_factory=list)
     direct_sites: list[str] = field(default_factory=list)
     proxy_sites: list[str] = field(default_factory=list)
+    learned_file: Path | None = None                  # умный маршрут: rule-set сайтов «через сервер»
+    learned_direct_file: Path | None = None           # умный маршрут: rule-set сервисов «напрямую» (не пускают VPN)
     torrent_apps: list[str] = field(default_factory=list)
     rules_files: dict[str, Path] = field(default_factory=dict)   # id набора → локальный .srs
     additions: list[str] = field(default_factory=list)          # «дополнения Лазейки» (российские сервисы)

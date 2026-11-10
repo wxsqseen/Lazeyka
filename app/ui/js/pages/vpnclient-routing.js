@@ -1,6 +1,6 @@
 'use strict';
 /*
- * Свой VPN → «Маршруты»: пресет, «Discord и YouTube — через обход Лазейки» с тем, что сейчас,
+ * Свой VPN → «Маршруты»: пресет, «Discord и YouTube — через обход Лазейки» с тем, что сейчас, умный маршрут,
  * игры, торренты и проверка IP напрямую, программы и сайты мимо VPN или только через VPN,
  * профили маршрутизации Happ/Incy и состояние списков маршрутов.
  */
@@ -501,6 +501,78 @@
     };
   }
 
+  /* ---------- Умный маршрут ---------- */
+
+  function renderSmartSites(sites) {
+    if (!sites.length) return null;
+    return h('ul', { class: 'vc-rules vc-smart' }, sites.map((site) => h('li', { class: 'vc-rules__item vc-smart__item' },
+      h('span', { class: 'vc-rules__title', text: site.domain }),
+      h('span', { class: 'vc-rules__meta', text: [site.via === 'direct' ? 'напрямую' : 'через сервер', site.label, site.at ? fmt.relative(site.at) : ''].filter(Boolean).join(' · ') }),
+      ui.button({
+        icon: 'x',
+        kind: 'ghost',
+        size: 'sm',
+        ariaLabel: `Забыть ${site.domain}`,
+        title: 'Забыть: снова пойдёт по общим правилам',
+        busyKey: `vpnclient_smart_forget:${site.domain}`,
+        onClick: () => Lz.api.run({ method: 'vpnclient_smart_forget', args: [site.domain], key: `vpnclient_smart_forget:${site.domain}`, success: `${site.domain} забыт` }),
+      }).el)));
+  }
+
+  function createSmartRoute() {
+    const row = ui.switchRow({
+      title: 'Умный маршрут',
+      description: 'Сайт напрямую не открывается, а через сервер открывается — Лазейка сама пустит его через сервер. Сервис не пускает через VPN (банк, Госуслуги, маркетплейс) — пустит напрямую. Раз в сутки проверяет выученное заново. Смотрит только на зависшие соединения; включается без переподключения.',
+      onChange: async (on) => {
+        const result = await save({ smart_route: on });
+        return Boolean(result && result.ok);
+      },
+    });
+    const dotText = h('span', { class: 'conn__text' });
+    const status = h('p', { class: 'conn', role: 'status' }, h('span', { class: 'conn__dot', 'aria-hidden': 'true' }), dotText);
+    const list = ui.slot((data) => renderSmartSites(data), { cls: 'vc-rules-wrap' });
+    const forgetAll = ui.actionButton({
+      method: 'vpnclient_smart_forget',
+      args: [null],
+      label: 'Забыть все',
+      icon: 'eraser',
+      size: 'sm',
+      success: 'Умный маршрут забыл все сайты',
+    });
+    const el = h('div', { class: 'subsection' },
+      h('div', { class: 'settings-list' }, row.el),
+      h('div', { class: 'vpn-state' }, status, forgetAll.el),
+      list.el);
+    return {
+      el,
+      update(routing) {
+        const smart = routing.smart && typeof routing.smart === 'object' ? routing.smart : {};
+        const on = routing.smart_route !== false;
+        row.sw.set(on);
+        const sites = (Array.isArray(smart.sites) ? smart.sites : []).map((site) => ({
+          domain: String(site.domain || ''), via: site.via === 'direct' ? 'direct' : 'proxy', label: site.label ? String(site.label) : '', at: site.at || null,
+        })).filter((site) => site.domain);
+        let line;
+        if (smart.checking) line = { tone: 'warn', text: `Проверяем ${smart.checking}…` };
+        else if (!on) line = { tone: 'off', text: sites.length ? `Выключен: ${fmt.count(sites.length, 'выученный сайт', 'выученных сайта', 'выученных сайтов')} идут по общим правилам.` : 'Выключен.' };
+        else if (sites.length) {
+          const direct = sites.filter((site) => site.via === 'direct').length;
+          const parts = [];
+          const one = (n) => n % 10 === 1 && n % 100 !== 11;   // «1 сайт, который», «21 сайт, который», «3 сайта, которые»
+          const proxied = sites.length - direct;
+          if (proxied) parts.push(`через сервер — ${fmt.count(proxied, 'сайт', 'сайта', 'сайтов')}, ${one(proxied) ? 'который напрямую не открывается' : 'которые напрямую не открываются'}`);
+          if (direct) parts.push(`напрямую — ${fmt.count(direct, 'сервис', 'сервиса', 'сервисов')}, ${one(direct) ? 'который не пускает' : 'которые не пускают'} через VPN`);
+          line = { tone: 'ok', text: `${parts.join('; ')}.`.replace(/^./, (c) => c.toUpperCase()) };
+        }
+        else line = { tone: 'ok', text: 'Пока ни одного: все сайты, что открывались, работали без сервера.' };
+        status.dataset.tone = line.tone;
+        setText(dotText, line.text);
+        setHidden(forgetAll.el, !sites.length);
+        list.update(sites);
+      },
+    };
+  }
+
   /* ---------- Карточка ---------- */
 
   function createRoutingSection() {
@@ -545,6 +617,7 @@
     /* Профиль маршрутизации провайдера заменяет пресет: его правила и его «всё остальное». */
     const presetNote = h('p', { class: 'vc-note', hidden: true });
     const sites = createSitesEditor();
+    const smart = createSmartRoute();
     const profiles = createProfiles();
     const rules = createRules();
 
@@ -558,6 +631,8 @@
       h('div', { class: 'divider', 'aria-hidden': 'true' }),
       h('div', { class: 'settings-list' }, viaZapret.el),
       bypass,
+      h('div', { class: 'divider', 'aria-hidden': 'true' }),
+      smart.el,
       h('div', { class: 'divider', 'aria-hidden': 'true' }),
       togglesList,
       h('div', { class: 'divider', 'aria-hidden': 'true' }),
@@ -598,6 +673,7 @@
         setText(appsNote, note);
         setHidden(appsNote, !note);
         sites.update(routing);
+        smart.update(routing);
         profiles.update(snap.profiles);
         rules.update(routing);
       },

@@ -60,6 +60,11 @@
       selected: id === ctx.selectedId,
       actual: id === ctx.actualId,
       pending: id === ctx.pendingId,
+      /* Маскировка, подобранная спасателем сервера («дробление TLS», «отпечаток safari»), и идёт ли подбор сейчас. */
+      mask: server.mask ? String(server.mask) : null,
+      rescuing: Boolean(ctx.rescue && ctx.rescue.running && String(ctx.rescue.server) === id),
+      maskable: ['tls', 'reality'].includes(String(server.security || '')) && !['hysteria2', 'tuic', 'wireguard'].includes(String(server.proto || ''))
+        && server.transport !== 'kcp',
       sub: server.sub || null,
       /* В конфиге работающего VPN (выбранный и до 15 серверов его подписки): тест скорости — только через них. */
       inConfig: Boolean(ctx.configIds && ctx.configIds.has(id)),
@@ -135,6 +140,7 @@
       actualName: selected && selected.actual ? String(selected.actual.name || '') : '',
       pendingId: local.pendingId,
       configIds: vc.status === 'running' ? view.configServerIds(vc) : null,
+      rescue: vc.rescue && typeof vc.rescue === 'object' ? vc.rescue : null,
     };
     const query = local.query;
     const sort = local.sort;
@@ -313,6 +319,17 @@
         { label: 'QR-код для телефона или ТВ', icon: 'qr', onSelect: () => dialogs.showQr({ id: row.id, title: row.name }) },
         { label: 'Проверить задержку', icon: 'pulse', disabled: !row.supported, onSelect: () => latency([row.id]) },
         speedItem(row, data),
+        row.mask ? {
+          label: 'Снять маскировку',
+          icon: 'eraser',
+          onSelect: () => Lz.api.run({ method: 'vpnclient_unmask', args: [row.id], key: `vpnclient_unmask:${row.id}`, success: 'Маскировка снята' }),
+        } : {
+          label: 'Подобрать маскировку',
+          icon: 'shieldCheck',
+          title: 'Сервер не отвечает из-за провайдера? Лазейка попробует дробление TLS и другие отпечатки и включит то, с чем он ответит.',
+          disabled: !row.supported || !row.maskable || row.rescuing,
+          onSelect: () => Lz.api.run({ method: 'vpnclient_rescue', args: [row.id], key: `vpnclient_rescue:${row.id}`, success: 'Подбираем маскировку — это до полуминуты' }),
+        },
         { label: 'Удалить', icon: 'trash', tone: 'danger', onSelect: () => removeServer(row) },
       ],
     }).el;
@@ -352,7 +369,9 @@
       h('span', { class: 'vc-server__name' },
         /* Длинное имя обрезается многоточием — целиком оно во всплывающей подсказке. */
         h('span', { class: 'vc-server__label', text: row.name, title: row.name }),
-        row.actual ? h('span', { class: 'vc-tag', text: 'сейчас' }) : null),
+        row.actual ? h('span', { class: 'vc-tag', text: 'сейчас' }) : null,
+        row.rescuing ? h('span', { class: 'vc-tag', text: 'подбираем маскировку…' })
+          : row.mask ? h('span', { class: 'vc-tag', text: `маскировка: ${row.mask}`, title: 'Подобрала Лазейка: с ней сервер отвечает. Снять — в меню сервера.' }) : null),
       h('span', { class: ['vc-server__meta', !row.supported && 'is-unsupported', row.engine === 'xray' && 'is-xray'], text: metaText }),
       /* «Нет ответа»: чья сторона и коротко почему; полный текст и что сделать — в подсказке. */
       row.supported ? view.reasonEl(row.latency, 'vc-server__why') : null,

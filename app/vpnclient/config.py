@@ -33,6 +33,8 @@ TUN_IN = "tun-in"
 PROXY_IN = "mixed-in"
 INTERNAL_IN = "internal-in"
 WHY_IN = "why-in"                # вход разбора отказов временного экземпляра задержки (manager._ask_core)
+LEARNED_SET = "learned"          # умный маршрут: сайты, которые напрямую не открываются (vpnclient/learn.py)
+LEARNED_DIRECT_SET = "learned-direct"   # умный маршрут: сервисы, которые не пускают через VPN
 DNS_REMOTE = "dns-remote"
 DNS_DIRECT = "dns-direct"
 DNS_BYPASS = "dns-bypass"        # домены «через обход»: DNS идёт тем же путём, что их трафик
@@ -60,6 +62,10 @@ SB_MUX = {"enabled": True, "protocol": "h2mux", "max_connections": 4, "min_strea
 XRAY_MUX = {"enabled": True, "concurrency": 8, "xudpConcurrency": 16, "xudpProxyUDP443": "reject"}
 XRAY_NOISES = [{"type": "rand", "packet": "10-20", "delay": "10-16"}]
 XRAY_FRAGMENT = {"packets": "tlshello", "length": "100-200", "interval": "10-20"}
+# Дробление спасателя сервера: куски мельче имени сайта. Замер за «DPI», который ищет имя в первом пакете
+# (REALITY, Xray 26.3.27): 100-200 байт проходили 1–8 из 8, 10-30 байт с паузой 1-3 мс — 16 из 16 при той же
+# задержке (~430 мс); пауза 10-20 мс при таких кусках — уже 1,6 с на рукопожатие.
+XRAY_RESCUE_FRAGMENT = {"packets": "tlshello", "length": "10-30", "interval": "1-3"}
 
 SB_FINGERPRINTS = frozenset({"chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android", "random",
                              "randomized"})
@@ -193,6 +199,10 @@ def process_patterns(items: Iterable[str | None]) -> list[str]:
 
 def _b64url(value: str | None) -> str:
     return (value or "").strip().replace("+", "-").replace("/", "_").rstrip("=")
+
+
+def _mask(server: Server) -> dict[str, Any]:
+    return server.mask or {}
 
 
 def sb_fingerprint(fp: str | None) -> str | None:
@@ -393,14 +403,17 @@ def _sb_tls(plan: RunPlan, server: Server, *, quic: bool) -> dict[str, Any] | No
         out["insecure"] = True
     reality = server.security == "reality" and not quic
     if not quic:
-        fp = sb_fingerprint(t.get("fingerprint") or plan.fingerprint)   # отпечаток сервера важнее общего
+        # Подобранный спасателем отпечаток важнее отпечатка сервера, а тот — общего.
+        fp = sb_fingerprint(_mask(server).get("fingerprint") or t.get("fingerprint") or plan.fingerprint)
         if reality and fp is None:
             fp = "chrome"                # REALITY без uTLS не работает
         if fp:
             out["utls"] = {"enabled": True, "fingerprint": fp}
         # Своя фрагментация или провайдера (dialerProxy с fragment), если сервер всё же у sing-box.
-        if (plan.tls_fragment or server.fragment) and not reality:
+        if (plan.tls_fragment or server.fragment or _mask(server).get("fragment")) and not reality:
             out["fragment"] = True       # REALITY фрагментацию ядра не применяет
+        if _mask(server).get("fragment") and not reality:
+            out["record_fragment"] = True   # спасатель: ещё и записи TLS — за «DPI» с ним чаще проходит
     if reality:
         pbk = _b64url(t.get("pbk"))
         if not pbk:
@@ -718,6 +731,10 @@ def _dns(plan: RunPlan, servers: list[tuple[Server, str]], available: set[str],
                                 (plan.direct_apps, plan.direct_sites, DNS_DIRECT)):
         rules += _app_dns(apps, server)
         rules.extend({**part, **_dns_to(server)} for part in _domain_parts(routing.site_group(sites), available))
+    if plan.learned_file:
+        rules.append({"rule_set": [LEARNED_SET], **_dns_to(DNS_REMOTE)})   # провайдер мог подменять и адрес
+    if plan.learned_direct_file:
+        rules.append({"rule_set": [LEARNED_DIRECT_SET], **_dns_to(DNS_DIRECT)})
     if plan.via_zapret and ends.bypass:
         sets = list(dict.fromkeys(Path(p.domains_file).stem for p in plan.bypass if p.domains_file))
         if sets:
@@ -966,6 +983,11 @@ def _route_rules(plan: RunPlan, servers: list[tuple[Server, str]], available: se
             rules.append({"inbound": [TUN_IN], "process_path_regex": patterns, **_to(DIRECT)})
     rules += _app_rules(plan.proxy_apps, SELECTOR_PROXY) + _site_rules(plan.proxy_sites, SELECTOR_PROXY, available)
     rules += _app_rules(plan.direct_apps, DIRECT) + _site_rules(plan.direct_sites, DIRECT, available)
+    if plan.learned_file:
+        # Умный маршрут — сразу после правил человека: сайт, который обход не пробил, идёт через сервер.
+        rules.append({"rule_set": [LEARNED_SET], **_to(SELECTOR_PROXY)})
+    if plan.learned_direct_file:
+        rules.append({"rule_set": [LEARNED_DIRECT_SET], **_to(DIRECT)})
     if plan.via_zapret and ends.bypass:
         rules += _bypass_rules(plan)
     if plan.games_direct and routing.GAMES_DOWNLOAD in available:
@@ -990,6 +1012,10 @@ def _rule_set_files(plan: RunPlan) -> dict[str, tuple[Path, str]]:
             for path in (prof.domains_file, prof.ips_file, prof.exclude_file):
                 if path:
                     files[Path(path).stem] = (Path(path), "source")
+    if plan.learned_file:
+        files[LEARNED_SET] = (Path(plan.learned_file), "source")
+    if plan.learned_direct_file:
+        files[LEARNED_DIRECT_SET] = (Path(plan.learned_direct_file), "source")
     return files
 
 
@@ -1176,7 +1202,8 @@ def _xray_tls(plan: RunPlan, server: Server, *, quic: bool) -> tuple[str, dict[s
     t = server.tls or {}
     if server.security == "reality" and not quic:
         settings: dict[str, Any] = {"serverName": str(t.get("sni") or ""),
-                                    "fingerprint": str(t.get("fingerprint") or plan.fingerprint or "chrome"),
+                                    "fingerprint": str(_mask(server).get("fingerprint") or t.get("fingerprint")
+                                                       or plan.fingerprint or "chrome"),
                                     "password": _need(server, _b64url(t.get("pbk")), "публичного ключа REALITY (pbk)"),
                                     "shortId": str(t.get("sid") or "")}
         if t.get("spx"):
@@ -1195,7 +1222,7 @@ def _xray_tls(plan: RunPlan, server: Server, *, quic: bool) -> tuple[str, dict[s
     alpn = _as_list(t.get("alpn")) or (["h3"] if quic else [])
     if alpn:
         settings["alpn"] = alpn
-    fp = t.get("fingerprint") or plan.fingerprint
+    fp = _mask(server).get("fingerprint") or t.get("fingerprint") or plan.fingerprint
     if fp and not quic:
         settings["fingerprint"] = str(fp)
     pins = _as_list(t.get("pcs"))
@@ -1428,8 +1455,11 @@ def _xray_as_is(server: Server, addr: str, out_tag: str) -> dict[str, Any]:
 def _xray_dialer(plan: RunPlan, server: Server, sid: str) -> dict[str, Any] | None:
     """freedom для dialerProxy: фрагментация ClientHello (провайдера или своя) и UDP-шумы."""
     fragment = server.fragment
-    if not fragment and plan.tls_fragment and server.security in ("tls", "reality"):
-        fragment = XRAY_FRAGMENT
+    if not fragment and server.security in ("tls", "reality"):
+        if _mask(server).get("fragment"):
+            fragment = XRAY_RESCUE_FRAGMENT
+        elif plan.tls_fragment:
+            fragment = XRAY_FRAGMENT
     settings: dict[str, Any] = {}
     if fragment:
         settings["fragment"] = {k: fragment[k] for k in ("packets", "length", "interval", "maxSplit") if k in fragment}

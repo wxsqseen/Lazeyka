@@ -124,31 +124,16 @@ def normalize_domain(text: str) -> str | None:
     return value if value and _DOMAIN.match(value) else None
 
 
-def check_site(domain: str) -> dict:
-    """Почему не открывается сайт: DNS, блокировка или сайт лежит."""
+def check_site(domain: str, **context) -> dict:
+    """«Рентген сайта»: на каком шаге он не открывается (DNS, соединение, имя сайта, обрыв после 16 КБ, ответ),
+    открывается ли через свой VPN и что с этим сделать. context — siteprobe.inspect: bind, vpn_opener,
+    zapret, own_vpn, network_mode."""
+    from . import siteprobe
     name = normalize_domain(domain)
     if not name:
         return {"ok": False, "error": "Введите адрес сайта, например example.com"}
-    mine = system_resolve(name)
-    honest = doh_resolve(name)
-    resolve: list[str] = []
-    if mine and honest and any(_fake(ip) for ip in mine):
-        # Адрес выдала VPN-программа (fake-ip): проверяем сайт по настоящему адресу.
-        resolve = ["--resolve", f"{name}:443:{honest[0]}"]
-        mine = honest
-    if not mine or any(_bogus(ip) for ip in mine):
-        if honest:
-            return {"ok": True, "domain": name, "verdict": "dns", "can_add": False,
-                    "advice": "Провайдер подменяет адрес сайта. Включите DNS через HTTPS — проверка DNS ниже."}
-        return {"ok": True, "domain": name, "verdict": "down", "can_add": False,
-                "advice": "Такого сайта нет или он не отвечает — дело не в блокировке."}
-    res = winutil.run([_curl(), "-q", "--noproxy", "*", "-I", "-s", "-o", "NUL", "-m", "8", "--connect-timeout", "5",
-                       *resolve, f"https://{name}/"], timeout=14)
-    if res.code == 0:
-        return {"ok": True, "domain": name, "verdict": "works", "can_add": False,
-                "advice": "Сайт открывается. Если в браузере нет — очистите кэш браузера или проверьте блокировщик рекламы."}
-    return {"ok": True, "domain": name, "verdict": "blocked", "can_add": True,
-            "advice": "Сайт не открывается. Добавьте его в «Мои сайты» — обход начнёт его обрабатывать."}
+    found = siteprobe.verdict(siteprobe.inspect(name, **context))
+    return {"ok": True, "domain": name, **found, "can_add": "add_site" in found["fixes"]}
 
 
 def build_report(state: dict, log_tail: list[dict]) -> str:

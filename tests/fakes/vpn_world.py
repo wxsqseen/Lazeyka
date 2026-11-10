@@ -81,6 +81,10 @@ class FakeStore:
     def set_speed(self, sid, mbps):
         self._speed[sid] = {"mbps": mbps, "at": 1.0}
 
+    def set_mask(self, sid, mask):
+        self.calls.append(("set_mask", sid, mask))
+        self._servers[sid].mask = dict(mask) if mask else None
+
     def add_subscription(self, sub):
         self._subs[sub.id] = sub
 
@@ -328,8 +332,9 @@ class FakeClient:
 
 
 class FakeSampler:
-    def __init__(self, client, *, groups=()):
+    def __init__(self, client, *, groups=(), on_connections=None):
         self.groups = groups
+        self.on_connections = on_connections      # умный маршрут: тест сам отдаёт ему соединения
         self.started = False
         self.stopped = False
         self.now: dict[str, str] = {}
