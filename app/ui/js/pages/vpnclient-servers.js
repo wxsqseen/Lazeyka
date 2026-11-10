@@ -680,7 +680,10 @@
         const lat = vc.latency || {};
         const latRunning = Boolean(lat.running);
         latencyBtn.setBusy(latRunning);
-        latencyBtn.setLabel(latRunning && lat.total ? `Проверяем ${fmt.integer(lat.done || 0)} из ${fmt.integer(lat.total)}…` : 'Проверить задержку');
+        // Задержки сняты, а у молчащих серверов ещё выясняется причина (вопрос ядру, прямые пробы) — до ~20 с.
+        const why = latRunning && lat.why > 0 && (lat.done || 0) >= (lat.total || 0);
+        latencyBtn.setLabel(why ? `Уточняем причину у ${fmt.count(lat.why, 'сервера', 'серверов', 'серверов')}…`
+          : latRunning && lat.total ? `Проверяем ${fmt.integer(lat.done || 0)} из ${fmt.integer(lat.total)}…` : 'Проверить задержку');
         const supported = snap.servers.some((server) => server.supported !== false);
         latencyBtn.setDisabled(!supported);
         const speed = vc.speed || {};

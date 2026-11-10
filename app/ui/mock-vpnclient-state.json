@@ -61,7 +61,7 @@
      "reason": "транспорт QUIC удалён из Xray и несовместим с ним в sing-box", "description": null,
      "warnings": [], "latency": {"ms": null, "at": null, "error": null, "reason": null}, "speed": null}
   ],
-  "latency": {"running": false, "done": 0, "total": 0},
+  "latency": {"running": false, "done": 0, "total": 0, "why": 0},
   "speed": {"running": false, "server": null, "mbps": null, "at": null},
   "import": {"running": false, "message": null, "error": null, "offer": null},
   "routing": {

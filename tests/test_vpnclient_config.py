@@ -548,6 +548,9 @@ def test_xray_helper_pairs():
     x = build_xray(plan)
     assert set(x) == {"log", "inbounds", "outbounds", "routing"}         # без api, stats, policy, metrics
     assert x["log"] == {"loglevel": "warning", "access": "none"}
+    # Замер задержки: отказ выхода Xray пишет только уровнем info (manager._ask_core), журнала соединений — нет.
+    assert build_xray(plan, loglevel="info")["log"] == {"loglevel": "info", "access": "none"}
+    assert {o["tag"] for o in x["outbounds"]} >= {config.helper_tag(s.id) for s in servers[:5]}
     assert x["outbounds"][0] == {"tag": "block", "protocol": "blackhole"}
     helper_ids = [s.id for s in servers if engine_for(s)[0] == "xray"]
     assert len(x["inbounds"]) == len(helper_ids) == 5

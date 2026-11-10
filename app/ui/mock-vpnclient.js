@@ -51,6 +51,7 @@
   const STOP_MS = 600;
   const RESELECT_MS = 900;
   const LATENCY_STEP_MS = 260;
+  const LATENCY_WHY_MS = 2600;         // у молчащих серверов ещё выясняется причина (вопрос ядру, пробы)
   const SPEED_MS = 2600;
   const RULES_MS = 2400;
   const SUB_UPDATE_MS = 1500;
@@ -718,11 +719,18 @@
 
   function runLatency(ids) {
     const queue = vc.servers.filter((server) => server.supported && (!ids || ids.includes(server.id)));
-    vc.latency = { running: true, done: 0, total: queue.length };
+    vc.latency = { running: true, done: 0, total: queue.length, why: 0 };
     const next = () => {
       const server = queue[vc.latency.done];
       if (!server) {
+        const silent = queue.filter((item) => SILENT[item.name]).length;
+        if (silent && !vc.latency.why) {
+          vc.latency.why = silent;
+          later(LATENCY_WHY_MS, next);
+          return;
+        }
         vc.latency.running = false;
+        vc.latency.why = 0;
         if (vc.selected && vc.selected.kind === 'auto') vc.selected = selectedFor(vc.selected.id) || vc.selected;
         log('vpn', 'info', `Задержка проверена у ${queue.length} серверов`);
         return;

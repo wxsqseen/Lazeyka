@@ -110,6 +110,8 @@ def test_line_levels():
     assert process.line_level("2026/10/17 07:00:00 [Warning] core: Xray 26.3.27 started") == logging.WARNING
     assert process.line_level("2026/10/17 07:00:00 [Error] app/proxyman/outbound: failed") == logging.ERROR
     assert process.line_level("INFO[0000] sing-box started") == logging.INFO
+    assert process.line_level("2026/11/10 06:47:24 [Info] [3419092343] app/dispatcher: taking detour [out-1]") \
+        == logging.DEBUG
 
 
 class _FakeConsole:

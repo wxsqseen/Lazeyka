@@ -409,13 +409,29 @@ def ask_core(port: int, user: str, password: str, timeout: float) -> None:
         pass
 
 
-def core_hints(main, tags: list[str], settle: float) -> dict[str, str]:
-    """Что журнал ядра сказал об отказе выходов tags: tls | auth | clock. Строка «open connection … [тег]: …»
-    приходит чуть позже, чем закрывается запрос, — ждём её по условию, не дольше settle."""
-    deadline = time.monotonic() + settle
+_XRAY_DETOUR = re.compile(r"\[(\d+)\] app/dispatcher: taking detour \[([^\]]+)\]")
+_XRAY_SESSION = re.compile(r"\[(?:Debug|Info|Warning|Error)\] \[(\d+)\] ")
+
+
+def singbox_lines(tail: list[str], tag: str) -> list[str]:
+    """Отказы выхода tag в журнале sing-box: «open connection to … using outbound/…[тег]: причина»."""
+    return [line for line in tail if f"[{tag}]: " in line and "open connection" in line]
+
+
+def xray_lines(tail: list[str], tag: str) -> list[str]:
+    """Отказы выхода tag в журнале помощника Xray (уровень info): тегов в строках об отказе нет — выход
+    соединения узнаём по строке «[номер] … taking detour [выход]», отказ — строки того же номера с «failed»."""
+    ids = {m.group(1) for line in tail if (m := _XRAY_DETOUR.search(line)) and m.group(2) == tag}
+    return [line for line in tail if "failed" in line and (m := _XRAY_SESSION.search(line)) and m.group(1) in ids]
+
+
+def core_hints(proc, tags: list[str], deadline: float,
+               lines_of: Callable[[list[str], str], list[str]] = singbox_lines) -> dict[str, str]:
+    """Что журнал ядра сказал об отказе выходов tags: tls | auth | clock. Строка об отказе приходит чуть позже,
+    чем закрывается запрос, — ждём её по условию, не дольше deadline (time.monotonic)."""
     while True:
-        tail = list(main.tail)
-        found = {t: [line for line in tail if f"[{t}]: " in line and "open connection" in line] for t in tags}
+        tail = list(proc.tail)
+        found = {t: lines_of(tail, t) for t in tags}
         if all(found.values()) or time.monotonic() >= deadline:
             break
         time.sleep(0.05)
@@ -944,7 +960,7 @@ class VpnClientManager:
         # тоже собирает ядра и не должен подменить их запуску (откат при сбое смотрит именно сюда).
         self._attempt = threading.local()
         self._restart_after_start: set[str] = set()   # версию сменили вручную, пока шёл запуск
-        self._latency = {"running": False, "done": 0, "total": 0}
+        self._latency = {"running": False, "done": 0, "total": 0, "why": 0}
         self._speed = {"running": False, "server": None, "mbps": None, "at": None}
         self._import = {"running": False, "message": None, "error": None, "offer": None}
         self._updating: set[str] = set()
@@ -3320,7 +3336,7 @@ class VpnClientManager:
         with self._lock:
             if self._latency["running"]:
                 raise VpnClientError("Задержка уже проверяется")
-            self._latency = {"running": True, "done": 0, "total": len(servers)}
+            self._latency = {"running": True, "done": 0, "total": len(servers), "why": 0}
         threading.Thread(target=self._measure, args=(servers,), name="vpnclient-latency", daemon=True).start()
         self._changed()
         return {}
@@ -3350,7 +3366,7 @@ class VpnClientManager:
             except (UserError, OSError) as exc:
                 log.warning("Задержки не сохранены: %s", exc)
             with self._lock:
-                self._latency = dict(self._latency, running=False)
+                self._latency = dict(self._latency, running=False, why=0)
             self._changed()
 
     def _delays_via(self, clash, servers: list[Server], members: int) -> None:
@@ -3398,6 +3414,7 @@ class VpnClientManager:
             failed = [s for s in servers if _no_answer(results.get(s.id))]
             if not failed:
                 return
+            self._latency_why(len(failed))
             with self._lock:
                 causes, hints = dict(self._latency_causes), dict(self._latency_hints)
             fresh = self._fresh(results, {s.id for s in servers})
@@ -3466,7 +3483,7 @@ class VpnClientManager:
             helper = main = None
             try:
                 if "xray" in plan.engines.values():
-                    _write_json(helper_cfg, config.build_xray(plan))
+                    _write_json(helper_cfg, config.build_xray(plan, loglevel="info"))   # причины отказа: _ask_core
                     helper = self.deps.process("xray", self._engines().verify("xray", versions["xray"]),
                                                ["run", "-c", str(helper_cfg)], cwd=probe_dir)
                     ports = list(plan.ports.helper.values())
@@ -3478,7 +3495,7 @@ class VpnClientManager:
                 main.start(lambda: bool(clash.version()), READY_TIMEOUT)
                 self._delays_via(clash, list(plan.servers), members=len(plan.servers))
                 try:
-                    self._ask_core(plan, main)
+                    self._ask_core(plan, main, helper)
                 except Exception:  # noqa: BLE001 — задержки уже записаны: без ответа ядра причину назовут пробы
                     log.warning("Ядро замера не спрошено о причинах «нет ответа»", exc_info=True)
             finally:
@@ -3490,24 +3507,39 @@ class VpnClientManager:
                     path.unlink(missing_ok=True)
         return found
 
-    def _ask_core(self, plan: RunPlan, main) -> None:
+    def _ask_core(self, plan: RunPlan, main, helper=None) -> None:
         """Clash API на отказ говорит лишь «ошибка в проверке задержки». Молчащим серверам — по запросу через вход
         разбора (config.WHY_IN) с ожиданием до ASK_TIMEOUT: журнал ядра называет отказ этого выхода (ключ не
-        принят, TLS, часы) — в том числе у серверов, которые отказывают в ключе дольше замера задержки."""
+        принят, TLS, часы) — в том числе у серверов, которые отказывают в ключе дольше замера задержки. Запрос к
+        серверу помощника идёт тем же входом через sing-box, а причину пишет журнал помощника Xray."""
         config = self._config()
         results = self.store.latency()
-        # shortcut: серверы помощника Xray не разбираются — в его журнале нет тегов выходов (нужен уровень info и
-        # разбор по соединениям), им остаются прямые пробы.
-        silent = {config.tag(s.id): s.id for s in plan.servers
-                  if _no_answer(results.get(s.id)) and plan.engines.get(s.id) != "xray"}
-        if not silent or not plan.ports.proxy or not self.deps.online():
+        silent = [s for s in plan.servers if _no_answer(results.get(s.id))]
+        if not silent or not plan.ports.proxy:
+            return
+        self._latency_why(len(silent))
+        if not self.deps.online():
             return                              # без интернета ядру ответить нечего — и пробы не нужны
         with concurrent.futures.ThreadPoolExecutor(DELAY_WORKERS) as pool:
-            list(pool.map(lambda t: self.deps.ask_core(plan.ports.proxy, t, plan.secrets.internal_pass, ASK_TIMEOUT),
-                          silent))
-        hints = core_hints(main, list(silent), ASK_SETTLE)
+            list(pool.map(lambda s: self.deps.ask_core(plan.ports.proxy, config.tag(s.id), plan.secrets.internal_pass,
+                                                       ASK_TIMEOUT), silent))
+        deadline = time.monotonic() + ASK_SETTLE
+        on_xray = [s for s in silent if plan.engines.get(s.id) == "xray"]
+        own = {config.tag(s.id): s.id for s in silent if s not in on_xray}
+        hints = {own[t]: hint for t, hint in core_hints(main, list(own), deadline).items()}
+        if helper is not None and on_xray:
+            # shortcut: хвост ядра — 200 строк (process.TAIL_LINES), на вопрос — 5–7 строк, серверов в замере ≤ 16;
+            # поднять хвост, если серверов в одном экземпляре станет больше.
+            outs = {config.helper_tag(s.id): s.id for s in on_xray}
+            hints.update({outs[t]: hint for t, hint in core_hints(helper, list(outs), deadline, xray_lines).items()})
         with self._lock:
-            self._latency_hints.update({silent[tag]: hint for tag, hint in hints.items()})
+            self._latency_hints.update(hints)
+
+    def _latency_why(self, count: int) -> None:
+        """Сколько серверов ждут причину «нет ответа»: кнопка проверки задержки пишет «Уточняем причину…»."""
+        with self._lock:
+            self._latency["why"] = count
+        self._changed()
 
     def _buildable(self, plan: RunPlan) -> RunPlan:
         """План временного экземпляра без серверов, из которых конфиг не собрать (у них — ошибка задержки)."""

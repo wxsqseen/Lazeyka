@@ -414,6 +414,83 @@ def test_latency_core_names_rejected_key_of_silent_server(tmp_path):
     m.shutdown()
 
 
+# Журнал Xray 26.3.27 уровня info при вопросе ядру (сняты с настоящего ядра: отказ в ключе Hysteria2 сервером
+# sing-box и чужой сертификат у VLESS gRPC; соединения перемешаны, тегов в строках отказа нет).
+XRAY_TAIL = [
+    "2026/11/10 06:47:23.750685 [Warning] common/errors: The feature gRPC transport (with unnecessary costs, etc.) "
+    "is deprecated, not recommended for using and might be removed.",
+    "2026/11/10 06:47:24.573924 [Info] [3307873727] proxy/socks: TCP Connect request to tcp:www.gstatic.com:443",
+    "2026/11/10 06:47:24.573924 [Info] [3307873727] app/dispatcher: taking detour [out-grpc] for "
+    "[tcp:www.gstatic.com:443]",
+    "2026/11/10 06:47:24.573924 [Info] [3203454497] app/dispatcher: taking detour [out-kcp] for "
+    "[tcp:www.gstatic.com:443]",
+    "2026/11/10 06:47:24.573924 [Info] [3203454497] proxy/vless/outbound: tunneling request to "
+    "tcp:www.gstatic.com:443 via 127.0.0.1:61223",
+    "2026/11/10 06:47:24.573924 [Info] [3419092343] app/dispatcher: taking detour [out-hy] for "
+    "[tcp:www.gstatic.com:443]",
+    "2026/11/10 06:47:24.589031 [Info] [3419092343] app/proxyman/outbound: app/proxyman/outbound: failed to process "
+    "outbound traffic > proxy/hysteria: failed to find an available destination > transport/internet/hysteria: "
+    "auth failed",
+    "2026/11/10 06:47:24.793559 [Info] [3307873727] transport/internet/grpc: creating connection to "
+    "tcp:127.0.0.1:59158",
+    "2026/11/10 06:47:26.594281 [Info] [3307873727] app/proxyman/outbound: app/proxyman/outbound: failed to process "
+    "outbound traffic > proxy/vless/outbound: failed to find an available destination > common/retry: "
+    "[transport/internet/grpc: failed to dial gRPC > transport/internet/grpc: Cannot dial gRPC > rpc error: code = "
+    "Unavailable desc = connection error: desc = \"transport: failed to write client preface: tls: failed to verify "
+    "certificate: x509: certificate signed by unknown authority\"] > common/retry: all retry attempts failed",
+]
+
+
+def test_xray_log_names_reason_by_connection():
+    """В строках отказа Xray нет тега выхода: выход соединения — по «taking detour», отказ — тем же номером.
+    Молчащий сервер (mKCP) отказа не пишет — причину назовут прямые пробы."""
+    assert mgr.xray_lines(XRAY_TAIL, "out-kcp") == []
+    grpc = mgr.xray_lines(XRAY_TAIL, "out-grpc")
+    assert len(grpc) == 1 and "[3307873727]" in grpc[0] and "x509" in grpc[0]
+    proc = type("Proc", (), {"tail": XRAY_TAIL})()
+    assert mgr.core_hints(proc, ["out-hy", "out-grpc", "out-kcp"], time.monotonic(), mgr.xray_lines) \
+        == {"out-hy": "auth", "out-grpc": "tls"}
+
+
+@pytest.mark.parametrize("says, want", [
+    ("proxy/hysteria: failed to find an available destination > transport/internet/hysteria: auth failed",
+     ("provider", "auth_rejected")),
+    ("proxy/hysteria: failed to find an available destination > tls: failed to verify certificate: x509: "
+     "certificate signed by unknown authority", ("provider", "keys_outdated")),
+])
+def test_latency_xray_server_reason_from_helper_log(tmp_path, says, want):
+    """Сервер помощника Xray (Hysteria2 с закреплённым сертификатом): вопрос — тем же входом разбора через sing-box,
+    причина — из журнала помощника замера, который для этого пишет уровнем info."""
+    m, w = _udp_world(tmp_path, udp_peer_ok=True)
+    hy = _named(w, "Hy")
+    hy.hy2 = {"pin_sha256": "ab" * 32}
+    tag = w.config.tag(hy.id)
+    w.xray_says[tag] = says
+    _measure(m, [hy.id])
+    assert ("ask", tag) in w.probes
+    assert w.config.xray_kw == {"loglevel": "info"}
+    assert _reason(w, "Hy") == want
+    m.shutdown()
+
+
+def test_latency_progress_names_reasons_phase(tmp_path):
+    """Задержки сняты, а причина у молчащих ещё выясняется (до ~20 с) — окно пишет «Уточняем причину у N…», а не
+    «Проверяем N из N…», будто зависло."""
+    m, w = _udp_world(tmp_path, udp_peer_ok=True)
+    seen = []
+    ask = m.deps.ask_core
+
+    def spy(*args):
+        seen.append(dict(m.snapshot()["latency"]))
+        ask(*args)
+
+    m.deps.ask_core = spy
+    _measure(m)
+    assert seen and all(s["why"] == 1 and s["done"] == s["total"] for s in seen)
+    assert m.snapshot()["latency"]["why"] == 0
+    m.shutdown()
+
+
 @pytest.mark.parametrize("quic, control, want", [
     ("answer", True, ("unknown", "udp_handshake")),
     ("silent", True, ("unknown", "udp_server_silent")),

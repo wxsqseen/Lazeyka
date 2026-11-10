@@ -142,6 +142,10 @@ class FakeConfig:
         return f"t-{item_id}"
 
     @staticmethod
+    def helper_tag(server_id: str) -> str:
+        return f"x-{server_id}"
+
+    @staticmethod
     def group_tag(group_id: str) -> str:
         return f"t-auto:{group_id}"
 
@@ -151,7 +155,8 @@ class FakeConfig:
         return {"mode": plan.mode, "servers": [s.id for s in plan.servers], "selected": plan.selected,
                 "ports": [plan.ports.proxy, plan.ports.internal, plan.ports.clash]}
 
-    def build_xray(self, plan):
+    def build_xray(self, plan, **kw):
+        self.xray_kw = kw
         helper = [sid for sid, engine in plan.engines.items() if engine == "xray"]
         return {"helper": helper, "interface": plan.physical_interface} if helper else None
 
@@ -478,10 +483,13 @@ class World:
     handshakes: dict = field(default_factory=dict)          # адрес → ok | alert | reset | timeout
     probes: list = field(default_factory=list)              # (вид пробы, адрес)
     # Проба QUIC: адрес → answer | closed | silent | error (по умолчанию error — «не проверить», как раньше);
-    # quic_control — ответил ли эталон QUIC; core_says — строка журнала ядра замера о выходе с этим тегом.
+    # quic_control — ответил ли эталон QUIC; core_says — строка журнала ядра замера о выходе с этим тегом;
+    # xray_says — что помощник Xray замера пишет об отказе выхода сервера с этим тегом sing-box.
     quic: dict = field(default_factory=dict)
     quic_control: bool = True
     core_says: dict = field(default_factory=dict)
+    xray_says: dict = field(default_factory=dict)
+    xray_sessions: object = field(default_factory=lambda: itertools.count(3000000000))
 
     def clock(self) -> float:
         return self.clock_value
@@ -510,6 +518,16 @@ class World:
         line = self.core_says.get(tag) or (f"ERROR connection: open connection to www.gstatic.com:443 using "
                                            f"outbound/vless[{tag}]: context deadline exceeded")
         next(p for p in reversed(self.processes) if p.name == "sing-box").tail.append(line)
+        # Помощник Xray (уровень info), как Xray 26.3.27: выход соединения — строкой «taking detour», отказ — тем же
+        # номером соединения, без тега.
+        helper = next((p for p in reversed(self.processes) if p.name == "xray"), None)
+        if helper is not None:
+            n, out = next(self.xray_sessions), FakeConfig.helper_tag(tag.removeprefix("t-"))
+            why = self.xray_says.get(tag) or "common/retry: [dial tcp: i/o timeout] > common/retry: all retry attempts failed"
+            helper.tail += [f"2026/11/10 06:47:24.573924 [Info] [{n}] app/dispatcher: taking detour [{out}] for "
+                            f"[tcp:www.gstatic.com:443]",
+                            f"2026/11/10 06:47:24.589031 [Info] [{n}] app/proxyman/outbound: failed to process "
+                            f"outbound traffic > {why}"]
 
     def advance(self, seconds: float) -> None:
         self.clock_value += seconds

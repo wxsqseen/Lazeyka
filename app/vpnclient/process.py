@@ -43,6 +43,9 @@ _LEVELS = (
     (re.compile(r"\b(PANIC|FATAL|ERROR)\[\d+\]|\[Error\]"), logging.ERROR),
     (re.compile(r"\bWARN\[\d+\]|\[Warning\]"), logging.WARNING),
     (re.compile(r"\b(DEBUG|TRACE)\[\d+\]|\[Debug\]"), logging.DEBUG),
+    # [Info] пишет только помощник замера задержки (уровень info ради причин отказа) — по строке на соединение:
+    # в журнал Лазейки только в подробном режиме.
+    (re.compile(r"\[Info\]"), logging.DEBUG),
 )
 
 

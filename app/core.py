@@ -107,7 +107,7 @@ def vpnclient_placeholder(settings: dict, reason: str) -> dict:
         "exit": None, "selected": None,
         "stats": {"up": 0, "down": 0, "up_rate": 0.0, "down_rate": 0.0, "connections": 0},
         "history": [], "subscriptions": [], "groups": [], "servers": [],
-        "latency": {"running": False, "done": 0, "total": 0},
+        "latency": {"running": False, "done": 0, "total": 0, "why": 0},
         "speed": {"running": False, "server": None, "mbps": None, "at": None},
         "import": {"running": False, "message": None, "error": None, "offer": None},
         "routing": {**{k: vc.get(k) for k in _VC_ROUTING}, "bypass": "proxy", "bypass_note": None,

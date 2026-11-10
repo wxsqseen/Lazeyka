@@ -86,6 +86,11 @@ def tag(server_id: str) -> str:
     return f"srv-{server_id}"
 
 
+def helper_tag(server_id: str) -> str:
+    """Тег выхода сервера в помощнике Xray (по нему в журнале помощника видно, чьё соединение)."""
+    return f"out-{server_id}"
+
+
 def group_tag(group_id: str) -> str:
     """Тег urltest-группы «Самый быстрый»."""
     return f"grp-{group_id}"
@@ -1438,10 +1443,10 @@ def _xray_dialer(plan: RunPlan, server: Server, sid: str) -> dict[str, Any] | No
     return dial
 
 
-def build_xray(plan: RunPlan) -> dict[str, Any] | None:
+def build_xray(plan: RunPlan, *, loglevel: str = "warning") -> dict[str, Any] | None:
     """Конфиг помощника Xray 26.3.27: на каждый сервер engine=xray — вход socks 127.0.0.1:<порт>
     с учётной записью помощника → свой выход. Без api, stats и журнала соединений. None — помощник
-    не нужен."""
+    не нужен. loglevel "info" — у замера задержки: отказ выхода Xray пишет только этим уровнем."""
     targets = [server for server, engine in _servers(plan) if engine == "xray"]
     if not targets:
         return None
@@ -1455,7 +1460,7 @@ def build_xray(plan: RunPlan) -> dict[str, Any] | None:
         port = plan.ports.helper.get(sid)
         if not port:
             raise ConfigError(f"Сервер «{_name(server)}»: не выбран порт помощника Xray")
-        in_tag, out_tag = f"in-{sid}", f"out-{sid}"
+        in_tag, out_tag = f"in-{sid}", helper_tag(sid)
         inbounds.append({"tag": in_tag, "listen": HELPER_HOST, "port": int(port), "protocol": "socks",
                          "settings": {"auth": "password", "udp": True, "ip": HELPER_HOST,
                                       "accounts": [{"user": plan.secrets.helper_user,
@@ -1477,7 +1482,7 @@ def build_xray(plan: RunPlan) -> dict[str, Any] | None:
         if dial:
             outbounds.append(dial)
         rules.append({"type": "field", "inboundTag": [in_tag], "outboundTag": out_tag})
-    return {"log": {"loglevel": "warning", "access": "none"}, "inbounds": inbounds, "outbounds": outbounds,
+    return {"log": {"loglevel": loglevel, "access": "none"}, "inbounds": inbounds, "outbounds": outbounds,
             "routing": {"domainStrategy": "AsIs", "rules": rules}}
 
 
