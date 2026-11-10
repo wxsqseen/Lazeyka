@@ -58,6 +58,9 @@ def test_browser_extension_matches_lazeyka():
     assert manifest["manifest_version"] == 3
     assert sorted(manifest["permissions"]) == ["privacy", "proxy", "storage"]
     assert manifest["host_permissions"] == ["https://1.1.1.1/*"]
+    # Подставлять пароль прокси — право необязательное: просится, только когда человек задал логин.
+    assert manifest["optional_permissions"] == ["webRequest", "webRequestAuthProvider"]
+    assert manifest["optional_host_permissions"] == ["<all_urls>"]
     port = re.search(r"const DEFAULT_PORT = (\d+);", (ext / "background.js").read_text(encoding="utf-8")).group(1)
     assert int(port) == defaults()["vpnclient"]["port"]
     assert defaults()["vpnclient"]["local_auth"] is False, "SOCKS5 с паролем браузер не умеет"

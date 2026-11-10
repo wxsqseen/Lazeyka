@@ -179,8 +179,10 @@
       advice: 'Сайт открывается, но его сертификат выдал российский удостоверяющий центр (Минцифры). Chrome, Edge и Firefox без него покажут ошибку сертификата — откройте сайт в Яндекс Браузере или установите сертификат Минцифры (инструкция — на Госуслугах).' };
     }
     const zapretOn = state.zapret.status === 'running';
-    const listed = userSites().includes(name);
-    if ((BLOCKED_SITES.has(name) || FROZEN_SITES.has(name)) && !(zapretOn && listed && BLOCKED_SITES.has(name))) {
+    const ownStrategy = Boolean(zapretOn && state.zapret.groups && state.zapret.groups.sites && state.zapret.groups.sites[name]);
+    const listed = userSites().includes(name) || ownStrategy;
+    const pick = state.app.admin ? ['pick_site'] : [];
+    if ((BLOCKED_SITES.has(name) || FROZEN_SITES.has(name)) && !(zapretOn && listed && (BLOCKED_SITES.has(name) || ownStrategy))) {
       const frozen = FROZEN_SITES.has(name);
       const what = frozen
         ? 'Соединение устанавливается, но замирает — так провайдеры режут сайты на зарубежных хостингах (обрыв после ~16 КБ).'
@@ -189,10 +191,10 @@
         ? [dns, tcp, tls, step('answer', 'Ответ сайта', true, 'код 200'), step('freeze', 'Большие ответы', false, 'замирают после ~16 КБ'), ...vpnStep(true)]
         : [dns, tcp, step('tls', 'Защищённое соединение', false, 'оборвалось на имени сайта'), ...vpnStep(true)];
       if (zapretOn && listed) {
-        return { verdict: frozen ? 'freeze' : 'dpi', fixes: vpnFix, steps,
+        return { verdict: frozen ? 'freeze' : 'dpi', fixes: [...pick, ...vpnFix], steps,
           advice: `${what} Обход этот сайт обрабатывает, но нынешняя стратегия его не пробивает.${ownVpn ? ' Надёжнее — через свой VPN.' : ''}${via}` };
       }
-      return { verdict: frozen ? 'freeze' : 'dpi', fixes: ['add_site', ...vpnFix], steps,
+      return { verdict: frozen ? 'freeze' : 'dpi', fixes: ['add_site', ...(zapretOn ? pick : []), ...vpnFix], steps,
         advice: zapretOn ? `${what} Обход этот сайт сейчас не обрабатывает — добавьте его в «Мои сайты».${via}`
           : `${what} Добавьте сайт в «Мои сайты» и включите обход.${via}` };
     }

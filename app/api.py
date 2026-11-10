@@ -248,6 +248,22 @@ class Api:
         return self._core.check_site(str(domain))
 
     @_guard
+    def autopilot_on(self):
+        return self._core.autopilot_on()
+
+    @_guard
+    def zapret_pick(self, kind="", key=""):
+        return self._core.zapret_pick(str(kind), str(key))
+
+    @_guard
+    def zapret_site_forget(self, domain=""):
+        return self._core.zapret_site_forget(str(domain))
+
+    @_guard
+    def zapret_set_groups(self, groups=None):
+        return self._core.zapret_set_groups(groups if isinstance(groups, dict) else {})
+
+    @_guard
     def passport_check(self):
         return self._core.passport_check()
 

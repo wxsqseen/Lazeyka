@@ -573,6 +573,66 @@
     };
   }
 
+  /* ---------- Карта соединений (2.0) ---------- */
+
+  const MAP_PATH = {
+    bypass: { text: 'Обход Лазейки', tone: 'ok' },
+    direct: { text: 'Напрямую', tone: 'muted' },
+    proxy: { text: 'Через сервер', tone: 'accent' },
+  };
+
+  function siteOf(host) {
+    return String(host || '').replace(/^www\./, '');
+  }
+
+  function renderMap(data) {
+    if (!data.running) {
+      return ui.emptyState({ icon: 'route', title: 'Карта появится, когда свой VPN включён',
+        text: 'Она покажет, какие сайты сейчас открыты и каким путём каждый идёт: через обход Лазейки, через ваш сервер или напрямую.' });
+    }
+    if (!data.rows.length) return h('p', { class: 'muted', text: 'Пока ни одного соединения.' });
+    return h('ul', { class: 'vc-map' }, data.rows.map((row) => {
+      const path = MAP_PATH[row.path] || MAP_PATH.proxy;
+      const site = siteOf(row.host);
+      const isName = /[a-z]/i.test(site) && site.includes('.');
+      return h('li', { class: 'vc-map__item' },
+        h('span', { class: 'vc-map__host', text: row.host, title: row.host }),
+        h('span', { class: ['vc-map__path', `is-${path.tone}`], text: path.text }),
+        h('span', { class: 'vc-map__why', text: row.why }),
+        h('span', { class: 'vc-map__bytes num', text: fmt.bytes(row.up + row.down) }),
+        isName ? ui.menuButton({
+          ariaLabel: `Что делать с ${site}`,
+          title: 'Маршрут сайта',
+          fk: `map:${row.host}`,
+          items: () => [
+            { label: 'Только через VPN', icon: 'shieldCheck', onSelect: () => Lz.api.run({ method: 'vpnclient_route_site', args: [site, 'proxy'], key: `map-route:${site}`, success: `${site} — только через VPN` }) },
+            { label: 'Мимо VPN', icon: 'globe', onSelect: () => Lz.api.run({ method: 'vpnclient_route_site', args: [site, 'direct'], key: `map-route:${site}`, success: `${site} — мимо VPN` }) },
+            { label: 'Подобрать обход для сайта', icon: 'route', onSelect: () => Lz.api.run({ method: 'zapret_pick', args: ['site', site], key: `map-pick:${site}`, success: `Подбираем обход для ${site}` }) },
+          ],
+        }).el : h('span', { class: 'vc-map__menu-gap', 'aria-hidden': 'true' }));
+    }));
+  }
+
+  function createMapSection() {
+    const list = ui.slot(renderMap, { cls: 'vc-map-wrap' });
+    const card = ui.card({
+      title: 'Карта соединений',
+      subtitle: 'Что сейчас открыто и каким путём идёт — и почему. Самые нагруженные сверху, обновляется сама.',
+    });
+    card.body.append(list.el);
+    return {
+      el: card.el,
+      update(state) {
+        const vc = view.snapshot(state).vc;
+        const rows = (Array.isArray(vc.map) ? vc.map : []).map((row) => ({
+          host: String(row.host || ''), path: String(row.path || 'proxy'), why: String(row.why || ''),
+          up: Number(row.up) || 0, down: Number(row.down) || 0,
+        })).filter((row) => row.host);
+        list.update({ running: vc.status === 'running', rows });
+      },
+    };
+  }
+
   /* ---------- Карточка ---------- */
 
   function createRoutingSection() {
@@ -680,5 +740,5 @@
     };
   }
 
-  Lz.vcSections = Object.assign(Lz.vcSections || {}, { createRoutingSection });
+  Lz.vcSections = Object.assign(Lz.vcSections || {}, { createRoutingSection, createMapSection });
 })(window.Lz);

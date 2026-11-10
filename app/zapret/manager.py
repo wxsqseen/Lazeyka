@@ -16,7 +16,7 @@ from typing import Callable
 
 from .. import paths, winutil
 from ..settings import Settings
-from . import gamefilter, lists, netcfg, pack, strategies, vpnfilter
+from . import compose, gamefilter, lists, netcfg, pack, strategies, vpnfilter
 from .runner import RunnerError, WinwsProcess, foreign_winws, kill_processes
 from ..errors import UserError
 
@@ -359,20 +359,94 @@ class ZapretManager:
         except ValueError:
             return False
 
-    def build_args(self, strategy: strategies.Strategy) -> list[str]:
+    def build_args(self, strategy: strategies.Strategy, composed: bool = True,
+                   override: dict[str, str] | None = None) -> list[str]:
+        """composed — со сборкой: у YouTube и Discord (zapret.group_strategies) и у отдельных сайтов
+        (zapret.site_strategies) свои стратегии поверх этой. Пробы подбора всех стратегий — без сборки (стратегии
+        сравниваются как есть); подбор для одного сервиса или сайта — со сборкой и override {группа или домен: id}."""
         assert self.pack is not None
         gf = self.settings.get("zapret", "game_filter")
         tcp, udp = gamefilter.port_values(gf["mode"], gf["tcp"], gf["udp"])
         legacy = gamefilter.legacy_value(gf["mode"], gf["tcp"], gf["udp"])
-        return strategy.args(self.pack.path, game_tcp=tcp, game_udp=udp, game_any=legacy)
 
-    def runtime_args(self, strategy: strategies.Strategy, record: bool = True) -> list[str]:
+        def args_of(s: strategies.Strategy) -> list[str]:
+            return s.args(self.pack.path, game_tcp=tcp, game_udp=udp, game_any=legacy)
+
+        args = args_of(strategy)
+        if not composed:
+            return args
+        chosen = {**self.group_strategies(), **self.site_strategies(), **(override or {})}
+        usable = {s.id: s for s in self.strategies if s.usable}
+        chosen = {k: sid for k, sid in chosen.items() if sid in usable and sid != strategy.id}
+        groups = {g: args_of(usable[sid]) for g, sid in chosen.items() if g in compose.GROUPS}
+        by_strategy: dict[str, list[str]] = {}
+        for domain, sid in chosen.items():
+            if domain not in compose.GROUPS:
+                by_strategy.setdefault(sid, []).append(domain)    # сайты одной стратегии — одним профилем
+        sites = [(sorted(domains), args_of(usable[sid])) for sid, domains in by_strategy.items()]
+        if not groups and not sites:
+            return args
+        domains = compose.discord_domains(self.pack.path / "lists" / "list-general.txt")
+        return compose.compose(args, groups, domains, sites)[0]
+
+    def site_strategies(self) -> dict[str, str]:
+        """Свои стратегии отдельных сайтов: домен → id."""
+        value = self.settings.get("zapret", "site_strategies") or {}
+        return {str(d): str(v) for d, v in value.items() if d and v} if isinstance(value, dict) else {}
+
+    def set_site_strategy(self, domain: str, strategy_id: str | None) -> None:
+        """Своя стратегия сайта (None — снова общая) и перезапуск работающего обхода."""
+        if strategy_id and strategy_id not in {s.id for s in self.strategies if s.usable}:
+            raise ZapretError(f"Стратегия «{strategy_id}» не найдена")
+        with self.lock:
+            self._ensure_not_testing()
+
+            def change(d: dict) -> None:
+                sites = dict(d["zapret"].get("site_strategies") or {})
+                if strategy_id:
+                    sites[domain] = strategy_id
+                else:
+                    sites.pop(domain, None)
+                d["zapret"]["site_strategies"] = sites
+
+            self.settings.update(change)
+            self._apply_if_running()
+
+    def composable(self, base_id: str, groups: dict[str, str]) -> list[str]:
+        """Какие группы на этой базе правда соберутся: у базы есть профиль сервиса и его не перекрывает «все сайты»."""
+        usable = {s.id: s for s in self.strategies if s.usable}
+        if self.pack is None or base_id not in usable:
+            return []
+        sources = {g: self.build_args(usable[sid], composed=False) for g, sid in groups.items() if sid in usable}
+        domains = compose.discord_domains(self.pack.path / "lists" / "list-general.txt")
+        return compose.compose(self.build_args(usable[base_id], composed=False), sources, domains)[1]
+
+    def group_strategies(self) -> dict[str, str]:
+        """Обход по сервисам: группа → id стратегии (только известные группы)."""
+        value = self.settings.get("zapret", "group_strategies") or {}
+        return {g: str(v) for g, v in value.items() if g in compose.GROUPS and v} if isinstance(value, dict) else {}
+
+    def set_group_strategies(self, groups: dict[str, str | None]) -> None:
+        """Своя стратегия для групп (None или пусто — снова базовая) и перезапуск работающего обхода."""
+        usable = {s.id for s in self.strategies if s.usable}
+        clean = {g: v for g, v in (groups or {}).items() if g in compose.GROUPS and v}
+        unknown = [v for v in clean.values() if v not in usable]
+        if unknown:
+            raise ZapretError(f"Стратегия «{unknown[0]}» не найдена")
+        with self.lock:
+            self._ensure_not_testing()
+            self.settings.update(lambda d: d["zapret"].__setitem__("group_strategies", clean))
+            self._apply_if_running()
+
+    def runtime_args(self, strategy: strategies.Strategy, record: bool = True, composed: bool = True,
+                     override: dict[str, str] | None = None) -> list[str]:
         """Аргументы запуска winws. Рядом с VPN — с фильтром только по прямым интерфейсам и без серверов
         VPN. Не собрался: при одних виртуальных сетях (Radmin, Hamachi) обход запускается как обычно; рядом
         с VPN в интернет (план strict) — не запускается вовсе (FilterRefused): обычный перехват задел бы
         туннель или соединение с сервером, и интернет пропал бы.
-        record=False — для проб подбора: они не меняют то, что показывается о работающем обходе."""
-        args = self.build_args(strategy)
+        record=False — для проб подбора: они не меняют то, что показывается о работающем обходе; composed=False —
+        стратегия как есть, без сборки по сервисам."""
+        args = self.build_args(strategy, composed=composed, override=override)
         plan = None
         if self.vpn_plan is not None:
             try:

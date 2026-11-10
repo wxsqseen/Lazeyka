@@ -201,6 +201,7 @@ class TrafficSampler:
         self._connections = 0
         self._history: collections.deque = collections.deque(maxlen=HISTORY_POINTS)
         self._now: dict[str, str] = {}
+        self._conns: list = []                    # последние соединения — для карты соединений
         self._polled = 0.0
 
     def start(self) -> None:
@@ -224,6 +225,10 @@ class TrafficSampler:
             return {"stats": {"up": self._up, "down": self._down, "up_rate": self._up_rate,
                               "down_rate": self._down_rate, "connections": self._connections},
                     "history": [list(p) for p in self._history], "now": dict(self._now)}
+
+    def conns(self) -> list:
+        with self._lock:
+            return list(self._conns)
 
     def totals(self) -> tuple[int, int]:
         with self._lock:
@@ -285,6 +290,7 @@ class TrafficSampler:
         with self._lock:
             conns = snap.get("connections")
             self._connections = len(conns) if isinstance(conns, list) else 0
+            self._conns = conns if isinstance(conns, list) else []
             for key, attr in (("uploadTotal", "_up"), ("downloadTotal", "_down")):
                 value = snap.get(key)
                 if isinstance(value, int) and value >= getattr(self, attr):

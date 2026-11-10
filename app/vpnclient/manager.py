@@ -1293,6 +1293,9 @@ class VpnClientManager:
             "servers": [dict(_public(s, noises), latency=_latency_entry(latencies.get(s.id)),
                              speed=_speed_entry(speeds.get(s.id))) for s in servers],
             "latency": latency, "speed": speed, "import": imp, "rescue": dict(self._rescue),
+            # Карта соединений (2.0): что куда идёт и почему — только пока ядро работает.
+            "map": learn.connection_map(session.sampler.conns()) if session is not None and hasattr(
+                session.sampler, "conns") else [],
             "routing": self._routing_snapshot(vc),
             "routing_profiles": self._cached("profiles", lambda: [self._profile_public(p)
                                                                   for p in self._profiles.load()]),

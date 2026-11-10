@@ -322,6 +322,48 @@
 .legend__swatch.is-unsup { background: var(--off); }
 .legend__swatch.is-none { background: var(--border-strong); }
 
+/* Обход по сервисам: над сеткой стратегий */
+.strategy-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.strategy-groups:empty {
+  display: none;
+}
+
+.strategy-sites__title {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.strategy-sites__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.strategy-sites__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.strategy-sites__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.strategy-sites__label {
+  flex: 1;
+  color: var(--text-3);
+}
+
 .legend__note {
   margin-left: auto;
 }

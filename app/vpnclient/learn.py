@@ -77,6 +77,44 @@ def suspects(conns: list[dict], seen: dict[str, tuple[float, int]], now: float) 
     return list(dict.fromkeys(out))
 
 
+# Почему соединение идёт так: по полю rule clash API («rule_set=learned => route(proxy)», «final»). Порядок важен:
+# learned-direct раньше learned, свои правила сайтов (domain…) — после наборов.
+_WHY = (("learned-direct", "умный маршрут: не пускает через VPN"), ("learned", "умный маршрут"),
+        ("bypass", "списки обхода"), ("process_", "правило для программы"), ("ip_is_private", "локальная сеть"),
+        ("geosite-category-ru", "российские сайты"), ("geoip-ru-blocked", "список заблокированного"),
+        ("geoip-ru", "российские адреса"), ("refilter", "список заблокированного"),
+        ("russia_inside", "список заблокированного"), ("game", "загрузки игр"), ("bittorrent", "торренты"),
+        ("inbound=", "проверка Лазейки"), ("domain", "ваше правило для сайта"), ("final", "всё остальное"))
+MAP_LIMIT = 40
+
+
+def _why(rule: str) -> str:
+    rule = rule.lower()
+    return next((label for key, label in _WHY if key in rule), rule.split(" => ")[0] or "—")
+
+
+def connection_map(conns: list[dict], limit: int = MAP_LIMIT) -> list[dict]:
+    """Карта соединений (2.0): по сайту — путь (bypass — обход Лазейки, direct — напрямую, proxy — через сервер), почему
+    (правило), трафик и сколько соединений. Самые нагруженные — первыми."""
+    rows: dict[str, dict] = {}
+    for c in conns:
+        if not isinstance(c, dict):
+            continue
+        meta = c.get("metadata") or {}
+        host = str(meta.get("host") or meta.get("destinationIP") or "").lower().rstrip(".")
+        if not host:
+            continue
+        chains = [str(x) for x in c.get("chains") or []]
+        path = "bypass" if chains[:1] == ["direct"] and "bypass" in chains else "direct" if chains[:1] == ["direct"] \
+            else "proxy"
+        row = rows.setdefault(host, {"host": host, "path": path, "why": _why(str(c.get("rule") or "")),
+                                     "up": 0, "down": 0, "count": 0})
+        row["up"] += int(c.get("upload") or 0)
+        row["down"] += int(c.get("download") or 0)
+        row["count"] += 1
+    return sorted(rows.values(), key=lambda r: -(r["up"] + r["down"]))[:limit]
+
+
 def judge(facts: siteprobe.Facts, mode: str | None, vpn_alive: bool = True
           ) -> tuple[str | None, str | None] | None:
     """Пробы → (куда, почему): ("proxy", почему) — напрямую не открывается, через сервер открывается, интернет

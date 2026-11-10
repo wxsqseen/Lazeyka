@@ -27,6 +27,8 @@
   /** Кнопки рентгена: что сделать с сайтом. done — уже сделано (вместо кнопки — метка). */
   const FIX_VIEW = {
     add_site: { label: 'Добавить в «Мои сайты»', done: 'В «Моих сайтах»', method: 'lists_add_site', args: (d) => [d] },
+    /* Подбор идёт фоном: итог — строкой под кнопками (state.zapret.groups.pick), метки «сделано» нет. */
+    pick_site: { label: 'Подобрать обход для сайта', done: 'Подбираем…', method: 'zapret_pick', args: (d) => ['site', d], async: true },
     vpn_site: { label: 'Пускать через свой VPN', done: 'Через свой VPN', method: 'vpnclient_route_site', args: (d) => [d, 'proxy'] },
     direct_site: { label: 'Пускать мимо VPN', done: 'Мимо VPN', method: 'vpnclient_route_site', args: (d) => [d, 'direct'] },
   };
@@ -180,6 +182,7 @@
   function createSitePanel() {
     let result = null;
     let done = new Set();
+    let pick = null;            // подбор обхода для сайта: state.zapret.groups.pick
 
     const inputId = uid('site');
     const input = ui.textInput({ id: inputId, placeholder: 'example.com', inputMode: 'url', maxLength: 253 });
@@ -191,7 +194,8 @@
       if (!data) return null;
       if (data.checking) return spinnerLine(`Проверяем ${data.checking}…`);
       const view = VERDICT_VIEW[data.verdict] || { tone: 'info', title: (domain) => domain };
-      const buttons = data.fixes.filter((id) => FIX_VIEW[id]).map((id, index) => (data.done.includes(id)
+      const picking = Boolean(data.pick && data.pick.key === data.domain && data.pick.running);
+      const buttons = data.fixes.filter((id) => FIX_VIEW[id] && !(id === 'pick_site' && picking)).map((id, index) => (data.done.includes(id)
         ? h('span', { class: 'tag tag--ok', text: FIX_VIEW[id].done })
         : withKey(ui.button({
           label: FIX_VIEW[id].label,
@@ -201,15 +205,18 @@
           onClick: () => applyFix(id),
         }).el, `site-${id}`)));
       /* Кнопки — строкой под вердиктом: справа в плашке две кнопки сжимали текст до слова в строке. */
+      const picked = data.pick && data.pick.key === data.domain && data.pick.message && data.pickAsked ? data.pick : null;
       return [
         ui.callout({ tone: view.tone, title: view.title(data.domain), text: data.advice }),
         buttons.length ? h('div', { class: 'site-fixes' }, buttons) : null,
+        picked && picked.running ? spinnerLine(picked.message) : null,
+        picked && !picked.running ? ui.callout({ tone: picked.found ? 'ok' : 'warn', title: picked.found ? 'Обход подобран' : 'Обход не подобрался', text: picked.message }) : null,
         renderSteps(data.steps),
       ];
     }
 
     function show() {
-      verdict.update(result ? { ...result, done: [...done] } : null);
+      verdict.update(result ? { ...result, done: [...done], pick, pickAsked: done.has('pick_site') } : null);
     }
 
     async function submit() {
@@ -250,7 +257,8 @@
         success: (reply) => reply.message || `${domain}: ${fix.done.toLowerCase()}`,
       });
       if (response && response.ok && result && result.domain === domain) {
-        done.add(id);
+        if (!fix.async) done.add(id);
+        else done.add('pick_site');           // кнопку подбора не меняем на метку: итог покажет строка под ней
         show();
       }
     }
@@ -266,7 +274,16 @@
       lead('Проверим сайт по шагам — адрес, соединение, имя сайта, большие ответы, путь через свой VPN — и скажем, что именно его режет и что с этим сделать.'),
       field.el,
       verdict.el);
-    return { el, update() {} };
+    return {
+      el,
+      update(state) {
+        const groups = state.zapret && state.zapret.groups;
+        const next = groups && groups.pick ? groups.pick : null;
+        if (JSON.stringify(next) === JSON.stringify(pick)) return;
+        pick = next;
+        if (result) show();
+      },
+    };
   }
 
   Lz.helpPanels = {

@@ -1206,6 +1206,64 @@
   color: var(--err-text);
 }
 
+/* Карта соединений: сайт · путь · почему · трафик · меню */
+.vc-map {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+
+.vc-map__item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) auto minmax(0, 1.2fr) auto 32px;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.vc-map__item:last-child {
+  border-bottom: 0;
+}
+
+.vc-map__host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vc-map__path {
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.vc-map__path.is-ok { color: var(--ok-text); background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+.vc-map__path.is-muted { color: var(--text-3); background: transparent; box-shadow: inset 0 0 0 1px var(--border); }
+
+.vc-map__why {
+  overflow: hidden;
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vc-map__bytes {
+  color: var(--text-3);
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .vc-map__item { grid-template-columns: minmax(0, 1fr) auto auto 32px; }
+  .vc-map__why { display: none; }
+}
+
 /* Умный маршрут: сайт · почему и когда · «забыть» */
 .vc-smart__item {
   align-items: center;

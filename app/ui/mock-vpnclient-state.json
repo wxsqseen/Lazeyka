@@ -64,6 +64,14 @@
   "latency": {"running": false, "done": 0, "total": 0, "why": 0},
   "speed": {"running": false, "server": null, "mbps": null, "at": null},
   "rescue": {"running": false, "server": null, "found": null, "message": null, "at": null},
+  "map": [
+    {"host": "rr4---sn-4g5e6nsz.googlevideo.com", "path": "bypass", "why": "списки обхода", "up": 412000, "down": 182000000, "count": 6},
+    {"host": "www.instagram.com", "path": "proxy", "why": "умный маршрут", "up": 98000, "down": 14200000, "count": 4},
+    {"host": "gateway.discord.gg", "path": "bypass", "why": "списки обхода", "up": 61000, "down": 2400000, "count": 1},
+    {"host": "chatgpt.com", "path": "proxy", "why": "всё остальное", "up": 230000, "down": 1900000, "count": 3},
+    {"host": "online.sberbank.ru", "path": "direct", "why": "российские сайты", "up": 41000, "down": 880000, "count": 2},
+    {"host": "example-bank.ru", "path": "direct", "why": "умный маршрут: не пускает через VPN", "up": 9000, "down": 120000, "count": 1}
+  ],
   "import": {"running": false, "message": null, "error": null, "offer": null},
   "routing": {
     "preset": "all", "via_zapret": true, "bypass": "direct",

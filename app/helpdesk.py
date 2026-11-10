@@ -124,15 +124,15 @@ def normalize_domain(text: str) -> str | None:
     return value if value and _DOMAIN.match(value) else None
 
 
-def check_site(domain: str, **context) -> dict:
+def check_site(domain: str, pickable: bool = False, **context) -> dict:
     """«Рентген сайта»: на каком шаге он не открывается (DNS, соединение, имя сайта, обрыв после 16 КБ, ответ),
     открывается ли через свой VPN и что с этим сделать. context — siteprobe.inspect: bind, vpn_opener,
-    zapret, own_vpn, network_mode."""
+    zapret, own_vpn, network_mode; pickable — обходу можно подобрать стратегию для сайта (права и пакет есть)."""
     from . import siteprobe
     name = normalize_domain(domain)
     if not name:
         return {"ok": False, "error": "Введите адрес сайта, например example.com"}
-    found = siteprobe.verdict(siteprobe.inspect(name, **context))
+    found = siteprobe.verdict(siteprobe.inspect(name, **context), pickable=pickable)
     return {"ok": True, "domain": name, **found, "can_add": "add_site" in found["fixes"]}
 
 

@@ -349,6 +349,9 @@ class FakeSampler:
     def totals(self):
         return self.up, self.down
 
+    def conns(self):
+        return list(getattr(self, "connections", []))
+
     def snapshot(self):
         return {"stats": {"up": self.up, "down": self.down, "up_rate": 1.0, "down_rate": 2.0, "connections": 3},
                 "history": [[1, 1.0, 2.0]], "now": dict(self.now)}

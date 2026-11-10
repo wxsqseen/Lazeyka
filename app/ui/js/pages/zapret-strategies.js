@@ -57,6 +57,59 @@
     return btn;
   }
 
+  /* ---------- Обход по сервисам (2.0) ---------- */
+
+  const GROUP_NAMES = { youtube: 'YouTube', discord: 'Discord' };
+
+  function groupList(entries) {
+    return entries.map(([group, item]) => `${GROUP_NAMES[group] || group} — «${item.label || item.id}»`).join(', ');
+  }
+
+  /** Что собрано по сервисам и что подбор советует собрать; свои стратегии сайтов и подбор для одного. */
+  function renderGroups(data) {
+    const applied = Object.entries(data.applied || {});
+    const suggested = Object.entries(data.suggested || {});
+    const sites = Object.entries(data.sites || {});
+    const out = [];
+    if (data.pick && data.pick.running) out.push(h('p', { class: 'muted' }, h('span', { class: 'spinner spinner--inline', 'aria-hidden': 'true' }), data.pick.message || 'Подбираем…'));
+    if (sites.length) {
+      out.push(h('div', { class: 'strategy-sites' },
+        h('p', { class: 'strategy-sites__title', text: 'Свои стратегии сайтов' }),
+        h('ul', { class: 'strategy-sites__list' }, sites.map(([domain, item]) => h('li', { class: 'strategy-sites__item' },
+          h('span', { class: 'strategy-sites__name', text: domain }),
+          h('span', { class: 'strategy-sites__label', text: `«${item.label || item.id}»` }),
+          ui.actionButton({
+            method: 'zapret_site_forget', args: [domain], key: `zapret_site_forget:${domain}`, icon: 'x', kind: 'ghost', size: 'sm',
+            ariaLabel: `Снять свою стратегию у ${domain}`, title: 'Снова общая стратегия', success: `${domain} — снова на общей стратегии`,
+          }).el)))));
+    }
+    if (applied.length) {
+      out.push(ui.callout({
+        tone: 'info',
+        title: 'Обход собран по сервисам',
+        text: `${groupList(applied)}; остальное — «${data.baseLabel}».`,
+        actions: ui.actionButton({
+          method: 'zapret_set_groups', args: [{}], key: 'zapret_set_groups', label: 'Одна стратегия на всё', size: 'sm',
+          success: 'Снова одна стратегия на всё',
+        }).el,
+      }));
+    }
+    if (suggested.length) {
+      const next = {};
+      for (const [group, item] of applied.concat(suggested)) next[group] = item.id;
+      out.push(ui.callout({
+        tone: 'ok',
+        title: 'Можно собрать обход по сервисам',
+        text: `По итогам подбора ${suggested.map(([group, item], i) => `${GROUP_NAMES[group] || group}${i ? ' —' : ' лучше открывается'} с «${item.label || item.id}»`).join(', ')}, чем с «${data.baseLabel}». Остальные сайты останутся на ней.`,
+        actions: ui.actionButton({
+          method: 'zapret_set_groups', args: [next], key: 'zapret_set_groups', label: 'Собрать по сервисам',
+          kind: 'primary', size: 'sm', success: 'Обход собран по сервисам',
+        }).el,
+      }));
+    }
+    return out.length ? out : null;
+  }
+
   function createStrategySection() {
     let query = '';
     let pendingId = null;
@@ -105,12 +158,22 @@
       subtitle: 'Набор приёмов, которым zapret обходит блокировки и замедление. Не открывается что-то — выберите другую или запустите подбор.',
       actions: searchBox,
     });
-    card.body.append(grid.el);
+    const groups = ui.slot(renderGroups, { cls: 'strategy-groups' });
+    card.body.append(groups.el, grid.el);
 
     function render() {
       if (!latest) return;
       const zapret = latest.zapret || {};
       const items = Array.isArray(zapret.strategies) ? zapret.strategies : [];
+      const base = items.find((item) => item.id === zapret.strategy);
+      const groupState = zapret.groups && typeof zapret.groups === 'object' ? zapret.groups : {};
+      groups.update({
+        sites: groupState.sites || {},
+        pick: groupState.pick || null,
+        applied: groupState.applied || {},
+        suggested: zapret.available === false ? {} : groupState.suggested || {},
+        baseLabel: base ? base.label || base.id : String(zapret.strategy || ''),
+      });
       const ratings = Object.create(null);
       for (const item of items) ratings[item.id] = texts.strategyRating(zapret, item.id);
       grid.update({

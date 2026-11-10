@@ -131,6 +131,7 @@ def test_rescue_starts_itself_when_no_server_answers_and_provider_cuts(tmp_path)
     assert world.store.server(sid).mask["fragment"] is True
     assert notes[-1][0] == "info", "сама сменила подключение — отчёт, а не тревога"
     world.store.server(sid).mask = None
+    assert m.wait_idle(5) and wait_for(lambda: m._session is not None), "маскировка нашлась — VPN переподключился"
     m._switch_to_fastest(m._session)
     assert m.snapshot()["rescue"]["found"] == "дробление TLS", "в этой сети уже пробовала — не повторяет"
     m.on_network_change()

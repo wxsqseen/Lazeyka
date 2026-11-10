@@ -331,9 +331,10 @@ def _steps(f: Facts) -> list[dict]:
 _DNS_NOTE = "Ещё провайдер подменяет адрес сайта — включите DNS через HTTPS (проверка DNS ниже)."
 
 
-def verdict(f: Facts) -> dict:
-    """Факты → {verdict, advice, steps, fixes}. fixes — кнопки: add_site («Мои сайты» обхода), vpn_site
-    (свой VPN: «только через VPN»), direct_site (свой VPN: «мимо VPN»)."""
+def verdict(f: Facts, pickable: bool = False) -> dict:
+    """Факты → {verdict, advice, steps, fixes}. fixes — кнопки: add_site («Мои сайты» обхода), pick_site (подобрать
+    стратегию обхода для сайта, 2.0; pickable — есть права и пакет), vpn_site (свой VPN: «только через VPN»),
+    direct_site (свой VPN: «мимо VPN»)."""
     steps = _steps(f)
     dns_note = f" {_DNS_NOTE}" if f.dns == "spoofed" else ""
 
@@ -364,15 +365,18 @@ def verdict(f: Facts) -> dict:
                           "хостингах (обрыв после ~16 КБ).",
                 "cert": "Вместо сайта отвечает провайдер: сертификат не этого сайта (страница-заглушка)."}[reason]
         via = " Через ваш VPN сайт открывается." if vpn_works(f.vpn) else ""
+        pick = ["pick_site"] if pickable and f.zapret in ("skips", "handles") else []
         if f.zapret == "skips":
-            return out(reason, f"{what} Обход этот сайт сейчас не обрабатывает — добавьте его в «Мои сайты»."
-                       + via + dns_note, ["add_site"] + vpn_fix)
+            return out(reason, f"{what} Обход этот сайт сейчас не обрабатывает — добавьте его в «Мои сайты»"
+                       + (" или подберите для него свою стратегию." if pick else ".") + via + dns_note,
+                       ["add_site", *pick] + vpn_fix)
         if f.zapret == "off":
             return out(reason, f"{what} Добавьте сайт в «Мои сайты» и включите обход." + via + dns_note,
                        ["add_site"] + vpn_fix)
         if f.zapret == "handles":
             return out(reason, f"{what} Обход этот сайт обрабатывает, но нынешняя стратегия его не пробивает." +
-                       (" Надёжнее — через свой VPN." if vpn_fix else "") + via + dns_note, vpn_fix)
+                       (" Подберите для сайта свою стратегию" + (" или пустите его через свой VPN." if vpn_fix else ".")
+                        if pick else " Надёжнее — через свой VPN." if vpn_fix else "") + via + dns_note, pick + vpn_fix)
         return out(reason, what + via + dns_note, vpn_fix)
     if reason == "geo":
         return out("geo", "Сайт сам не пускает пользователей из России (ответ 451) — обход тут не поможет, нужен VPN."

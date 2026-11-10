@@ -657,3 +657,57 @@ def test_online_counts_vpn_kill_switch_as_connected(tmp_path, monkeypatch):
     core._direct_source = no_direct
     binds.clear()
     assert core._online() is True and binds == [None], "пути мимо VPN нет — проверка через него"
+
+
+@pytest.fixture
+def pick_core(watchdog_core):
+    core = watchdog_core
+    core.zapret.strategies = [SimpleNamespace(id="general", usable=True), SimpleNamespace(id="general (ALT)", usable=True)]
+    core.zapret.composable = lambda base, groups: list(groups)
+    core.tester.pick_state, core.tester.pick_running = {"running": False}, False
+    core.picks, core.fixes = [], []
+    core.tester.start_pick = lambda kind, key: core.picks.append((kind, key))
+    core.tester.start_fix = lambda: core.fixes.append(1)
+    return core
+
+
+def test_watchdog_auto_picks_only_for_the_broken_service(pick_core):
+    """2.0: перестал открываться один Discord — стратегия подбирается только для него; нашлась — плашка снята."""
+    core = pick_core
+    core._watchdog_check("auto")
+    core._watchdog_check("auto")
+    assert core.picks == [("group", "discord")] and core.fixes == []
+    assert "только для него" in _alert(core, "watchdog")["text"]
+    core.tester.pick_state = {"running": False, "kind": "group", "key": "discord", "found": "general (ALT)",
+                              "finished_at": 5.0, "message": "«ALT» открывает Discord — теперь он на ней"}
+    core._reconcile_pick()
+    assert _alert(core, "watchdog") is None
+    assert any("открывает Discord" in n["text"] for n in _transient(core)), "отчёт: Лазейка сама сменила стратегию"
+
+
+def test_watchdog_falls_back_to_full_fix_when_service_pick_finds_nothing(pick_core):
+    core = pick_core
+    core._watchdog_check("auto")
+    core._watchdog_check("auto")
+    core.tester.pick_state = {"running": False, "kind": "group", "key": "discord", "found": None, "finished_at": 6.0}
+    core._reconcile_pick()
+    assert core.fixes == [1] and "для всего" in _alert(core, "watchdog")["text"]
+    core._reconcile_pick()
+    assert core.fixes == [1], "тот же итог — второй раз не запускаем"
+
+
+def test_watchdog_ask_offers_pick_for_one_service_and_full_fix_for_both(pick_core):
+    core = pick_core
+    core._watchdog_check("ask")
+    core._watchdog_check("ask")
+    assert _alert(core, "watchdog")["action"] == {"label": "Подобрать для Discord", "call": "zapret_pick",
+                                                  "args": ["group", "discord"]}
+    core.sites.update(youtube=False)
+    core._watchdog_check("ask")
+    core._watchdog_check("ask")
+    assert _alert(core, "watchdog")["action"]["call"] == "zapret_fix", "сломалось оба — полный подбор"
+    core.zapret.composable = lambda base, groups: []        # ALT5 и подобные: собрать нельзя
+    core.sites.update(youtube=True)
+    core._watchdog_check("ask")
+    core._watchdog_check("ask")
+    assert _alert(core, "watchdog")["action"]["call"] == "zapret_fix"

@@ -418,9 +418,10 @@
     const connection = createConnectionCard(() => scrollTo(servers.el));
     const add = sections.createAddSection();
     const routing = sections.createRoutingSection();
+    const map = sections.createMapSection();
     const more = sections.createMoreSection();
-    const all = [add, connection, servers, routing, more];
-    const anchors = { servers: servers.el, add: add.el, routing: routing.el, more: more.el, connection: connection.el };
+    const all = [add, connection, servers, map, routing, more];
+    const anchors = { servers: servers.el, add: add.el, routing: routing.el, more: more.el, connection: connection.el, map: map.el };
 
     const el = h('div', { class: 'page__inner page__inner--vpnclient' }, header.el, banner.el, all.map((section) => section.el));
 
@@ -463,6 +464,7 @@
         setHidden(servers.el, empty || !snap.present);
         setHidden(add.el, !snap.present);
         setHidden(routing.el, !snap.present);
+        setHidden(map.el, empty || !snap.present);
         setHidden(more.el, !snap.present);
         if (!snap.present) return;
         for (const section of all) section.update(state);

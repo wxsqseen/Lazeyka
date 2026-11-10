@@ -125,6 +125,7 @@
   function create() {
     const header = ui.pageHeader({ title: 'Главная', subtitle: '' });
     const notices = Lz.notices.create();
+    const autopilot = Lz.homeCards.createAutopilotHero();
     const zapretHero = Lz.homeCards.createZapretHero();
     const telegramHero = Lz.homeCards.createTelegramHero();
     const vpnclientHero = Lz.homeCards.createVpnClientHero();
@@ -133,6 +134,8 @@
     const el = h('div', { class: 'page__inner page__inner--home' },
       header.el,
       notices.el,
+      autopilot.el,
+      h('p', { class: 'home-more', text: 'Подробно — по частям' }),
       h('div', { class: 'hero-grid' }, zapretHero.el, telegramHero.el, vpnclientHero.el),
       vpnclientLine.el,
       vpnLine.el);
@@ -148,6 +151,7 @@
     function update(state) {
       setText(header.subtitleEl, summary(state));
       notices.update(state.notices);
+      autopilot.update(state);
       zapretHero.update(state);
       telegramHero.update(state);
       updateVpnClient(state);

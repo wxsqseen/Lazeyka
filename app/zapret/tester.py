@@ -23,9 +23,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from .. import paths, winutil
+from .. import paths, siteprobe, winutil
 from ..errors import UserError
-from . import lists, netcfg
+from . import compose, lists, netcfg
 from .runner import RunnerError, WinwsProcess, foreign_winws
 
 if TYPE_CHECKING:
@@ -75,6 +75,8 @@ CONTROL_TIMEOUT = 4
 DEFAULT_CANDIDATES = ["general", "general (ALT)", "general (ALT2)", "general (FAKE TLS AUTO)",
                       "general (SIMPLE FAKE)", "general (ALT5)"]
 MAX_CANDIDATES = 6
+PICK_MAX = 12                     # подбор для одного сервиса или сайта: столько стратегий, лидеры подбора — первыми
+GROUP_NAMES = {"discord": "Discord", "youtube": "YouTube"}
 
 
 @dataclass
@@ -413,6 +415,10 @@ class StrategyTester:
         self._start_lock = threading.Lock()
         self.fix_state: dict = self._empty_fix()
         self._fix_thread: threading.Thread | None = None
+        # Подбор для одного сервиса (kind="group") или сайта (kind="site"): остальной обход при пробах — как был.
+        self.pick_state: dict = {"running": False, "kind": None, "key": None, "current": None, "tried": [],
+                                 "found": None, "message": None, "finished_at": None}
+        self._pick_thread: threading.Thread | None = None
         # Адрес прямого подключения, если работает VPN в интернет: проверки идут мимо туннеля.
         # NoDirectPath — туннель есть, а прямого пути нет.
         self.source: Callable[[], str | None] = lambda: None
@@ -444,7 +450,7 @@ class StrategyTester:
 
     def start(self, kind: str, ids: list[str] | None) -> None:
         with self._start_lock:
-            if self.running or self.fix_running:
+            if self.running or self.fix_running or self.pick_running:
                 raise UserError("Подбор уже идёт")
             if kind not in ("standard", "dpi"):
                 raise UserError("Неизвестный вид проверки")
@@ -518,7 +524,8 @@ class StrategyTester:
                     break
                 self.state["current"] = strategy.id
                 log.info("Подбор: проверяю «%s»", strategy.label)
-                proc = WinwsProcess(z.winws_exe, z.runtime_args(strategy, record=False), label=f"тест {strategy.label}")
+                proc = WinwsProcess(z.winws_exe, z.runtime_args(strategy, record=False, composed=False),
+                                    label=f"тест {strategy.label}")
                 try:
                     proc.start(ready_timeout=5)
                     time.sleep(0.5)
@@ -637,6 +644,20 @@ class StrategyTester:
                 results, finished = report["results"], report["at"]
         return results, finished
 
+    def group_suggestion(self, base: str | None) -> dict[str, str]:
+        """Обход по сервисам: группа → стратегия, лучшая для неё по последнему стандартному подбору, если это не base.
+        Пересчёт — только когда сменился подбор или base: отчёт с диска не читается каждую секунду."""
+        key = (self.state.get("kind"), self.state.get("finished_at"), base)
+        if getattr(self, "_groups_key", None) != key:
+            results, _finished = self._last_results()
+            bests = compose.group_bests(results, base)
+            check = getattr(self.zapret, "composable", None)
+            if bests and base and callable(check):
+                fits = set(check(base, bests))    # ALT5 и подобные: профиля сервиса нет — советовать нечего
+                bests = {g: sid for g, sid in bests.items() if g in fits}
+            self._groups_key, self._groups_cache = key, bests
+        return dict(self._groups_cache)
+
     def best_known(self) -> tuple[str | None, dict[str, float], float | None]:
         """Лучшая стратегия и оценки по последнему стандартному подбору (в том числе прошлых запусков)."""
         results, finished = self._last_results()
@@ -656,7 +677,7 @@ class StrategyTester:
 
     def start_fix(self) -> None:
         with self._start_lock:
-            if self.running or self.fix_running:
+            if self.running or self.fix_running or self.pick_running:
                 raise UserError("Подбор уже идёт")
             if not self.zapret.is_admin or self.zapret.pack is None:
                 raise UserError(self.zapret.unavailable_reason or "Обход недоступен")
@@ -787,7 +808,7 @@ class StrategyTester:
                     break
                 self._set_fix(current=strategy.id, tried=self.fix_state["tried"] + [strategy.id],
                               message=f"Пробуем «{strategy.label}»…")
-                proc = WinwsProcess(z.winws_exe, z.runtime_args(strategy, record=False),
+                proc = WinwsProcess(z.winws_exe, z.runtime_args(strategy, record=False, composed=False),
                                     label=f"проба {strategy.label}")
                 try:
                     proc.start(ready_timeout=5)
@@ -808,6 +829,112 @@ class StrategyTester:
             if was_running and not apply:
                 self._resume(mode, "Обход не вернулся после пробы стратегий")
         return found if apply else None
+
+    # ------------------------------------------------------------ подбор для одного сервиса или сайта
+
+    @property
+    def pick_running(self) -> bool:
+        return bool(self._pick_thread and self._pick_thread.is_alive())
+
+    def start_pick(self, kind: str, key: str) -> None:
+        """Стратегии по очереди — только для одного сервиса (Discord, YouTube) или сайта, в составе нынешней сборки;
+        первая, с которой он открылся, остаётся за ним. Сначала — как есть: открывается — ничего не меняем."""
+        if kind not in ("group", "site") or (kind == "group" and key not in GROUP_NAMES) or not key:
+            raise UserError("Неизвестно, для чего подбирать")
+        with self._start_lock:
+            if self.running or self.fix_running or self.pick_running:
+                raise UserError("Подбор уже идёт")
+            if not self.zapret.is_admin or self.zapret.pack is None:
+                raise UserError(self.zapret.unavailable_reason or "Обход недоступен")
+            self.cancel_event.clear()
+            self.pick_state = {"running": True, "kind": kind, "key": key, "current": None, "tried": [], "found": None,
+                               "message": f"Проверяем {GROUP_NAMES.get(key, key)}…", "finished_at": None}
+            self._pick_thread = threading.Thread(target=self._pick, args=(kind, key), name="zapret-pick", daemon=True)
+            self._pick_thread.start()
+
+    def _pick_opens(self, kind: str, key: str, bind: str | None) -> bool:
+        if kind == "group":
+            return any(r["id"] == key and r["ok"] for r in quick_check(self.cancel_event, bind))
+        facts = siteprobe.inspect(key, bind=bind)
+        return facts.direct is not None and facts.direct.ok and siteprobe.blocked_reason(facts) is None
+
+    def _pick(self, kind: str, key: str) -> None:
+        z = self.zapret
+        name = GROUP_NAMES.get(key, key)
+        mode = z.mode
+        lists_dir = z.pack.path / "lists" if z.pack else None
+        was_running = paused = False
+        found = None
+        tried: list[str] = []
+        message = None
+        try:
+            bind = self._bind(strict=True)
+            base = z.strategy()
+            ranked = [s.id for s in self.candidates(exclude=base.id)]
+            usable = [s for s in z.strategies if s.usable and s.id != base.id]
+            order = sorted(usable, key=lambda s: ranked.index(s.id) if s.id in ranked else len(ranked))[:PICK_MAX]
+            with z.lock:
+                running = z.running()
+                was_running, z.guard_paused = running or z.guard_paused, False
+                z.mark_test(lists.detect_ipset_mode(lists_dir) if lists_dir else None,
+                            service_was_running=(mode == "service" and was_running))
+                z.paused_for_test = paused = True
+                if running:
+                    z.stop(remember=False)
+            for candidate in [None, *order]:
+                if self.cancel_event.is_set():
+                    break
+                label = "нынешняя сборка" if candidate is None else candidate.label
+                self.pick_state = dict(self.pick_state, current=None if candidate is None else candidate.id,
+                                       message=f"Пробуем {name}: {label}…")
+                override = None if candidate is None else {key: candidate.id}
+                proc = WinwsProcess(z.winws_exe, z.runtime_args(base, record=False, override=override),
+                                    label=f"проба {label}")
+                try:
+                    proc.start(ready_timeout=5)
+                    time.sleep(0.5)
+                    opens = self._pick_opens(kind, key, bind)
+                except RunnerError as exc:
+                    log.info("Проба «%s» для %s не запустилась: %s", label, name, exc)
+                    opens = False
+                finally:
+                    proc.stop()
+                if candidate is None and opens:
+                    message = f"{name} и так открывается — менять нечего."
+                    break
+                if candidate is not None:
+                    tried.append(candidate.id)
+                    self.pick_state = dict(self.pick_state, tried=list(tried))
+                if opens:
+                    found = candidate.id
+                    break
+            if self.cancel_event.is_set() and not found:
+                message = "Остановлено."
+        except NoDirectPath as exc:
+            message = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Подбор для %s не удался", name)
+            message = f"Не получилось: {exc}"
+        finally:
+            if paused:
+                self._end_pause()
+            try:
+                if found and kind == "group":
+                    z.set_group_strategies({**z.group_strategies(), key: found})
+                elif found:
+                    z.set_site_strategy(key, found)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Найденная стратегия для %s не сохранилась: %s", name, exc)
+                found, message = None, f"Найденная стратегия не сохранилась: {exc}"
+            if was_running:
+                self._resume(mode, "Обход не вернулся после подбора для " + name)
+            if found:
+                message = (f"«{_label(z, found)}» открывает {name} — теперь он на ней, остальной обход как был.")
+            elif message is None:
+                message = (f"Ни одна из {len(tried)} стратегий не открыла {name}: обход его не берёт. "
+                           "Поможет свой VPN.")
+            self.pick_state = dict(self.pick_state, running=False, current=None, found=found, message=message,
+                                   finished_at=time.time())
 
     def revert_fix(self) -> str:
         previous = self.fix_state.get("previous")

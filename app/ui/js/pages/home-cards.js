@@ -431,5 +431,113 @@
     return { el: h('div', { class: 'home-vpnc', hidden: true }, line, link.el) };
   }
 
-  Lz.homeCards = { createZapretHero, createTelegramHero, createVpnClientHero, createVpnClientLine };
+  /* ---------- Один выключатель (2.0): «Интернет без блокировок» ---------- */
+
+  const AUTOPILOT_KEY = 'autopilot_power';
+  const STOP_METHOD = { zapret: 'zapret_stop', vpnclient: 'vpnclient_stop', tg: 'tg_stop' };
+  const SERVICES = [['youtube', 'YouTube'], ['discord', 'Discord']];
+
+  /** Что включает выключатель: обход (если доступен), свой VPN (если есть серверы), Telegram-прокси. */
+  function autopilotParts(state) {
+    const parts = [];
+    const zapret = state.zapret || {};
+    if (zapret.available !== false) parts.push({ id: 'zapret', status: zapret.status || 'stopped' });
+    const vc = state.vpnclient;
+    if (vc && vc.available !== false && texts.vpncHasServers(vc)) parts.push({ id: 'vpnclient', status: vc.status || 'stopped' });
+    parts.push({ id: 'tg', status: (state.tg && state.tg.status) || 'stopped' });
+    return parts;
+  }
+
+  function autopilotStatus(parts) {
+    if (parts.some((part) => ['starting', 'stopping'].includes(part.status))) return 'starting';
+    return parts.length && parts.every((part) => part.status === 'running') ? 'running' : 'stopped';
+  }
+
+  /*
+   * Включение — по частям через их обычные окна («Работает VPN», «Уже работает другой VPN»): обход, затем свой VPN
+   * (обход перестроится под него сам), затем Telegram. Перед этим — самопочинка: сторож чинит сам, умный маршрут включён.
+   */
+  function autopilotToggle(status) {
+    return Lz.api.hold(AUTOPILOT_KEY, async () => {
+      const parts = autopilotParts(Lz.store.state || {});
+      if (status === 'running') {
+        for (const part of parts) await Lz.api.run({ method: STOP_METHOD[part.id], key: `${AUTOPILOT_KEY}:${part.id}` });
+        return;
+      }
+      await Lz.api.run({ method: 'autopilot_on', key: `${AUTOPILOT_KEY}:on`, silent: true });
+      for (const part of parts) {
+        if (part.status === 'running' || part.status === 'starting') continue;
+        if (part.id === 'zapret') await Lz.actions.startZapret();
+        else if (part.id === 'vpnclient') await Lz.vpnclientGate.start();
+        else await Lz.actions.startTelegram();
+      }
+    });
+  }
+
+  /** По строке на сервис: каким путём он сейчас идёт. ok: true — работает, false — нет, null — не проверяли. */
+  function serviceLines(state) {
+    const zapret = state.zapret || {};
+    const on = zapret.status === 'running';
+    const results = zapret.check && Array.isArray(zapret.check.results) ? zapret.check.results : [];
+    const groups = zapret.groups || {};
+    const applied = groups.applied || {};
+    const fixing = Boolean((zapret.fix && zapret.fix.running) || (groups.pick && groups.pick.running));
+    const lines = [];
+    if (zapret.available !== false) {
+      for (const [id, name] of SERVICES) {
+        const result = results.find((item) => item.id === id);
+        const via = applied[id] ? `через обход, своя стратегия «${applied[id].label}»` : 'через обход Лазейки';
+        let text = via;
+        if (!on) text = 'обход выключен';
+        else if (result && !result.ok) text = fixing ? 'не открывается — Лазейка подбирает стратегию' : 'не открывается';
+        lines.push({ name, ok: on && result ? Boolean(result.ok) : on ? null : false, text });
+      }
+      const sites = Object.keys(groups.sites || {}).length;
+      if (sites) lines.push({ name: 'Сайты', ok: on, text: `${fmt.count(sites, 'сайт', 'сайта', 'сайтов')} со своей стратегией обхода` });
+    }
+    const tg = state.tg || {};
+    lines.push({ name: 'Telegram', ok: tg.status === 'running', text: tg.status === 'running' ? 'через прокси Лазейки' : 'прокси выключен' });
+    const vc = state.vpnclient;
+    if (vc && vc.available !== false && texts.vpncHasServers(vc)) {
+      const smart = vc.routing && vc.routing.smart && Array.isArray(vc.routing.smart.sites) ? vc.routing.smart.sites.length : 0;
+      const running = vc.status === 'running';
+      lines.push({ name: 'Остальное', ok: running, text: running
+        ? `через ваш сервер${smart ? `; умный маршрут разложил ${fmt.count(smart, 'сайт', 'сайта', 'сайтов')}` : ''}`
+        : 'свой VPN выключен' });
+    }
+    return lines;
+  }
+
+  function renderServices(lines) {
+    return h('ul', { class: 'checklist autopilot__services' }, lines.map((line) => {
+      const state = line.ok === true ? 'is-ok' : line.ok === false ? 'is-fail' : 'is-skip';
+      const glyph = line.ok === true ? 'checkCircle' : line.ok === false ? 'xCircle' : 'alertCircle';
+      return h('li', { class: ['checklist__item', state] },
+        h('span', { class: 'checklist__icon', 'aria-hidden': 'true' }, icon(glyph, { size: 18 })),
+        h('span', { class: 'checklist__name', text: line.name }),
+        h('span', { class: 'sr-only', text: line.ok === true ? 'работает' : line.ok === false ? 'не работает' : 'не проверялось' }),
+        h('span', { class: 'checklist__detail', text: line.text }));
+    }));
+  }
+
+  function createAutopilotHero() {
+    const power = Lz.power.create({ label: 'Интернет без блокировок', busyKey: AUTOPILOT_KEY, onToggle: autopilotToggle });
+    const caption = Lz.power.caption(power, 'hero__caption');
+    const services = ui.slot(renderServices, { cls: 'autopilot__list' });
+    const card = ui.card({ title: 'Интернет без блокировок', cls: 'autopilot' });
+    card.body.append(h('div', { class: 'autopilot__body' },
+      h('div', { class: 'hero__power autopilot__power' }, power.el, caption.el),
+      h('div', { class: 'autopilot__side' },
+        h('p', { class: 'autopilot__lead', text: 'Одна кнопка: Лазейка сама включает обход, свой VPN и Telegram-прокси, сама подбирает стратегии и чинит то, что сломалось.' }),
+        services.el)));
+    return {
+      el: card.el,
+      update(state) {
+        power.update(autopilotStatus(autopilotParts(state)));
+        services.update(serviceLines(state));
+      },
+    };
+  }
+
+  Lz.homeCards = { createZapretHero, createTelegramHero, createVpnClientHero, createVpnClientLine, createAutopilotHero };
 })(window.Lz);

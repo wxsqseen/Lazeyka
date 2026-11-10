@@ -60,8 +60,24 @@ class _FakeZapret:
     def build_args(self, strategy):
         return [strategy.id]
 
-    def runtime_args(self, strategy, record=True):
-        return self.build_args(strategy)
+    def runtime_args(self, strategy, record=True, composed=True, override=None):
+        return [next(iter(override.values()))] if override else self.build_args(strategy)
+
+    def strategy(self, sid=None):
+        wanted = sid or self.settings.get("zapret", "strategy")
+        return next(s for s in self.strategies if s.id == wanted)
+
+    def group_strategies(self):
+        return dict(self.settings.get("zapret", "group_strategies") or {})
+
+    def set_group_strategies(self, groups):
+        self.settings.update(lambda d: d["zapret"].__setitem__("group_strategies", dict(groups)))
+
+    def site_strategies(self):
+        return dict(self.settings.get("zapret", "site_strategies") or {})
+
+    def set_site_strategy(self, domain, sid):
+        self.settings.update(lambda d: d["zapret"]["site_strategies"].__setitem__(domain, sid))
 
 
 @pytest.fixture
@@ -148,6 +164,56 @@ def test_fix_does_not_pick_under_mobile_whitelist(fake):
     st = t.fix_state
     assert st["stage"] == "failed" and "белому списку" in st["message"] and st["tried"] == []
     assert asked == [None] and z.settings.get("zapret", "strategy") == "general" and z.active == "general"
+
+
+def _wait_pick(t):
+    t._pick_thread.join(10)
+    assert not t.pick_running, "подбор для сервиса не закончился"
+
+
+def test_pick_for_one_service_keeps_the_rest(fake, monkeypatch):
+    """Discord не открывается на нынешней сборке: стратегии пробуются только для него, найденная — его, базовая
+    стратегия и YouTube как были, обход вернулся."""
+    z, t, _ = fake
+    z.start()
+    monkeypatch.setattr(tester, "quick_check", lambda cancel=None, bind=None: [
+        {"id": "discord", "label": "Discord", "ok": z.active == "general (ALT2)", "detail": ""},
+        {"id": "youtube", "label": "YouTube", "ok": True, "detail": ""}])
+    t.start_pick("group", "discord")
+    _wait_pick(t)
+    st = t.pick_state
+    assert st["found"] == "general (ALT2)" and "открывает Discord" in st["message"]
+    assert st["tried"][-1] == "general (ALT2)" and "general" not in st["tried"], "базовую не пробуем"
+    assert z.group_strategies() == {"discord": "general (ALT2)"} and z.settings.get("zapret", "strategy") == "general"
+    assert z.active == "general" and z.marks == 0 and not z.paused_for_test, "обход вернулся как был"
+
+
+def test_pick_does_nothing_when_it_already_opens_or_nothing_helps(fake, monkeypatch):
+    z, t, _ = fake
+    monkeypatch.setattr(tester, "quick_check", lambda cancel=None, bind=None: [
+        {"id": "youtube", "label": "YouTube", "ok": z.active == "general", "detail": ""}])
+    t.start_pick("group", "youtube")
+    _wait_pick(t)
+    assert t.pick_state["found"] is None and "и так открывается" in t.pick_state["message"]
+    assert t.pick_state["tried"] == [] and z.group_strategies() == {}
+    monkeypatch.setattr(tester, "quick_check", lambda cancel=None, bind=None: [
+        {"id": "youtube", "label": "YouTube", "ok": False, "detail": ""}])
+    t.start_pick("group", "youtube")
+    _wait_pick(t)
+    assert t.pick_state["found"] is None and "Ни одна из 3 стратегий" in t.pick_state["message"]
+    assert z.group_strategies() == {}
+
+
+def test_pick_for_a_site_saves_its_strategy(fake, monkeypatch):
+    from app.siteprobe import Attempt, Facts
+    z, t, _ = fake
+    monkeypatch.setattr(tester.siteprobe, "inspect", lambda domain, bind=None: Facts(
+        domain, direct=Attempt("ok", 200) if z.active == "general (ALT)" else Attempt("tls")))
+    t.start_pick("site", "instagram.com")
+    _wait_pick(t)
+    assert t.pick_state["found"] == "general (ALT)" and z.site_strategies() == {"instagram.com": "general (ALT)"}
+    with pytest.raises(Exception, match="Неизвестно"):
+        t.start_pick("group", "netflix")
 
 
 def test_revert_returns_previous(fake):

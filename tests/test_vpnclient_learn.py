@@ -261,3 +261,34 @@ def test_manager_wires_learner_into_plan_sampler_and_settings(tmp_path):
     assert json.loads(plan.learned_file.read_text(encoding="utf-8"))["rules"][0]["domain_suffix"] == [learn.PLACEHOLDER]
     assert m.snapshot()["routing"]["smart"]["enabled"] is False
     assert m.wait_idle(5) and len(world.processes) == starts, "умный маршрут переключается без перезапуска ядра"
+
+
+def test_connection_map_names_path_and_reason():
+    """Карта соединений (2.0): по сайту — путь и почему; формат rule — как у sing-box 1.14.3 вживую."""
+    conns = [
+        {"metadata": {"host": "rr4.googlevideo.com"}, "chains": ["direct", "bypass"], "upload": 10, "download": 9000,
+         "rule": "rule_set=[bypass-3] => route(bypass)"},
+        {"metadata": {"host": "rr4.googlevideo.com"}, "chains": ["direct", "bypass"], "upload": 5, "download": 1000,
+         "rule": "rule_set=[bypass-3] => route(bypass)"},
+        {"metadata": {"host": "www.instagram.com"}, "chains": ["srv-a", "proxy"], "upload": 1, "download": 500,
+         "rule": "rule_set=[learned] => route(proxy)"},
+        {"metadata": {"host": "bank.ru"}, "chains": ["direct"], "upload": 1, "download": 100,
+         "rule": "rule_set=[learned-direct] => route(direct)"},
+        {"metadata": {"host": "www.wikipedia.org"}, "chains": ["direct"], "upload": 1, "download": 50,
+         "rule": "domain_suffix=wikipedia.org => route(direct)"},
+        {"metadata": {"destinationIP": "1.2.3.4", "host": ""}, "chains": ["srv-a", "proxy"], "upload": 1, "download": 10,
+         "rule": "final"},
+        {"metadata": {"host": "x.com"}, "chains": ["srv-a", "proxy", "bypass"], "upload": 1, "download": 5,
+         "rule": "rule_set=[bypass-3] => route(bypass)"},     # обход упал — «через обход» идёт через сервер
+    ]
+    rows = learn.connection_map(conns)
+    assert [r["host"] for r in rows] == ["rr4.googlevideo.com", "www.instagram.com", "bank.ru", "www.wikipedia.org",
+                                         "1.2.3.4", "x.com"]
+    by = {r["host"]: (r["path"], r["why"], r["count"]) for r in rows}
+    assert by["rr4.googlevideo.com"] == ("bypass", "списки обхода", 2) and rows[0]["down"] == 10000
+    assert by["www.instagram.com"] == ("proxy", "умный маршрут", 1)
+    assert by["bank.ru"] == ("direct", "умный маршрут: не пускает через VPN", 1)
+    assert by["www.wikipedia.org"] == ("direct", "ваше правило для сайта", 1)
+    assert by["1.2.3.4"] == ("proxy", "всё остальное", 1)
+    assert by["x.com"] == ("proxy", "списки обхода", 1)
+    assert len(learn.connection_map(conns, limit=2)) == 2

@@ -192,6 +192,7 @@
       started_at: admin ? startedAt - 4320 : null,
       pack: { version: '1.10.3' },
       game_filter: { mode: 'disabled', tcp: '1024-65535', udp: '1024-65535' },
+      groups: { applied: {}, suggested: {}, sites: {}, pick: { running: false } },
       ipset: { mode: 'none', count: 33048 },
       service: { installed: false, running: false, strategy: null },
       conflicts: [
@@ -479,6 +480,19 @@
     return started.reduce((best, result) => (result.score > best.score ? result : best)).id;
   }
 
+  /** Как tester.group_suggestion: в стенде YouTube лучше с «ALT2», Discord — с «FAKE TLS AUTO» (если базовая другая). */
+  function suggestGroups() {
+    const zapret = state.zapret;
+    const label = (id) => (STRATEGIES.find((item) => item.id === id) || {}).label || id;
+    const wanted = { youtube: 'general (ALT2)', discord: 'general (FAKE TLS AUTO)' };
+    const suggested = {};
+    for (const [group, id] of Object.entries(wanted)) {
+      const applied = zapret.groups.applied[group];
+      if (id !== zapret.strategy && STRATEGY_IDS.includes(id) && !(applied && applied.id === id)) suggested[group] = { id, label: label(id) };
+    }
+    zapret.groups = { ...zapret.groups, suggested };
+  }
+
   function finishTest(cancelled) {
     const test = state.zapret.test;
     clearTimeout(testTimer);
@@ -488,6 +502,7 @@
     test.finished_at = nowSec();
     test.cancelled = Boolean(cancelled);
     test.best = bestResult(test.results);
+    suggestGroups();
     log('zapret', 'info', cancelled
       ? `Подбор остановлен на ${test.done} из ${test.total}`
       : `Подбор завершён, лучшая стратегия: ${test.best || 'не найдена'}`);
@@ -794,11 +809,73 @@
       return ok();
     },
 
+    autopilot_on() {
+      state.settings.watchdog = 'auto';
+      if (state.vpnclient && state.vpnclient.routing) {
+        state.vpnclient.routing.smart_route = true;
+        if (state.vpnclient.routing.smart) state.vpnclient.routing.smart.enabled = true;
+      }
+      return ok();
+    },
+
+    zapret_pick(kind, key) {
+      const denied = requireZapret();
+      if (denied) return denied;
+      const zapret = state.zapret;
+      if (zapret.groups.pick.running) return fail('Подбор уже идёт');
+      const name = { discord: 'Discord', youtube: 'YouTube' }[key] || key;
+      const label = (id) => (STRATEGIES.find((item) => item.id === id) || {}).label || id;
+      const steps = ['general (ALT2)', 'general (ALT3)', 'general (ALT)'];
+      zapret.groups = { ...zapret.groups, pick: { running: true, kind, key, current: null, tried: [], found: null, message: `Пробуем ${name}: нынешняя сборка…` } };
+      steps.forEach((id, i) => later(700 * (i + 1), () => {
+        zapret.groups = { ...zapret.groups, pick: { ...zapret.groups.pick, current: id, tried: steps.slice(0, i), message: `Пробуем ${name}: ${label(id)}…` } };
+      }));
+      later(700 * (steps.length + 1), () => {
+        const found = 'general (ALT)';
+        const pick = { running: false, kind, key, current: null, tried: steps, found, finished_at: nowSec(),
+          message: `«${label(found)}» открывает ${name} — теперь он на ней, остальной обход как был.` };
+        const groups = { ...zapret.groups, pick };
+        if (kind === 'site') groups.sites = { ...groups.sites, [key]: { id: found, label: label(found) } };
+        else groups.applied = { ...groups.applied, [key]: { id: found, label: label(found) } };
+        zapret.groups = groups;
+        log('zapret', 'info', pick.message);
+      });
+      return ok();
+    },
+
+    zapret_site_forget(domain) {
+      const denied = requireZapret();
+      if (denied) return denied;
+      const sites = { ...state.zapret.groups.sites };
+      delete sites[domain];
+      state.zapret.groups = { ...state.zapret.groups, sites };
+      return ok();
+    },
+
+    zapret_set_groups(groups) {
+      const denied = requireZapret();
+      if (denied) return denied;
+      const label = (id) => (STRATEGIES.find((item) => item.id === id) || {}).label || id;
+      const applied = {};
+      for (const [group, id] of Object.entries(groups || {})) {
+        if (!id) continue;
+        if (!STRATEGY_IDS.includes(id)) return fail(`Стратегия «${id}» не найдена`);
+        applied[group] = { id, label: label(id) };
+      }
+      const suggested = Object.fromEntries(Object.entries(state.zapret.groups.suggested || {})
+        .filter(([group, item]) => !(applied[group] && applied[group].id === item.id)));
+      state.zapret.groups = { ...state.zapret.groups, applied, suggested };
+      log('zapret', 'info', Object.keys(applied).length ? `Обход собран по сервисам: ${Object.keys(applied).join(', ')}` : 'Одна стратегия на всё');
+      if (state.zapret.status === 'running' || state.zapret.status === 'error') startZapret('сборка по сервисам');
+      return ok();
+    },
+
     zapret_set_strategy(id) {
       const denied = requireZapret();
       if (denied) return denied;
       if (!STRATEGY_IDS.includes(id)) return fail(`Стратегии «${id}» нет в пакете`);
       state.zapret.strategy = id;
+      state.zapret.groups = { ...state.zapret.groups, applied: {}, suggested: {} };   // выбрал человек — одна стратегия на всё
       log('zapret', 'info', `Выбрана стратегия ${id}`);
       if (state.zapret.status === 'running' || state.zapret.status === 'error') startZapret('смена стратегии');
       return ok();

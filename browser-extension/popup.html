@@ -12,17 +12,45 @@
   </header>
   <p id="status" role="status" aria-live="polite">Проверяем…</p>
   <button id="toggle" type="button" class="primary" disabled>Включить для браузера</button>
-  <label class="port">Порт локального прокси Лазейки
+  <fieldset class="modes">
+    <legend>Через что</legend>
+    <label><input type="radio" name="mode" value="lazeyka"> Свой VPN Лазейки</label>
+    <label><input type="radio" name="mode" value="proxy"> Свой прокси — без Лазейки</label>
+  </fieldset>
+  <label class="port" id="port-row">Порт локального прокси Лазейки
     <input id="port" type="number" min="1" max="65535" inputmode="numeric">
   </label>
+  <form class="proxy" id="proxy-row" hidden autocomplete="off">
+    <div class="row">
+      <label class="field field--scheme">Протокол
+        <select id="scheme">
+          <option value="http">HTTP</option>
+          <option value="https">HTTPS</option>
+          <option value="socks5">SOCKS5</option>
+          <option value="socks4">SOCKS4</option>
+        </select>
+      </label>
+      <label class="field field--grow">Адрес и порт
+        <input id="addr" type="text" spellcheck="false" placeholder="217.69.167.122:43915">
+      </label>
+    </div>
+    <div class="row">
+      <label class="field field--grow">Логин
+        <input id="user" type="text" spellcheck="false" placeholder="если есть">
+      </label>
+      <label class="field field--grow">Пароль
+        <input id="pass" type="password" spellcheck="false" placeholder="если есть">
+      </label>
+    </div>
+    <p class="hint" id="proxy-hint">Можно вставить строку от провайдера целиком — «ip:порт:логин:пароль», «логин:пароль@ip:порт» или «http://…» — поля заполнятся сами.</p>
+    <p class="hint bad" id="proxy-error" role="alert" hidden></p>
+    <p class="hint" id="proxy-saved" hidden></p>
+  </form>
   <details>
-    <summary>Как настроить Лазейку</summary>
-    <ol>
-      <li>В Лазейке откройте «Свой VPN» и выберите сервер нужной подписки.</li>
-      <li>В «Подключение» выберите режим «Только локальный прокси» и включите VPN.</li>
-      <li>Порт — в «Подробнее» Лазейки (обычно 20808). «Вход по паролю» должен быть выключен: браузер не умеет передавать пароль прокси SOCKS5.</li>
-    </ol>
-    <p>Через VPN пойдёт только этот браузер. Windows и другие программы ничего не заметят.</p>
+    <summary>Как настроить</summary>
+    <p><b>Свой прокси.</b> Выберите протокол, который указан у провайдера (чаще всего HTTP), вставьте адрес, логин и пароль. Лазейка при этом не нужна. При первом включении с логином браузер спросит разрешение подставлять пароль — нажмите «Разрешить».</p>
+    <p><b>Свой VPN Лазейки.</b> В Лазейке: «Свой VPN» → сервер → «Подключение» → режим «Только локальный прокси» → включить. Порт — в «Подробнее» (обычно 20808), «Вход по паролю» — выключен. Серверы VLESS, Hysteria2 и другие браузер сам не открывает — для них этот режим.</p>
+    <p>Через прокси пойдёт только этот браузер. Windows и другие программы ничего не заметят.</p>
   </details>
   <script src="popup.js"></script>
 </body>

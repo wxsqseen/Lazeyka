@@ -67,6 +67,8 @@ def defaults() -> dict:
         "zapret": {
             "pack": None,                 # версия активного пакета стратегий
             "strategy": "general",
+            "group_strategies": {},       # обход по сервисам (2.0): {"youtube": id, "discord": id} поверх strategy
+            "site_strategies": {},        # свои стратегии сайтов (2.0): {"instagram.com": id}
             "mode": "app",                # app | service
             "game_filter": {"mode": "disabled", "tcp": "1024-65535", "udp": "1024-65535"},
             "ipset_mode": None,           # None — как в пакете

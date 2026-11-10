@@ -130,6 +130,7 @@ def vpnclient_placeholder(settings: dict, reason: str) -> dict:
         "latency": {"running": False, "done": 0, "total": 0, "why": 0},
         "speed": {"running": False, "server": None, "mbps": None, "at": None},
         "rescue": {"running": False, "server": None, "found": None, "message": None, "at": None},
+        "map": [],
         "import": {"running": False, "message": None, "error": None, "offer": None},
         "routing": {**{k: vc.get(k) for k in _VC_ROUTING}, "bypass": "proxy", "bypass_note": None,
                     "rules": {"state": "idle", "updated_at": None, "stale": False, "items": [], "error": None},
@@ -473,6 +474,7 @@ class Core:
         if self.has_alert(WHITELIST_ALERT):
             self._recheck_whitelist()
         self._reconcile_fix()
+        self._reconcile_pick()
         self._reconcile_check()
 
     def _reconcile_fix(self) -> None:
@@ -504,6 +506,43 @@ class Core:
             self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)}, а подобрать стратегию не вышло. "
                                                    f"{reason}",
                            action={"label": "Найти и включить", "call": "zapret_fix", "args": []}, page="zapret")
+
+    def _pick_fits(self, group: str) -> bool:
+        """Сборка для группы возможна на нынешней базе (у ALT5 и подобных профиль «все сайты» — нет)."""
+        fits = getattr(self.zapret, "composable", None)
+        try:
+            other = next((s.id for s in self.zapret.strategies if s.usable and s.id != self.settings.get(
+                "zapret", "strategy")), None)
+            return bool(callable(fits) and other and group in fits(self.settings.get("zapret", "strategy"),
+                                                                 {group: other}))
+        except Exception:  # noqa: BLE001 — не знаем — полный подбор, как раньше
+            log.debug("Сборка для группы не проверена", exc_info=True)
+            return False
+
+    def _reconcile_pick(self) -> None:
+        """Подбор для одного сервиса, запущенный сторожем, закончился: нашёлся — плашка снята (и уведомление: Лазейка
+        сама сменила стратегию сервиса); нет — полный «Найти и включить», как раньше."""
+        tester = self.tester
+        pick = getattr(tester, "pick_state", None) or {}
+        finished = pick.get("finished_at")
+        group = getattr(self, "_wd_pick", None)
+        if not group or getattr(tester, "pick_running", False) or not finished or pick.get("key") != group:
+            return
+        if finished == getattr(self, "_pick_seen", None):
+            return
+        self._pick_seen, self._wd_pick = finished, None
+        if pick.get("found"):
+            self.clear_alert(WATCHDOG_ALERT)
+            self._wd_fixing = None
+            self.notify("info", str(pick.get("message") or ""))
+            return
+        what = getattr(self, "_wd_fixing", None) or group
+        self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)} — своей стратегии для него не нашлось, "
+                                               "подбираем рабочую стратегию для всего.", page="zapret")
+        try:
+            tester.start_fix()
+        except UserError as exc:
+            log.info("Полный подбор после подбора для %s не начат: %s", group, exc)
 
     def _recheck_guard(self) -> None:
         """Плашка «пропал интернет» висит, а обход работает — раз в минуту фоном пробуем проверочный
@@ -1137,6 +1176,9 @@ class Core:
             fp = self._zapret_fingerprint()
             results = [r for r in quick_check(bind=bind) if r["id"] in watch]
             failing = [r["label"] for r in results if not r["ok"]]
+            broken = [r["id"] for r in results if not r["ok"]]
+            # Один сервис из нескольких — и для него можно собрать свою стратегию на этой базе (не «все сайты»).
+            alone = (broken[0] if len(broken) == 1 and len(results) > 1 and self._pick_fits(broken[0]) else None)
             self.watchdog_state.update(last_at=time.time(), last_ok=not failing, failing=failing, vpn=False)
             self.tester.check_state = {"running": False, "at": time.time(), "results": results,
                                        "direct": bool(bind)}
@@ -1163,11 +1205,22 @@ class Core:
                 # Подбор при этих настройках и этой сети уже не помог: каждые 10 минут рвать обход новым
                 # перебором незачем — плашка с итогом висит, повтор — после перемен или по кнопке.
                 log.info("Сторож: %s по-прежнему не открывается, подбор при тех же условиях не повторяю", what)
+            elif mode == "auto" and alone:
+                # Сломался один сервис (2.0): стратегия только для него, остальной обход не трогаем.
+                self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)} — подбираем стратегию только для "
+                                                       "него, остальное не трогаем.", page="zapret")
+                self._wd_fixing, self._wd_pick = what, alone
+                self.tester.start_pick("group", alone)
             elif mode == "auto":
                 self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)} — подбираем рабочую стратегию.",
                                page="zapret")
                 self._wd_fixing = what
                 self.tester.start_fix()
+            elif alone:
+                self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)}. Подобрать стратегию только для "
+                                                       "него?", page="zapret",
+                               action={"label": f"Подобрать для {what}", "call": "zapret_pick",
+                                       "args": ["group", alone]})
             else:
                 self.set_alert(WATCHDOG_ALERT, "warn", f"{what} {_stopped(what)}. Найти рабочую стратегию?",
                                action={"label": "Найти и включить", "call": "zapret_fix", "args": []},
@@ -1255,6 +1308,7 @@ class Core:
                 "started_at": process.started_at if process else None,
                 "pack": {"version": z.pack.version if z.pack else None},
                 "game_filter": s["zapret"]["game_filter"],
+                "groups": self._groups_state(s),
                 "ipset": z.ipset_info(),
                 "service": z.service_info(),
                 "conflicts": self._conflicts,
@@ -1488,12 +1542,80 @@ class Core:
         return ok()
 
     def zapret_set_strategy(self, strategy_id: str) -> Result:
+        """Стратегию выбрал человек — для всего: сборка по сервисам снимается (тем же перезапуском)."""
         self._require_admin()
         if self.zapret.paused_for_test:
             return fail(TESTING_ERROR)   # сразу, а не уведомлением из фона
         self.zapret.strategy(strategy_id)
-        self.background("zapret-strategy", lambda: self.zapret.set_strategy(strategy_id),
-                        "Стратегия не применена")
+
+        def work() -> None:
+            self.settings.update(lambda d: d["zapret"].__setitem__("group_strategies", {}))
+            self.zapret.set_strategy(strategy_id)
+
+        self.background("zapret-strategy", work, "Стратегия не применена")
+        return ok()
+
+    def zapret_set_groups(self, groups: dict) -> Result:
+        """Обход по сервисам: {"youtube": id, "discord": id}; пусто — снова одна стратегия на всё."""
+        self._require_admin()
+        if self.zapret.paused_for_test:
+            return fail(TESTING_ERROR)
+        clean = {str(k): (str(v) if v else None) for k, v in dict(groups or {}).items()}
+        known = {st.id for st in self.zapret.strategies if st.usable}
+        bad = next((v for v in clean.values() if v and v not in known), None)
+        if bad:
+            return fail(f"Стратегия «{bad}» не найдена")
+        self.background("zapret-groups", lambda: self.zapret.set_group_strategies(clean), "Сборка по сервисам не применена")
+        return ok()
+
+    def _groups_state(self, s: dict) -> dict:
+        """state()["zapret"]["groups"]: что собрано по сервисам и что подбор советует собрать."""
+        z = self.zapret
+        labels = {st.id: st.label for st in z.strategies}
+        applied = getattr(z, "group_strategies", dict)()
+        suggest = getattr(self.tester, "group_suggestion", None)
+        try:
+            suggested = suggest(s["zapret"]["strategy"]) if callable(suggest) else {}
+        except Exception:  # noqa: BLE001 — совет не важнее остального состояния
+            log.debug("Совет по сборке обхода не получен", exc_info=True)
+            suggested = {}
+        suggested = {g: sid for g, sid in suggested.items() if applied.get(g) != sid}
+
+        def view(chosen: dict) -> dict:
+            return {g: {"id": sid, "label": labels.get(sid, sid)} for g, sid in chosen.items()}
+
+        sites = getattr(z, "site_strategies", dict)()
+        pick = dict(getattr(self.tester, "pick_state", None) or {"running": False})
+        return {"applied": view(applied), "suggested": view(suggested), "sites": view(sites), "pick": pick}
+
+    def autopilot_on(self) -> Result:
+        """Один выключатель (2.0): самопочинка — сторож чинит сам, умный маршрут своего VPN включён. Сами части
+        включает страница — через их обычные окна про VPN."""
+        self.settings.update(lambda d: d["zapret"].__setitem__("watchdog", "auto"))
+        vc = getattr(self, "vpnclient", None)
+        if vc is not None:
+            try:
+                vc.save_settings({"smart_route": True})
+            except Exception:  # noqa: BLE001 — самопочинка обхода важнее
+                log.warning("Умный маршрут не включён выключателем", exc_info=True)
+        return ok()
+
+    def zapret_pick(self, kind: str, key: str) -> Result:
+        """Подбор стратегии для одного сервиса (kind="group": discord | youtube) или сайта (kind="site": домен)."""
+        from .helpdesk import normalize_domain
+        self._require_admin()
+        if kind == "site":
+            key = normalize_domain(str(key)) or ""
+            if not key:
+                return fail("Некорректный адрес сайта")
+        self.tester.start_pick(str(kind), str(key))
+        return ok()
+
+    def zapret_site_forget(self, domain: str) -> Result:
+        """Своя стратегия сайта больше не нужна — он снова на общей."""
+        self._require_admin()
+        self.background("zapret-site", lambda: self.zapret.set_site_strategy(str(domain), None),
+                        "Стратегия сайта не снята")
         return ok()
 
     def zapret_set_game_filter(self, mode: str, tcp: str, udp: str) -> Result:
@@ -2125,6 +2247,7 @@ class Core:
         bind = self._probe_source()
         vc = getattr(self, "vpnclient", None)
         return check_site(name, bind=bind, vpn_opener=vc.probe_opener() if vc is not None else None,
+                          pickable=bool(self.is_admin and self.zapret.pack is not None),
                           zapret=self._zapret_handles(name), own_vpn=bool(vc is not None and vc.has_servers()),
                           network_mode=lambda: self._network_mode(bind))
 
